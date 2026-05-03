@@ -1,0 +1,5 @@
+{
+  "name": "CIERRES 1.0",
+  "description": "Aplicación para el registro y control de cierres de turnos contables, permitiendo comparar el saldo del sistema vs el conteo físico.",
+  "requestFramePermissions": []
+}

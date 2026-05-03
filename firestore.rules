@@ -1,0 +1,177 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId (UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string (optional)
+    //   - email: string (required, email format)
+    //   - role: string (required, enum: ['admin', 'user'])
+    //
+    // Collection: closures
+    // Document ID: auto-generated
+    // Fields:
+    //   - date: timestamp (required)
+    //   - responsible: string (required, max 100 chars)
+    //   - systemAmount: number (required)
+    //   - systemBalance: number (required)
+    //   - physicalAmount: number (required)
+    //   - difference: number (required)
+    //   - notes: string (optional, max 1000 chars)
+    //   - status: string (required, enum: ['safe', 'transit', 'bank'])
+    //   - createdBy: string (required, UID)
+    //
+    // Collection: movements
+    // Document ID: auto-generated
+    // Fields:
+    //   - date: timestamp (required)
+    //   - type: string (required, enum: ['inflow', 'outflow', 'transfer'])
+    //   - category: string (optional, max 100 chars)
+    //   - amount: number (required, positive)
+    //   - description: string (required, max 500 chars)
+    //   - createdBy: string (required, UID)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "noop1226@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'email', 'role']) &&
+             hasOnlyAllowedFields(['uid', 'displayName', 'email', 'role']) &&
+             data.uid is string &&
+             data.email is string && isValidEmail(data.email) &&
+             data.role in ['admin', 'user'];
+    }
+
+    function isValidClosure(data) {
+      return hasRequiredFields(['date', 'responsible', 'systemAmount', 'physicalAmount', 'difference', 'status', 'createdBy']) &&
+             // Allow id, createdAt, and tripId
+             hasOnlyAllowedFields(['id', 'date', 'responsible', 'systemAmount', 'systemBalance', 'physicalAmount', 'difference', 'notes', 'status', 'createdBy', 'createdAt', 'tripId']) &&
+             (data.date is timestamp || data.date is string) &&
+             data.responsible is string && data.responsible.size() <= 100 &&
+             data.systemAmount is number &&
+             data.physicalAmount is number &&
+             data.difference is number &&
+             data.status in ['safe', 'transit', 'bank'] &&
+             data.createdBy is string &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('tripId' in data) || data.tripId is string);
+    }
+
+    function isValidMovement(data) {
+      return hasRequiredFields(['date', 'type', 'amount', 'description', 'createdBy']) &&
+             hasOnlyAllowedFields(['id', 'date', 'type', 'category', 'subcategory', 'amount', 'description', 'createdBy', 'createdAt', 'from', 'to', 'source', 'telegramProvider', 'telegramRequiresReview', 'telegramConfidence', 'telegramReviewReasons', 'telegramRawExtraction', 'telegramChatId', 'telegramMessageId', 'telegramUserId', 'telegramUserName', 'telegramFirstName', 'telegramFileId', 'telegramFileUniqueId', 'telegramFilePath']) &&
+             (data.date is timestamp || data.date is string) &&
+             data.type in ['inflow', 'outflow', 'transfer', 'internal_transfer'] &&
+             data.amount is number && data.amount >= 0 &&
+             data.description is string && data.description.size() <= 500 &&
+             data.createdBy is string &&
+             (!('category' in data) || data.category == null || (data.category is string && data.category.size() <= 100)) &&
+             (!('subcategory' in data) || data.subcategory == null || (data.subcategory is string && data.subcategory.size() <= 100)) &&
+             (!('from' in data) || (data.from is string)) &&
+             (!('to' in data) || (data.to is string)) &&
+             (!('source' in data) || data.source is string) &&
+             (!('telegramProvider' in data) || data.telegramProvider is string) &&
+             (!('telegramRequiresReview' in data) || data.telegramRequiresReview is bool) &&
+             (!('telegramConfidence' in data) || data.telegramConfidence is number) &&
+             (!('telegramReviewReasons' in data) || data.telegramReviewReasons is list) &&
+             (!('telegramRawExtraction' in data) || data.telegramRawExtraction is map) &&
+             (!('telegramChatId' in data) || data.telegramChatId is string) &&
+             (!('telegramMessageId' in data) || data.telegramMessageId is number) &&
+             (!('telegramUserId' in data) || data.telegramUserId == null || data.telegramUserId is string) &&
+             (!('telegramUserName' in data) || data.telegramUserName == null || data.telegramUserName is string) &&
+             (!('telegramFirstName' in data) || data.telegramFirstName == null || data.telegramFirstName is string) &&
+             (!('telegramFileId' in data) || data.telegramFileId is string) &&
+             (!('telegramFileUniqueId' in data) || data.telegramFileUniqueId == null || data.telegramFileUniqueId is string) &&
+             (!('telegramFilePath' in data) || data.telegramFilePath is string) &&
+             (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    function isValidTrip(data) {
+      return hasRequiredFields(['startDate', 'description', 'status', 'createdBy', 'totalAmount']) &&
+             hasOnlyAllowedFields(['id', 'startDate', 'completionDate', 'description', 'notes', 'status', 'createdBy', 'totalAmount', 'createdAt']) &&
+             (data.startDate is timestamp || data.startDate is string) &&
+             data.description is string && data.description.size() <= 500 &&
+             data.status in ['in_transit', 'completed'] &&
+             data.createdBy is string &&
+             data.totalAmount is number &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+             (!('completionDate' in data) || (data.completionDate is timestamp || data.completionDate is string)) &&
+             (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role));
+    }
+
+    match /closures/{closureId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidClosure(request.resource.data) && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuthenticated() && isValidClosure(request.resource.data) && (isAdmin() || resource.data.createdBy == request.auth.uid);
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    match /movements/{movementId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidMovement(request.resource.data) && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuthenticated() && isValidMovement(request.resource.data) && (isAdmin() || resource.data.createdBy == request.auth.uid);
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    match /trips/{tripId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidTrip(request.resource.data) && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuthenticated() && isValidTrip(request.resource.data) && (isAdmin() || resource.data.createdBy == request.auth.uid);
+      allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

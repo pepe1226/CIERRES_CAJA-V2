@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and role information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin", "user"] }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "ShiftClosure": {
+      "title": "Shift Closure",
+      "description": "Daily shift closure record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "responsible": { "type": "string" },
+        "systemAmount": { "type": "number" },
+        "systemBalance": { "type": "number" },
+        "physicalAmount": { "type": "number" },
+        "difference": { "type": "number" },
+        "notes": { "type": "string" },
+        "status": { "type": "string", "enum": ["safe", "transit", "bank"] },
+        "createdBy": { "type": "string" },
+        "tripId": { "type": "string" }
+      },
+      "required": ["date", "responsible", "systemAmount", "physicalAmount", "difference", "status", "createdBy"]
+    },
+    "CollectionTrip": {
+      "title": "Collection Trip",
+      "description": "Record of a trip to collect cash from the store",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "completionDate": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" },
+        "notes": { "type": "string" },
+        "status": { "type": "string", "enum": ["in_transit", "completed"] },
+        "createdBy": { "type": "string" },
+        "totalAmount": { "type": "number" }
+      },
+      "required": ["startDate", "description", "status", "createdBy", "totalAmount"]
+    },
+    "Movement": {
+      "title": "Cash Movement",
+      "description": "Manual cash inflow, outflow or transfer",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "type": { "type": "string", "enum": ["inflow", "outflow", "transfer"] },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "description": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["date", "type", "amount", "description", "createdBy"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/closures/{closureId}": {
+      "schema": "ShiftClosure",
+      "description": "Collection of shift closures"
+    },
+    "/movements/{movementId}": {
+      "schema": "Movement",
+      "description": "Collection of cash movements"
+    },
+    "/trips/{tripId}": {
+      "schema": "CollectionTrip",
+      "description": "Collection of money collection trips"
+    }
+  }
+}
