@@ -87,7 +87,8 @@ export async function downloadTelegramPhoto(fileId: string) {
     file_id: fileId,
   });
 
-  const fileUrl = `https://api.telegram.org/file/bot${telegramBotToken}/${fileInfo.result.file_path}`;
+  const telegramFilePath = fileInfo.result.file_path;
+  const fileUrl = `https://api.telegram.org/file/bot${telegramBotToken}/${telegramFilePath}`;
   const imageResponse = await fetch(fileUrl);
 
   if (!imageResponse.ok) {
@@ -95,11 +96,30 @@ export async function downloadTelegramPhoto(fileId: string) {
   }
 
   const arrayBuffer = await imageResponse.arrayBuffer();
+  const contentType = imageResponse.headers.get("content-type") || "";
+
+  let mimeType = contentType.split(";")[0].trim().toLowerCase();
+
+  if (
+    !mimeType ||
+    mimeType === "application/octet-stream" ||
+    !mimeType.startsWith("image/")
+  ) {
+    const lowerPath = telegramFilePath.toLowerCase();
+
+    if (lowerPath.endsWith(".png")) {
+      mimeType = "image/png";
+    } else if (lowerPath.endsWith(".webp")) {
+      mimeType = "image/webp";
+    } else {
+      mimeType = "image/jpeg";
+    }
+  }
 
   return {
     imageBuffer: Buffer.from(arrayBuffer),
-    mimeType: imageResponse.headers.get("content-type") || "image/jpeg",
-    telegramFilePath: fileInfo.result.file_path,
+    mimeType,
+    telegramFilePath,
   };
 }
 
