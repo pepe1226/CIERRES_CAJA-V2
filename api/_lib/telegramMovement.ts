@@ -254,26 +254,29 @@ export async function extractFinancialDataFromImage(params: {
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
   const prompt = `
-Eres un asistente para una app de control, manejo y gestion de dinero en diferentes cajas.
+Regla especial para registros de bolsa/cierre:
 
-Analiza la imagen enviada por Telegram. Puede ser factura, recibo, comprobante, transferencia bancaria, captura de pantalla, nota de venta o comprobante escrito a mano.
+La mayoría de imágenes tendrán solamente:
+- fecha escrita a mano
+- valor o monto
+- responsable o nombre de persona
 
-Objetivo: extraer los datos para crear un movimiento de caja en Firestore.
+Ejemplo:
+03-05-26
+$45.15
+ESQ Yulexi
 
-Reglas:
-- Si parece venta, cobro, deposito o dinero recibido: tipo = "ingreso".
-- Si parece compra, gasto, pago o salida de dinero: tipo = "egreso".
-- Si parece movimiento entre cajas: tipo = "transferencia".
-- Si no estas seguro: tipo = "desconocido".
-- No inventes datos.
-- Si no detectas monto claro: monto = null.
-- Si no detectas fecha: fecha = null.
-- Si no detectas caja: caja = null.
-- La caja debe inferirse como caja principal, caja chica, transito o banco cuando sea posible.
-- Usa USD si no se ve otra moneda.
-- Si falta monto, fecha, caja o tipo claro, requiere_revision = true.
-- Si la confianza es menor a 0.85, requiere_revision = true.
-- La descripcion debe ser corta y util para una app de caja.
+En estos casos:
+- Interpretar la fecha como DD-MM-YY.
+- 03-05-26 significa 2026-05-03.
+- El monto es el valor escrito junto al símbolo $.
+- El responsable es el nombre escrito en la etiqueta.
+- El tipo debe ser "ingreso".
+- La caja debe ser "Principal".
+- La categoría debe ser "Cierre de caja".
+- Si fecha, monto y responsable están presentes, requiere_revision debe ser false.
+- No marcar como pendiente solo porque falte subcategoría.
+- No marcar como pendiente solo porque la fecha tenga año de dos dígitos.
 
 Texto adicional escrito junto con la foto:
 ${params.caption || "Sin texto adicional"}
