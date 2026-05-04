@@ -1,4 +1,4 @@
-import { getFirebaseAdminDb } from "../_lib/firebaseAdmin";
+import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import {
   buildMovementFromExtraction,
   downloadTelegramPhoto,
@@ -6,7 +6,7 @@ import {
   getTelegramConfig,
   getTelegramStatus,
   sendTelegramMessage,
-} from "../_lib/telegramMovement";
+} from "../_lib/telegramMovement.js";
 
 function getHeader(req: any, name: string): string | undefined {
   const value = req.headers?.[name.toLowerCase()] || req.headers?.[name];
