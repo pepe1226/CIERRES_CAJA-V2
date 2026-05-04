@@ -2,6 +2,11 @@ import { getFirebaseAdminStatus } from "../_lib/firebaseAdmin";
 import { getTelegramStatus } from "../_lib/telegramMovement";
 
 export default function handler(_req: any, res: any) {
+  const hasServiceAccount = Boolean(
+    process.env.FIREBASE_SERVICE_ACCOUNT_JSON ||
+    process.env.FIREBASE_SERVICE_ACCOUNT_BASE64
+  );
+
   const status = {
     ok: true,
     runtime: "vercel-serverless",
@@ -12,7 +17,7 @@ export default function handler(_req: any, res: any) {
       process.env.FIREBASE_PROJECT_ID &&
       process.env.FIRESTORE_DATABASE_ID &&
       process.env.FIREBASE_STORAGE_BUCKET &&
-      process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      hasServiceAccount
     ),
     telegram: {
       hasTelegramBotToken: Boolean(process.env.TELEGRAM_BOT_TOKEN),
@@ -29,7 +34,8 @@ export default function handler(_req: any, res: any) {
       firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || null,
       storageBucket: process.env.FIREBASE_STORAGE_BUCKET || null,
       hasServiceAccountJson: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON),
-      hasServiceAccountBase64: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64)
+      hasServiceAccountBase64: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64),
+      hasAnyServiceAccount: hasServiceAccount
     }
   };
 
