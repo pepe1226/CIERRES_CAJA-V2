@@ -1,17 +1,12 @@
+import { FieldValue } from "firebase-admin/firestore";
 import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import {
   buildMovementFromExtraction,
   downloadTelegramPhoto,
   extractFinancialDataFromImage,
   getTelegramConfig,
-  getTelegramStatus,
   sendTelegramMessage,
 } from "../_lib/telegramMovement.js";
-
-function getHeader(req: any, name: string): string | undefined {
-  const value = req.headers?.[name.toLowerCase()] || req.headers?.[name];
-  return Array.isArray(value) ? value[0] : value;
-}
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -39,101 +34,249 @@ function removeUndefinedDeep(value: any): any {
   return value;
 }
 
+function cleanResponsible(value: any): string {
+  const text = String(value || "SIN RESPONSABLE")
+    .replace(/^ESQ\s+/i, "")
+    .replace(/^RESPONSABLE\s*:?/i, "")
+    .replace(/^SR\.?\s*/i, "")
+    .replace(/^SRA\.?\s*/i, "")
+    .trim();
+
+  return (text || "SIN RESPONSABLE").toUpperCase().slice(0, 80);
+}
+
+function formatMoney(value: any) {
+  const number = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return number.toFixed(2);
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    return res.status(405).json({
+      ok: false,
+      error: "Method not allowed",
+    });
   }
 
-  const config = getTelegramConfig();
-  const secret = getHeader(req, "x-telegram-bot-api-secret-token");
+  const {
+    telegramSecretToken,
+    telegramAllowedChatId,
+  } = getTelegramConfig();
 
-  if (!config.telegramSecretToken || secret !== config.telegramSecretToken) {
-    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  const receivedSecret =
+    req.headers["x-telegram-bot-api-secret-token"] ||
+    req.headers["X-Telegram-Bot-Api-Secret-Token"];
+
+  if (
+    telegramSecretToken &&
+    String(receivedSecret || "") !== String(telegramSecretToken)
+  ) {
+    return res.status(401).json({
+      ok: false,
+      error: "Unauthorized",
+    });
   }
 
-  const body = getBody(req);
-  const message = body?.message || body?.edited_message;
-  const chatId = message?.chat?.id;
+  let body: any;
 
   try {
-    const status = getTelegramStatus();
+    body = getBody(req);
+  } catch (error) {
+    console.error("No se pudo leer el body de Telegram:", error);
 
-    if (!status.configured) {
-      if (chatId) {
-        await sendTelegramMessage(chatId, "Bot recibido, pero faltan variables de entorno en Vercel.");
-      }
-      return res.status(200).json({ ok: true, skipped: "missing_config", status });
-    }
+    return res.status(200).json({
+      ok: false,
+      error: "Invalid body",
+    });
+  }
 
-    if (!message) {
-      return res.status(200).json({ ok: true, skipped: "no_message" });
-    }
+  const message = body.message || body.edited_message;
 
-    if (config.telegramAllowedChatId && String(message.chat?.id) !== config.telegramAllowedChatId) {
-      return res.status(200).json({ ok: true, skipped: "chat_not_allowed" });
-    }
+  if (!message) {
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "No message",
+    });
+  }
 
-    const photos = message.photo;
-    if (!Array.isArray(photos) || photos.length === 0) {
-      return res.status(200).json({ ok: true, skipped: "no_photo" });
+  const chatId = message.chat?.id;
+
+  if (!chatId) {
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "No chat id",
+    });
+  }
+
+  if (
+    telegramAllowedChatId &&
+    String(chatId) !== String(telegramAllowedChatId)
+  ) {
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "Chat not allowed",
+    });
+  }
+
+  const photos = Array.isArray(message.photo) ? message.photo : [];
+
+  if (photos.length === 0) {
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "No photo",
+    });
+  }
+
+  const db = getFirebaseAdminDb();
+
+  const movementId = `telegram_${chatId}_${message.message_id}`;
+  const movementRef = db.collection("movements").doc(movementId);
+  const closureRef = db.collection("closures").doc(movementId);
+
+  try {
+    const existingClosure = await closureRef.get();
+
+    if (existingClosure.exists) {
+      await sendTelegramMessage(
+        chatId,
+        "Este registro de Telegram ya fue procesado anteriormente."
+      );
+
+      return res.status(200).json({
+        ok: true,
+        duplicate: true,
+        id: movementId,
+      });
     }
 
     const largestPhoto = photos.reduce((best: any, current: any) => {
-      return (current.file_size || 0) > (best.file_size || 0) ? current : best;
+      return (current.file_size || 0) > (best.file_size || 0)
+        ? current
+        : best;
     }, photos[0]);
 
-    const db = getFirebaseAdminDb();
-    const externalId = `telegram_${message.chat.id}_${message.message_id}`;
-    const movementRef = db.collection("movements").doc(externalId);
-    const existingMovement = await movementRef.get();
-
-    if (existingMovement.exists) {
-      return res.status(200).json({ ok: true, skipped: "duplicate", id: externalId });
-    }
-
     const downloaded = await downloadTelegramPhoto(largestPhoto.file_id);
+
     const extraction = await extractFinancialDataFromImage({
       imageBuffer: downloaded.imageBuffer,
       mimeType: downloaded.mimeType,
-      caption: message.caption,
+      caption: message.caption || "",
     });
 
     const movement = buildMovementFromExtraction(extraction, new Date());
 
     const firestoreMovement = removeUndefinedDeep({
-  ...movement,
-  telegramChatId: String(message.chat.id),
-  telegramMessageId: message.message_id,
-  telegramUserId: message.from?.id ? String(message.from.id) : null,
-  telegramUserName: message.from?.username || null,
-  telegramFirstName: message.from?.first_name || null,
-  telegramFileId: largestPhoto.file_id,
-  telegramFileUniqueId: largestPhoto.file_unique_id || null,
-  telegramFilePath: downloaded.telegramFilePath,
-});
+      ...movement,
+      telegramChatId: String(chatId),
+      telegramMessageId: message.message_id,
+      telegramUserId: message.from?.id ? String(message.from.id) : null,
+      telegramUserName: message.from?.username || null,
+      telegramFirstName: message.from?.first_name || null,
+      telegramFileId: largestPhoto.file_id,
+      telegramFileUniqueId: largestPhoto.file_unique_id || null,
+      telegramFilePath: downloaded.telegramFilePath,
+    });
 
-await movementRef.set(firestoreMovement);
+    await movementRef.set(firestoreMovement, { merge: true });
 
-    const estado = movement.telegramRequiresReview ? "PENDIENTE DE REVISION" : "CONFIRMADO";
-    const monto = typeof extraction.monto === "number" ? extraction.monto.toFixed(2) : "0.00";
-    const moneda = extraction.moneda || "USD";
+    const raw = firestoreMovement.telegramRawExtraction || {};
 
-    await sendTelegramMessage(
-      message.chat.id,
-      `Registro creado desde foto.\nTipo: ${extraction.tipo}\nMonto: ${moneda} ${monto}\nEstado: ${estado}`
+    const responsible = cleanResponsible(
+      raw.proveedor_cliente ||
+        raw.responsable ||
+        raw.descripcion ||
+        message.from?.first_name ||
+        firestoreMovement.telegramFirstName ||
+        "SIN RESPONSABLE"
     );
 
-    return res.status(200).json({ ok: true, id: externalId, extraction });
-  } catch (error) {
-    console.error("Error en /api/telegram/webhook:", error);
+    const amount =
+      typeof firestoreMovement.amount === "number" &&
+      Number.isFinite(firestoreMovement.amount)
+        ? firestoreMovement.amount
+        : 0;
 
-    if (chatId) {
-      await sendTelegramMessage(
-        chatId,
-        `No pude registrar esta foto automaticamente. Motivo: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
+    const closureData = removeUndefinedDeep({
+      createdAt: FieldValue.serverTimestamp(),
+      createdBy: firestoreMovement.createdBy || "telegram-bot",
 
-    return res.status(200).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      date: firestoreMovement.date,
+
+      responsible,
+
+      physicalAmount: amount,
+      systemAmount: 0,
+      systemBalance: 0,
+      difference: amount,
+
+      status: "safe",
+
+      source: "telegram",
+      note: firestoreMovement.description || "",
+
+      telegramChatId: String(chatId),
+      telegramMessageId: message.message_id,
+      telegramUserId: message.from?.id ? String(message.from.id) : null,
+      telegramUserName: message.from?.username || null,
+      telegramFirstName: message.from?.first_name || null,
+      telegramFileId: largestPhoto.file_id,
+      telegramFileUniqueId: largestPhoto.file_unique_id || null,
+      telegramFilePath: downloaded.telegramFilePath,
+      telegramConfidence: firestoreMovement.telegramConfidence || null,
+      telegramRequiresReview: firestoreMovement.telegramRequiresReview || false,
+      telegramRawExtraction: raw,
+    });
+
+    await closureRef.set(closureData, { merge: true });
+
+    const tipoTexto =
+      firestoreMovement.type === "inflow"
+        ? "ingreso"
+        : firestoreMovement.type === "outflow"
+          ? "egreso"
+          : "transferencia";
+
+    const estadoTexto = firestoreMovement.telegramRequiresReview
+      ? "PENDIENTE REVISION"
+      : "CONFIRMADO";
+
+    await sendTelegramMessage(
+      chatId,
+      [
+        "Registro creado desde foto.",
+        `Tipo: ${tipoTexto}`,
+        `Responsable: ${responsible}`,
+        `Monto: USD ${formatMoney(amount)}`,
+        `Estado: ${estadoTexto}`,
+      ].join("\n")
+    );
+
+    return res.status(200).json({
+      ok: true,
+      movementId,
+      closureId: movementId,
+      type: firestoreMovement.type,
+      amount,
+      responsible,
+      review: firestoreMovement.telegramRequiresReview,
+    });
+  } catch (error: any) {
+    console.error("Error procesando foto de Telegram:", error);
+
+    await sendTelegramMessage(
+      chatId,
+      `No pude registrar esta foto automaticamente. Motivo: ${
+        error?.message || String(error)
+      }`
+    );
+
+    return res.status(200).json({
+      ok: false,
+      error: error?.message || String(error),
+    });
   }
 }
