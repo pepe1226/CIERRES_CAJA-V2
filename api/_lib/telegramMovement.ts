@@ -179,28 +179,74 @@ function mapTipoToMovementType(extraction: TelegramFinancialExtraction): AppMove
 
 export function buildMovementFromExtraction(extraction: TelegramFinancialExtraction, fallbackDate: Date) {
   const { telegramCreatedByUid } = getTelegramConfig();
+
   const type = mapTipoToMovementType(extraction);
+
   const caja = normalizeCaja(extraction.caja) || "safe";
   const cajaOrigen = normalizeCaja(extraction.caja_origen) || caja;
   const cajaDestino = normalizeCaja(extraction.caja_destino);
 
-  const movementDate = extraction.fecha && !Number.isNaN(new Date(extraction.fecha).getTime())
-    ? new Date(extraction.fecha)
-    : fallbackDate;
+  const movementDate =
+    extraction.fecha && !Number.isNaN(new Date(extraction.fecha).getTime())
+      ? new Date(extraction.fecha)
+      : fallbackDate;
 
-  const amount = typeof extraction.monto === "number" && Number.isFinite(extraction.monto)
-    ? Math.max(0, extraction.monto)
-    : 0;
+  const amount =
+    typeof extraction.monto === "number" && Number.isFinite(extraction.monto)
+      ? Math.max(0, extraction.monto)
+      : 0;
 
-  const requiresReview =
-    extraction.requiere_revision ||
-    extraction.confianza_ia < 0.85 ||
-    !extraction.monto ||
-    extraction.tipo === "desconocido" ||
-    (!normalizeCaja(extraction.caja) && type !== "transfer" && type !== "internal_transfer");
+  const confidence = Number(extraction.confianza_ia || 0);
 
-  let from: CajaId | undefined;
-  let to: CajaId | undefined;
+  const hasValidAmount = amount > 0;
+
+  const hasValidDate =
+    typeof extraction.fecha === "string" &&
+    extraction.fecha.trim().length >= 8 &&
+    !Number.isNaN(new Date(extraction.fecha).getTime());
+
+  const hasResponsible =
+    Boolean(extraction.proveedor_cliente) ||
+    Boolean(extraction.descripcion);
+
+  const isSimpleCashBagRecord =
+    hasValidAmount &&
+    hasValidDate &&
+    hasResponsible &&
+    type === "inflow";
+
+  const hardReviewReasons = Array.isArray(extraction.razones_revision)
+    ? extraction.razones_revision.filter((reason: string) => {
+        const lower = reason.toLowerCase();
+
+        // En tus fotos normales estas razones NO deben mandar a revisión
+        if (lower.includes("fecha ambigua")) return false;
+        if (lower.includes("año de dos dígitos")) return false;
+        if (lower.includes("ano de dos digitos")) return false;
+        if (lower.includes("tipo de transacción inferido")) return false;
+        if (lower.includes("tipo de transaccion inferido")) return false;
+        if (lower.includes("recuento")) return false;
+        if (lower.includes("transferencia interna")) return false;
+        if (lower.includes("falta especificar caja")) return false;
+        if (lower.includes("falta caja")) return false;
+        if (lower.includes("falta categoría")) return false;
+        if (lower.includes("falta categoria")) return false;
+        if (lower.includes("subcategoría")) return false;
+        if (lower.includes("subcategoria")) return false;
+
+        return true;
+      })
+    : [];
+
+  const requiresReview = isSimpleCashBagRecord
+    ? false
+    : !hasValidAmount ||
+      extraction.tipo === "desconocido" ||
+      confidence < 0.6 ||
+      hardReviewReasons.length > 0;
+
+  let from: CajaId | null = null;
+  let to: CajaId | null = null;
 
   if (type === "inflow") {
     to = caja;
@@ -213,6 +259,44 @@ export function buildMovementFromExtraction(extraction: TelegramFinancialExtract
     from = cajaOrigen || "safe";
     to = cajaDestino || (from === "safe" ? "transit" : "safe");
   }
+
+  const category = extraction.categoria || "Cierre de caja";
+
+  const descriptionBase =
+    extraction.descripcion ||
+    `Registro de caja ${extraction.proveedor_cliente || ""}`.trim() ||
+    "MOVIMIENTO DESDE FOTO";
+
+  const descriptionPrefix = requiresReview ? "[REVISAR TELEGRAM] " : "[TELEGRAM] ";
+
+  const description = `${descriptionPrefix}${descriptionBase}`
+    .trim()
+    .toUpperCase()
+    .slice(0, 500);
+
+  return {
+    date: Timestamp.fromDate(movementDate),
+    type,
+    amount,
+    description,
+    createdBy: telegramCreatedByUid,
+    category,
+    subcategory: extraction.subcategoria || null,
+    from,
+    to,
+    createdAt: FieldValue.serverTimestamp(),
+    source: "telegram",
+    telegramProvider: "vercel",
+    telegramRequiresReview: requiresReview,
+    telegramConfidence: confidence,
+    telegramReviewReasons: requiresReview ? hardReviewReasons : [],
+    telegramRawExtraction: {
+      ...extraction,
+      requiere_revision: requiresReview,
+      razones_revision: requiresReview ? hardReviewReasons : [],
+    },
+  };
+}
 
   const descriptionPrefix = requiresReview ? "[REVISAR TELEGRAM] " : "[TELEGRAM] ";
   const description = `${descriptionPrefix}${extraction.descripcion || "MOVIMIENTO DESDE FOTO"}`
