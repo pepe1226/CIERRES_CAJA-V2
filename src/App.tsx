@@ -185,9 +185,12 @@ function AppContent() {
   const reportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+  const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+    try {
       if (firebaseUser) {
-        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        const userRef = doc(db, 'users', firebaseUser.uid);
+        const userDoc = await getDoc(userRef);
+
         if (userDoc.exists()) {
           setUser(userDoc.data() as UserProfile);
         } else {
@@ -197,16 +200,24 @@ function AppContent() {
             displayName: firebaseUser.displayName || '',
             role: 'user'
           };
-          await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
+
+          await setDoc(userRef, newUser);
           setUser(newUser);
         }
       } else {
         setUser(null);
       }
+    } catch (error) {
+      console.error('Error cargando usuario desde Firestore:', error);
+      alert('Login correcto, pero Firestore no permite cargar o crear el usuario. Revisa Firestore Database y Rules.');
+      setUser(null);
+    } finally {
       setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    }
+  });
+
+  return () => unsubscribe();
+}, []);
 
   useEffect(() => {
     const handleClick = () => setContextMenu(null);
