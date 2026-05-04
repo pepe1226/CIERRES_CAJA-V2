@@ -19,6 +19,26 @@ function getBody(req: any) {
   return req.body;
 }
 
+function removeUndefinedDeep(value: any): any {
+  if (Array.isArray(value)) {
+    return value.map(removeUndefinedDeep);
+  }
+
+  if (value && typeof value === "object") {
+    const cleaned: Record<string, any> = {};
+
+    for (const [key, childValue] of Object.entries(value)) {
+      if (childValue !== undefined) {
+        cleaned[key] = removeUndefinedDeep(childValue);
+      }
+    }
+
+    return cleaned;
+  }
+
+  return value;
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -80,17 +100,19 @@ export default async function handler(req: any, res: any) {
 
     const movement = buildMovementFromExtraction(extraction, new Date());
 
-    await movementRef.set({
-      ...movement,
-      telegramChatId: String(message.chat.id),
-      telegramMessageId: message.message_id,
-      telegramUserId: message.from?.id ? String(message.from.id) : null,
-      telegramUserName: message.from?.username || null,
-      telegramFirstName: message.from?.first_name || null,
-      telegramFileId: largestPhoto.file_id,
-      telegramFileUniqueId: largestPhoto.file_unique_id || null,
-      telegramFilePath: downloaded.telegramFilePath,
-    });
+    const firestoreMovement = removeUndefinedDeep({
+  ...movement,
+  telegramChatId: String(message.chat.id),
+  telegramMessageId: message.message_id,
+  telegramUserId: message.from?.id ? String(message.from.id) : null,
+  telegramUserName: message.from?.username || null,
+  telegramFirstName: message.from?.first_name || null,
+  telegramFileId: largestPhoto.file_id,
+  telegramFileUniqueId: largestPhoto.file_unique_id || null,
+  telegramFilePath: downloaded.telegramFilePath,
+});
+
+await movementRef.set(firestoreMovement);
 
     const estado = movement.telegramRequiresReview ? "PENDIENTE DE REVISION" : "CONFIRMADO";
     const monto = typeof extraction.monto === "number" ? extraction.monto.toFixed(2) : "0.00";
