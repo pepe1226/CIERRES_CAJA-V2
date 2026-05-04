@@ -15,23 +15,50 @@ function getBody(req: any) {
 }
 
 function removeUndefinedDeep(value: any): any {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
   if (Array.isArray(value)) {
-    return value.map(removeUndefinedDeep);
+    return value
+      .map(removeUndefinedDeep)
+      .filter((item) => item !== undefined);
   }
 
-  if (value && typeof value === "object") {
-    const cleaned: Record<string, any> = {};
+  if (typeof value !== "object") {
+    return value;
+  }
 
-    for (const [key, childValue] of Object.entries(value)) {
-      if (childValue !== undefined) {
-        cleaned[key] = removeUndefinedDeep(childValue);
-      }
+  // Muy importante:
+  // No tocar Date, Timestamp de Firestore ni FieldValue.serverTimestamp().
+  // Si los recorremos como objetos normales, se rompen y la app no puede usar date.toDate().
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value.toDate === "function") {
+    return value;
+  }
+
+  if (value.constructor && value.constructor !== Object) {
+    return value;
+  }
+
+  const cleaned: Record<string, any> = {};
+
+  for (const [key, childValue] of Object.entries(value)) {
+    const cleanedValue = removeUndefinedDeep(childValue);
+
+    if (cleanedValue !== undefined) {
+      cleaned[key] = cleanedValue;
     }
-
-    return cleaned;
   }
 
-  return value;
+  return cleaned;
 }
 
 function cleanResponsible(value: any): string {
