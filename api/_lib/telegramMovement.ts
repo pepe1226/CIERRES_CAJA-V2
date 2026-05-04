@@ -37,7 +37,11 @@ export function getTelegramStatus() {
   const config = getTelegramConfig();
 
   return {
-    configured: Boolean(config.telegramBotToken && config.telegramSecretToken && config.geminiApiKey),
+    configured: Boolean(
+      config.telegramBotToken &&
+        config.telegramSecretToken &&
+        config.geminiApiKey
+    ),
     hasTelegramBotToken: Boolean(config.telegramBotToken),
     hasTelegramSecretToken: Boolean(config.telegramSecretToken),
     hasGeminiApiKey: Boolean(config.geminiApiKey),
@@ -47,20 +51,27 @@ export function getTelegramStatus() {
   };
 }
 
-async function telegramApi<T>(method: string, payload: Record<string, unknown>): Promise<T> {
+async function telegramApi<T>(
+  method: string,
+  payload: Record<string, unknown>
+): Promise<T> {
   const { telegramBotToken } = getTelegramConfig();
 
   if (!telegramBotToken) {
     throw new Error("Falta TELEGRAM_BOT_TOKEN en Vercel.");
   }
 
-  const response = await fetch(`https://api.telegram.org/bot${telegramBotToken}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  const response = await fetch(
+    `https://api.telegram.org/bot${telegramBotToken}/${method}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }
+  );
 
   const data = await response.json();
+
   if (!response.ok || !data.ok) {
     throw new Error(`Telegram ${method} error: ${JSON.stringify(data)}`);
   }
@@ -83,7 +94,10 @@ export async function sendTelegramMessage(chatId: number | string, text: string)
 export async function downloadTelegramPhoto(fileId: string) {
   const { telegramBotToken } = getTelegramConfig();
 
-  const fileInfo = await telegramApi<{ ok: true; result: { file_path: string } }>("getFile", {
+  const fileInfo = await telegramApi<{
+    ok: true;
+    result: { file_path: string };
+  }>("getFile", {
     file_id: fileId,
   });
 
@@ -92,7 +106,9 @@ export async function downloadTelegramPhoto(fileId: string) {
   const imageResponse = await fetch(fileUrl);
 
   if (!imageResponse.ok) {
-    throw new Error(`No se pudo descargar la imagen de Telegram: ${imageResponse.status}`);
+    throw new Error(
+      `No se pudo descargar la imagen de Telegram: ${imageResponse.status}`
+    );
   }
 
   const arrayBuffer = await imageResponse.arrayBuffer();
@@ -165,19 +181,26 @@ function normalizeCaja(value?: string | null): CajaId | null {
   return null;
 }
 
-function mapTipoToMovementType(extraction: TelegramFinancialExtraction): AppMovementType {
+function mapTipoToMovementType(
+  extraction: TelegramFinancialExtraction
+): AppMovementType {
   if (extraction.tipo === "ingreso") return "inflow";
   if (extraction.tipo === "egreso") return "outflow";
 
   if (extraction.tipo === "transferencia") {
-    const destination = normalizeCaja(extraction.caja_destino || extraction.caja);
+    const destination = normalizeCaja(
+      extraction.caja_destino || extraction.caja
+    );
     return destination === "bank" ? "transfer" : "internal_transfer";
   }
 
   return "outflow";
 }
 
-export function buildMovementFromExtraction(extraction: TelegramFinancialExtraction, fallbackDate: Date) {
+export function buildMovementFromExtraction(
+  extraction: TelegramFinancialExtraction,
+  fallbackDate: Date
+) {
   const { telegramCreatedByUid } = getTelegramConfig();
 
   const type = mapTipoToMovementType(extraction);
@@ -205,21 +228,17 @@ export function buildMovementFromExtraction(extraction: TelegramFinancialExtract
     extraction.fecha.trim().length >= 8 &&
     !Number.isNaN(new Date(extraction.fecha).getTime());
 
-  const hasResponsible =
-    Boolean(extraction.proveedor_cliente) ||
-    Boolean(extraction.descripcion);
+  const hasResponsible = Boolean(
+    extraction.proveedor_cliente || extraction.descripcion
+  );
 
   const isSimpleCashBagRecord =
-    hasValidAmount &&
-    hasValidDate &&
-    hasResponsible &&
-    type === "inflow";
+    hasValidAmount && hasValidDate && hasResponsible && type === "inflow";
 
   const hardReviewReasons = Array.isArray(extraction.razones_revision)
     ? extraction.razones_revision.filter((reason: string) => {
         const lower = reason.toLowerCase();
 
-        // En tus fotos normales estas razones NO deben mandar a revisión
         if (lower.includes("fecha ambigua")) return false;
         if (lower.includes("año de dos dígitos")) return false;
         if (lower.includes("ano de dos digitos")) return false;
@@ -267,7 +286,9 @@ export function buildMovementFromExtraction(extraction: TelegramFinancialExtract
     `Registro de caja ${extraction.proveedor_cliente || ""}`.trim() ||
     "MOVIMIENTO DESDE FOTO";
 
-  const descriptionPrefix = requiresReview ? "[REVISAR TELEGRAM] " : "[TELEGRAM] ";
+  const descriptionPrefix = requiresReview
+    ? "[REVISAR TELEGRAM] "
+    : "[TELEGRAM] ";
 
   const description = `${descriptionPrefix}${descriptionBase}`
     .trim()
@@ -298,32 +319,6 @@ export function buildMovementFromExtraction(extraction: TelegramFinancialExtract
   };
 }
 
-  const descriptionPrefix = requiresReview ? "[REVISAR TELEGRAM] " : "[TELEGRAM] ";
-  const description = `${descriptionPrefix}${extraction.descripcion || "MOVIMIENTO DESDE FOTO"}`
-    .trim()
-    .toUpperCase()
-    .slice(0, 500);
-
-  return {
-    date: Timestamp.fromDate(movementDate),
-    type,
-    amount,
-    description,
-    createdBy: telegramCreatedByUid,
-    category: extraction.categoria || "Telegram",
-    subcategory: extraction.subcategoria || undefined,
-    from,
-    to,
-    createdAt: FieldValue.serverTimestamp(),
-    source: "telegram",
-    telegramProvider: "vercel",
-    telegramRequiresReview: requiresReview,
-    telegramConfidence: extraction.confianza_ia,
-    telegramReviewReasons: extraction.razones_revision || [],
-    telegramRawExtraction: extraction,
-  };
-}
-
 export async function extractFinancialDataFromImage(params: {
   imageBuffer: Buffer;
   mimeType: string;
@@ -338,8 +333,9 @@ export async function extractFinancialDataFromImage(params: {
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
   const prompt = `
-Regla especial para registros de bolsa/cierre:
+Eres un asistente para registrar cierres de caja desde fotos enviadas por Telegram.
 
+Regla principal:
 La mayoría de imágenes tendrán solamente:
 - fecha escrita a mano
 - valor o monto
@@ -361,6 +357,10 @@ En estos casos:
 - Si fecha, monto y responsable están presentes, requiere_revision debe ser false.
 - No marcar como pendiente solo porque falte subcategoría.
 - No marcar como pendiente solo porque la fecha tenga año de dos dígitos.
+- No marcar como pendiente solo porque la caja se infiere como Principal.
+- No marcar como pendiente solo porque la categoría se infiere como Cierre de caja.
+
+Devuelve solo JSON válido.
 
 Texto adicional escrito junto con la foto:
 ${params.caption || "Sin texto adicional"}
@@ -387,10 +387,17 @@ ${params.caption || "Sin texto adicional"}
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          tipo: { type: Type.STRING, enum: ["ingreso", "egreso", "transferencia", "desconocido"] },
+          tipo: {
+            type: Type.STRING,
+            enum: ["ingreso", "egreso", "transferencia", "desconocido"],
+          },
           monto: { type: Type.NUMBER, nullable: true },
           moneda: { type: Type.STRING, nullable: true },
-          fecha: { type: Type.STRING, nullable: true, description: "YYYY-MM-DD" },
+          fecha: {
+            type: Type.STRING,
+            nullable: true,
+            description: "YYYY-MM-DD",
+          },
           caja: { type: Type.STRING, nullable: true },
           caja_origen: { type: Type.STRING, nullable: true },
           caja_destino: { type: Type.STRING, nullable: true },
@@ -400,7 +407,10 @@ ${params.caption || "Sin texto adicional"}
           proveedor_cliente: { type: Type.STRING, nullable: true },
           confianza_ia: { type: Type.NUMBER },
           requiere_revision: { type: Type.BOOLEAN },
-          razones_revision: { type: Type.ARRAY, items: { type: Type.STRING } },
+          razones_revision: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+          },
         },
         required: [
           "tipo",
