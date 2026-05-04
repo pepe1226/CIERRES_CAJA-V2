@@ -22,14 +22,18 @@ export type TelegramFinancialExtraction = {
   razones_revision: string[];
 };
 
+function env(name: string, fallback = "") {
+  return (process.env[name] || fallback).trim();
+}
+
 export function getTelegramConfig() {
   return {
-    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || "",
-    telegramSecretToken: process.env.TELEGRAM_SECRET_TOKEN || "",
-    telegramAllowedChatId: process.env.TELEGRAM_ALLOWED_CHAT_ID || "",
-    telegramCreatedByUid: process.env.TELEGRAM_CREATED_BY_UID || "telegram-bot",
-    geminiApiKey: process.env.GEMINI_API_KEY || "",
-    geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
+    telegramSecretToken: env("TELEGRAM_SECRET_TOKEN"),
+    telegramAllowedChatId: env("TELEGRAM_ALLOWED_CHAT_ID"),
+    telegramCreatedByUid: env("TELEGRAM_CREATED_BY_UID", "telegram-bot"),
+    geminiApiKey: env("GEMINI_API_KEY"),
+    geminiModel: env("GEMINI_MODEL", "gemini-2.5-flash"),
   };
 }
 
@@ -197,6 +201,46 @@ function mapTipoToMovementType(
   return "outflow";
 }
 
+function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
+  if (!value) {
+    return fallbackDate;
+  }
+
+  const text = value.trim();
+
+  const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
+
+  const shortDateMatch = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
+
+  if (shortDateMatch) {
+    const day = Number(shortDateMatch[1]);
+    const month = Number(shortDateMatch[2]);
+    let year = Number(shortDateMatch[3]);
+
+    if (year < 100) {
+      year = 2000 + year;
+    }
+
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  }
+
+  const parsed = new Date(text);
+
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  return fallbackDate;
+}
+
 export function buildMovementFromExtraction(
   extraction: TelegramFinancialExtraction,
   fallbackDate: Date
@@ -209,10 +253,7 @@ export function buildMovementFromExtraction(
   const cajaOrigen = normalizeCaja(extraction.caja_origen) || caja;
   const cajaDestino = normalizeCaja(extraction.caja_destino);
 
-  const movementDate =
-    extraction.fecha && !Number.isNaN(new Date(extraction.fecha).getTime())
-      ? new Date(extraction.fecha)
-      : fallbackDate;
+  const movementDate = parseBusinessDate(extraction.fecha, fallbackDate);
 
   const amount =
     typeof extraction.monto === "number" && Number.isFinite(extraction.monto)
@@ -226,7 +267,7 @@ export function buildMovementFromExtraction(
   const hasValidDate =
     typeof extraction.fecha === "string" &&
     extraction.fecha.trim().length >= 8 &&
-    !Number.isNaN(new Date(extraction.fecha).getTime());
+    !Number.isNaN(movementDate.getTime());
 
   const hasResponsible = Boolean(
     extraction.proveedor_cliente || extraction.descripcion
