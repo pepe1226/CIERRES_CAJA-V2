@@ -2,14 +2,36 @@ import { getFirebaseAdminStatus } from "../_lib/firebaseAdmin";
 import { getTelegramStatus } from "../_lib/telegramMovement";
 
 export default function handler(_req: any, res: any) {
-  res.status(200).json({
+  const status = {
     ok: true,
     runtime: "vercel-serverless",
-    ...getTelegramStatus(),
-    firebase: getFirebaseAdminStatus(),
-    googleAuth: {
-      frontend: "Firebase Authentication con proveedor Google",
-      note: "Agrega tu dominio de Vercel en Firebase Authentication > Settings > Authorized domains.",
+    configured: Boolean(
+      process.env.TELEGRAM_BOT_TOKEN &&
+      process.env.TELEGRAM_SECRET_TOKEN &&
+      process.env.GEMINI_API_KEY &&
+      process.env.FIREBASE_PROJECT_ID &&
+      process.env.FIRESTORE_DATABASE_ID &&
+      process.env.FIREBASE_STORAGE_BUCKET &&
+      process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+    ),
+    telegram: {
+      hasTelegramBotToken: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      hasTelegramSecretToken: Boolean(process.env.TELEGRAM_SECRET_TOKEN),
+      allowedChatId: process.env.TELEGRAM_ALLOWED_CHAT_ID || null,
+      telegramCreatedByUid: process.env.TELEGRAM_CREATED_BY_UID || "telegram-bot"
     },
-  });
+    gemini: {
+      hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
+      geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash"
+    },
+    firebase: {
+      projectId: process.env.FIREBASE_PROJECT_ID || null,
+      firestoreDatabaseId: process.env.FIRESTORE_DATABASE_ID || null,
+      storageBucket: process.env.FIREBASE_STORAGE_BUCKET || null,
+      hasServiceAccountJson: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON),
+      hasServiceAccountBase64: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64)
+    }
+  };
+
+  res.status(200).json(status);
 }
