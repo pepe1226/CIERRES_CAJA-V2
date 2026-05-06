@@ -300,10 +300,10 @@ export default async function handler(req: any, res: any) {
       caption: message.caption || "",
     });
 
-    const movement = buildMovementFromExtraction(extraction, new Date());
+    const parsedMovement = buildMovementFromExtraction(extraction, new Date());
 
     const firestoreMovement = removeUndefinedDeep({
-      ...movement,
+      ...parsedMovement,
       telegramChatId: String(chatId),
       telegramMessageId: message.message_id,
       telegramUserId: message.from?.id ? String(message.from.id) : null,
@@ -341,10 +341,7 @@ export default async function handler(req: any, res: any) {
     });
 
     const closureId = `telegram_${duplicateKey}`;
-    const movementId = `telegram_${duplicateKey}`;
-
     const closureRef = db.collection("closures").doc(closureId);
-    const movementRef = db.collection("movements").doc(movementId);
 
     const transactionResult = await db.runTransaction(async (transaction: any) => {
       const processedMessageDoc = await transaction.get(telegramMessageRef);
@@ -410,11 +407,11 @@ export default async function handler(req: any, res: any) {
         telegramFileUniqueId,
         telegramFilePath: downloaded.telegramFilePath,
         telegramConfidence: firestoreMovement.telegramConfidence || null,
-        telegramRequiresReview: firestoreMovement.telegramRequiresReview || false,
+        telegramRequiresReview:
+          firestoreMovement.telegramRequiresReview || false,
         telegramRawExtraction: raw,
       });
 
-      transaction.set(movementRef, firestoreMovement, { merge: true });
       transaction.set(closureRef, closureData, { merge: true });
 
       transaction.set(
@@ -425,7 +422,6 @@ export default async function handler(req: any, res: any) {
           messageId: message.message_id,
           duplicate: false,
           closureId,
-          movementId,
           duplicateKey,
           telegramFileUniqueId,
         },
@@ -435,7 +431,6 @@ export default async function handler(req: any, res: any) {
       return {
         duplicate: false,
         closureId,
-        movementId,
       };
     });
 
@@ -480,7 +475,6 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({
       ok: true,
-      movementId: transactionResult.movementId,
       closureId: transactionResult.closureId,
       type: firestoreMovement.type,
       amount,
