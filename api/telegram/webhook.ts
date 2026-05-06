@@ -24,18 +24,13 @@ function removeUndefinedDeep(value: any): any {
   }
 
   if (Array.isArray(value)) {
-    return value
-      .map(removeUndefinedDeep)
-      .filter((item) => item !== undefined);
+    return value.map(removeUndefinedDeep).filter((item) => item !== undefined);
   }
 
   if (typeof value !== "object") {
     return value;
   }
 
-  // Muy importante:
-  // No tocar Date, Timestamp de Firestore ni FieldValue.serverTimestamp().
-  // Si los recorremos como objetos normales, se rompen y la app no puede usar date.toDate().
   if (value instanceof Date) {
     return value;
   }
@@ -72,9 +67,79 @@ function cleanResponsible(value: any): string {
   return (text || "SIN RESPONSABLE").toUpperCase().slice(0, 80);
 }
 
+function normalizeDuplicateText(value: any): string {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/^ESQ\s+/i, "")
+    .replace(/^RESPONSABLE\s*:?/i, "")
+    .replace(/^SR\.?\s*/i, "")
+    .replace(/^SRA\.?\s*/i, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+}
+
+function timestampToBusinessDateKey(value: any): string {
+  try {
+    if (value && typeof value.toDate === "function") {
+      const date = value.toDate();
+
+      const year = date.getUTCFullYear();
+      const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(date.getUTCDate()).padStart(2, "0");
+
+      return `${year}-${month}-${day}`;
+    }
+
+    if (value instanceof Date) {
+      const year = value.getUTCFullYear();
+      const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(value.getUTCDate()).padStart(2, "0");
+
+      return `${year}-${month}-${day}`;
+    }
+  } catch (error) {
+    console.error("No se pudo crear fecha para duplicateKey:", error);
+  }
+
+  return "SIN-FECHA";
+}
+
+function buildDuplicateKey(params: {
+  date: any;
+  amount: number;
+  responsible: string;
+  createdBy: string;
+}) {
+  const dateKey = timestampToBusinessDateKey(params.date);
+  const amountInCents = Math.round((params.amount || 0) * 100);
+  const responsibleKey = normalizeDuplicateText(params.responsible);
+  const userKey = normalizeDuplicateText(params.createdBy);
+
+  return `${dateKey}_${amountInCents}_${responsibleKey}_${userKey}`;
+}
+
 function formatMoney(value: any) {
   const number = typeof value === "number" && Number.isFinite(value) ? value : 0;
   return number.toFixed(2);
+}
+
+async function replyDuplicate(params: {
+  chatId: number | string;
+  responsible: string;
+  amount: number;
+  reason: string;
+}) {
+  await sendTelegramMessage(
+    params.chatId,
+    [
+      "Registro duplicado detectado.",
+      `Responsable: ${params.responsible}`,
+      `Monto: USD ${formatMoney(params.amount)}`,
+      params.reason,
+    ].join("\n")
+  );
 }
 
 export default async function handler(req: any, res: any) {
@@ -85,10 +150,7 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const {
-    telegramSecretToken,
-    telegramAllowedChatId,
-  } = getTelegramConfig();
+  const { telegramSecretToken, telegramAllowedChatId } = getTelegramConfig();
 
   const receivedSecret =
     req.headers["x-telegram-bot-api-secret-token"] ||
@@ -160,23 +222,25 @@ export default async function handler(req: any, res: any) {
 
   const db = getFirebaseAdminDb();
 
-  const movementId = `telegram_${chatId}_${message.message_id}`;
-  const movementRef = db.collection("movements").doc(movementId);
-  const closureRef = db.collection("closures").doc(movementId);
+  const telegramMessageKey = `telegram_${chatId}_${message.message_id}`;
+  const telegramMessageRef = db
+    .collection("telegram_processed_messages")
+    .doc(telegramMessageKey);
 
   try {
-    const existingClosure = await closureRef.get();
+    const alreadyProcessedMessage = await telegramMessageRef.get();
 
-    if (existingClosure.exists) {
+    if (alreadyProcessedMessage.exists) {
       await sendTelegramMessage(
         chatId,
-        "Este registro de Telegram ya fue procesado anteriormente."
+        "Este mensaje de Telegram ya fue procesado anteriormente."
       );
 
       return res.status(200).json({
         ok: true,
         duplicate: true,
-        id: movementId,
+        duplicateType: "telegram-message",
+        id: telegramMessageKey,
       });
     }
 
@@ -185,6 +249,48 @@ export default async function handler(req: any, res: any) {
         ? current
         : best;
     }, photos[0]);
+
+    const telegramFileUniqueId = largestPhoto.file_unique_id || null;
+
+    if (telegramFileUniqueId) {
+      const samePhotoQuery = await db
+        .collection("closures")
+        .where("telegramFileUniqueId", "==", telegramFileUniqueId)
+        .limit(1)
+        .get();
+
+      if (!samePhotoQuery.empty) {
+        const existingDoc = samePhotoQuery.docs[0];
+        const data = existingDoc.data();
+
+        await replyDuplicate({
+          chatId,
+          responsible: cleanResponsible(data.responsible || "SIN RESPONSABLE"),
+          amount: data.physicalAmount || 0,
+          reason: "Esta misma foto ya existe en el sistema.",
+        });
+
+        await telegramMessageRef.set(
+          {
+            createdAt: FieldValue.serverTimestamp(),
+            chatId: String(chatId),
+            messageId: message.message_id,
+            duplicate: true,
+            duplicateType: "same-photo",
+            existingClosureId: existingDoc.id,
+            telegramFileUniqueId,
+          },
+          { merge: true }
+        );
+
+        return res.status(200).json({
+          ok: true,
+          duplicate: true,
+          duplicateType: "same-photo",
+          existingClosureId: existingDoc.id,
+        });
+      }
+    }
 
     const downloaded = await downloadTelegramPhoto(largestPhoto.file_id);
 
@@ -204,11 +310,9 @@ export default async function handler(req: any, res: any) {
       telegramUserName: message.from?.username || null,
       telegramFirstName: message.from?.first_name || null,
       telegramFileId: largestPhoto.file_id,
-      telegramFileUniqueId: largestPhoto.file_unique_id || null,
+      telegramFileUniqueId,
       telegramFilePath: downloaded.telegramFilePath,
     });
-
-    await movementRef.set(firestoreMovement, { merge: true });
 
     const raw = firestoreMovement.telegramRawExtraction || {};
 
@@ -227,38 +331,130 @@ export default async function handler(req: any, res: any) {
         ? firestoreMovement.amount
         : 0;
 
-    const closureData = removeUndefinedDeep({
-      createdAt: FieldValue.serverTimestamp(),
-      createdBy: firestoreMovement.createdBy || "telegram-bot",
+    const createdBy = firestoreMovement.createdBy || "telegram-bot";
 
+    const duplicateKey = buildDuplicateKey({
       date: firestoreMovement.date,
-
+      amount,
       responsible,
-
-      physicalAmount: amount,
-      systemAmount: 0,
-      systemBalance: 0,
-      difference: amount,
-
-      status: "safe",
-
-      source: "telegram",
-      note: firestoreMovement.description || "",
-
-      telegramChatId: String(chatId),
-      telegramMessageId: message.message_id,
-      telegramUserId: message.from?.id ? String(message.from.id) : null,
-      telegramUserName: message.from?.username || null,
-      telegramFirstName: message.from?.first_name || null,
-      telegramFileId: largestPhoto.file_id,
-      telegramFileUniqueId: largestPhoto.file_unique_id || null,
-      telegramFilePath: downloaded.telegramFilePath,
-      telegramConfidence: firestoreMovement.telegramConfidence || null,
-      telegramRequiresReview: firestoreMovement.telegramRequiresReview || false,
-      telegramRawExtraction: raw,
+      createdBy,
     });
 
-    await closureRef.set(closureData, { merge: true });
+    const closureId = `telegram_${duplicateKey}`;
+    const movementId = `telegram_${duplicateKey}`;
+
+    const closureRef = db.collection("closures").doc(closureId);
+    const movementRef = db.collection("movements").doc(movementId);
+
+    const transactionResult = await db.runTransaction(async (transaction: any) => {
+      const processedMessageDoc = await transaction.get(telegramMessageRef);
+      const existingClosureDoc = await transaction.get(closureRef);
+
+      if (processedMessageDoc.exists) {
+        return {
+          duplicate: true,
+          duplicateType: "telegram-message",
+          existingClosureId: processedMessageDoc.data()?.closureId || closureId,
+        };
+      }
+
+      if (existingClosureDoc.exists) {
+        transaction.set(
+          telegramMessageRef,
+          {
+            createdAt: FieldValue.serverTimestamp(),
+            chatId: String(chatId),
+            messageId: message.message_id,
+            duplicate: true,
+            duplicateType: "business-duplicate",
+            closureId,
+            duplicateKey,
+            telegramFileUniqueId,
+          },
+          { merge: true }
+        );
+
+        return {
+          duplicate: true,
+          duplicateType: "business-duplicate",
+          existingClosureId: closureId,
+        };
+      }
+
+      const closureData = removeUndefinedDeep({
+        createdAt: FieldValue.serverTimestamp(),
+        createdBy,
+
+        date: firestoreMovement.date,
+
+        responsible,
+
+        physicalAmount: amount,
+        systemAmount: 0,
+        systemBalance: 0,
+        difference: amount,
+
+        status: "safe",
+
+        duplicateKey,
+
+        source: "telegram",
+        note: firestoreMovement.description || "",
+
+        telegramChatId: String(chatId),
+        telegramMessageId: message.message_id,
+        telegramUserId: message.from?.id ? String(message.from.id) : null,
+        telegramUserName: message.from?.username || null,
+        telegramFirstName: message.from?.first_name || null,
+        telegramFileId: largestPhoto.file_id,
+        telegramFileUniqueId,
+        telegramFilePath: downloaded.telegramFilePath,
+        telegramConfidence: firestoreMovement.telegramConfidence || null,
+        telegramRequiresReview: firestoreMovement.telegramRequiresReview || false,
+        telegramRawExtraction: raw,
+      });
+
+      transaction.set(movementRef, firestoreMovement, { merge: true });
+      transaction.set(closureRef, closureData, { merge: true });
+
+      transaction.set(
+        telegramMessageRef,
+        {
+          createdAt: FieldValue.serverTimestamp(),
+          chatId: String(chatId),
+          messageId: message.message_id,
+          duplicate: false,
+          closureId,
+          movementId,
+          duplicateKey,
+          telegramFileUniqueId,
+        },
+        { merge: true }
+      );
+
+      return {
+        duplicate: false,
+        closureId,
+        movementId,
+      };
+    });
+
+    if (transactionResult.duplicate) {
+      await replyDuplicate({
+        chatId,
+        responsible,
+        amount,
+        reason: "Este cierre ya existe en el sistema.",
+      });
+
+      return res.status(200).json({
+        ok: true,
+        duplicate: true,
+        duplicateType: transactionResult.duplicateType,
+        existingClosureId: transactionResult.existingClosureId,
+        duplicateKey,
+      });
+    }
 
     const tipoTexto =
       firestoreMovement.type === "inflow"
@@ -284,11 +480,12 @@ export default async function handler(req: any, res: any) {
 
     return res.status(200).json({
       ok: true,
-      movementId,
-      closureId: movementId,
+      movementId: transactionResult.movementId,
+      closureId: transactionResult.closureId,
       type: firestoreMovement.type,
       amount,
       responsible,
+      duplicateKey,
       review: firestoreMovement.telegramRequiresReview,
     });
   } catch (error: any) {
