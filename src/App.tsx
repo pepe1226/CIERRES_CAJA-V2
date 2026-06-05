@@ -81,6 +81,88 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Dashboard } from './components/Dashboard';
 
+type ClosureColumnKey =
+  | 'date'
+  | 'responsible'
+  | 'physicalAmount'
+  | 'systemAmount'
+  | 'systemBalance'
+  | 'difference'
+  | 'status'
+  | 'notes';
+
+const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
+  date: '',
+  responsible: '',
+  physicalAmount: '',
+  systemAmount: '',
+  systemBalance: '',
+  difference: '',
+  status: '',
+  notes: ''
+};
+
+const normalizeSearchText = (value: unknown) =>
+  String(value ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
+  if (status === 'transit') return 'En Tránsito';
+  if (status === 'bank') return 'En Banco';
+  return 'Caja Fuerte';
+};
+
+const getClosureSearchValues = (closure: ShiftClosure) => {
+  const parsedDate = parseISO(closure.date);
+
+  const dateValues = Number.isNaN(parsedDate.getTime())
+    ? [closure.date]
+    : [
+        closure.date,
+        format(parsedDate, 'dd/MM/yyyy HH:mm'),
+        format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es }),
+        format(parsedDate, 'yyyy-MM-dd'),
+        format(parsedDate, 'HH:mm')
+      ];
+
+  return [
+    ...dateValues,
+    closure.responsible,
+    closure.physicalAmount,
+    closure.systemAmount,
+    closure.systemBalance,
+    closure.difference,
+    closure.status,
+    getClosureStatusLabel(closure.status),
+    closure.notes,
+    closure.tripId,
+    closure.id
+  ];
+};
+
+const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColumnKey) => {
+  const parsedDate = parseISO(closure.date);
+
+  const dateValue = Number.isNaN(parsedDate.getTime())
+    ? closure.date
+    : `${closure.date} ${format(parsedDate, 'dd/MM/yyyy HH:mm')} ${format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es })} ${format(parsedDate, 'yyyy-MM-dd')} ${format(parsedDate, 'HH:mm')}`;
+
+  const values: Record<ClosureColumnKey, unknown> = {
+    date: dateValue,
+    responsible: closure.responsible,
+    physicalAmount: closure.physicalAmount,
+    systemAmount: closure.systemAmount,
+    systemBalance: closure.systemBalance,
+    difference: closure.difference,
+    status: `${closure.status || ''} ${getClosureStatusLabel(closure.status)}`,
+    notes: closure.notes || ''
+  };
+
+  return values[column];
+};
 function AppContent() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
