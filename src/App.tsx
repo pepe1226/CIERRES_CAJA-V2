@@ -991,10 +991,26 @@ function AppContent() {
     setExpandedDays(prev => ({ ...prev, [day]: !prev[day] }));
   };
 
+  const getDayStatusFromItems = (items: ShiftClosure[]): 'safe' | 'transit' | 'bank' | 'mixed' => {
+    if (items.length === 0) return 'safe';
+
+    const normalizedStatuses = items.map(item => item.status || 'safe');
+    const allSafe = normalizedStatuses.every(status => status === 'safe');
+    const allTransit = normalizedStatuses.every(status => status === 'transit');
+    const allBank = normalizedStatuses.every(status => status === 'bank');
+
+    if (allBank) return 'bank';
+    if (allTransit) return 'transit';
+    if (allSafe) return 'safe';
+
+    return 'mixed';
+  };
+
   const toggleDayStatus = async (dayString: string) => {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
-    const currentStatus = dayStatuses[dayString] || 'safe';
+    const currentStatus = getDayStatusFromItems(items);
     const nextStatus = currentStatus === 'mixed' ? 'transit' : getNextStatus(currentStatus);
+
     playSound(nextStatus);
     
     try {
@@ -1901,7 +1917,8 @@ Notas: ${closure.notes || 'N/A'}`;
                            </td>
                            <td className="px-6 py-4 text-center">
                               {(() => {
-                                const statusInfo = getDayStatusInfo(dayStatuses[group.date]);
+                                const currentDayStatus = getDayStatusFromItems(group.items);
+                                const statusInfo = getDayStatusInfo(currentDayStatus);
                                 const StatusIcon = statusInfo.Icon;
 
                                 return (
@@ -1910,6 +1927,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                       e.stopPropagation();
                                       toggleDayStatus(group.date);
                                     }}
+                                    title={`Estado del resumen del día: ${statusInfo.label}`}
                                     className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
                                   >
                                     <StatusIcon className="w-3 h-3" />
