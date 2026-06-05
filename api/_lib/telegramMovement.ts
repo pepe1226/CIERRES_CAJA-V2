@@ -360,7 +360,99 @@ export function buildMovementFromExtraction(
   };
 }
 
+
+function getErrorMessage(error: any) {
+  if (!error) return "Error desconocido";
+
+  if (typeof error === "string") return error;
+
+  const parts = [
+    error.message,
+    error.status,
+    error.code,
+    error.name,
+    error.cause?.message,
+  ]
+    .filter(Boolean)
+    .map((part) => String(part));
+
+  return parts.join(" | ") || JSON.stringify(error);
+}
+
+export function isTemporaryGeminiError(error: any) {
+  const message = getErrorMessage(error).toLowerCase();
+
+  return (
+    message.includes("503") ||
+    message.includes("502") ||
+    message.includes("504") ||
+    message.includes("429") ||
+    message.includes("unavailable") ||
+    message.includes("resource_exhausted") ||
+    message.includes("rate limit") ||
+    message.includes("quota") ||
+    message.includes("overload") ||
+    message.includes("overloaded") ||
+    message.includes("high demand") ||
+    message.includes("temporarily") ||
+    message.includes("timeout") ||
+    message.includes("deadline")
+  );
+}
+
+export function getFriendlyGeminiErrorMessage(error: any) {
+  if (isTemporaryGeminiError(error)) {
+    return "La IA está ocupada temporalmente. Guardé la foto como pendiente y el sistema intentará procesarla nuevamente.";
+  }
+
+  const message = getErrorMessage(error);
+
+  if (message.includes("GEMINI_API_KEY")) {
+    return "No pude procesar la foto porque falta configurar la clave de Gemini en Vercel.";
+  }
+
+  return "No pude procesar la foto automáticamente. La foto quedó pendiente para revisión o reintento.";
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function extractFinancialDataFromImage(params: {
+  imageBuffer: Buffer;
+  mimeType: string;
+  caption?: string;
+  maxAttempts?: number;
+  baseDelayMs?: number;
+}): Promise<TelegramFinancialExtraction> {
+  const maxAttempts = Math.max(1, params.maxAttempts ?? 3);
+  const baseDelayMs = Math.max(0, params.baseDelayMs ?? 1500);
+  let lastError: any = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await extractFinancialDataFromImageOnce(params);
+    } catch (error) {
+      lastError = error;
+      const temporary = isTemporaryGeminiError(error);
+
+      console.error(
+        `Gemini falló en intento ${attempt}/${maxAttempts}:`,
+        getErrorMessage(error)
+      );
+
+      if (!temporary || attempt >= maxAttempts) {
+        break;
+      }
+
+      await sleep(baseDelayMs * attempt);
+    }
+  }
+
+  throw lastError;
+}
+
+async function extractFinancialDataFromImageOnce(params: {
   imageBuffer: Buffer;
   mimeType: string;
   caption?: string;

@@ -15,6 +15,16 @@
     {
       "source": "/telegram/status",
       "destination": "/api/telegram/status"
+    },
+    {
+      "source": "/telegram/retry-pending",
+      "destination": "/api/telegram/retry-pending"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/telegram/retry-pending",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
