@@ -14,7 +14,7 @@ import {
   LineChart,
   Line
 } from 'recharts';
-import { format, parseISO, startOfMonth, endOfMonth, isWithinInterval, subMonths } from 'date-fns';
+import { format, parseISO, startOfMonth, endOfMonth, isWithinInterval, startOfDay, endOfDay, subDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { ShiftClosure, Movement } from '../types';
 import { 
@@ -43,10 +43,49 @@ const COLORS = ['#3B82F6', '#8B5CF6', '#EC4899', '#F59E0B', '#10B981', '#6366F1'
 
 export function Dashboard({ closures, movements, onBack }: DashboardProps) {
   const [showHistory, setShowHistory] = useState(false);
+  const [dateRangeType, setDateRangeType] = useState<'semana' | 'mes' | 'siempre' | 'custom'>('mes');
+  const [startDate, setStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
+  const [endDate, setEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
+
+  const isWithinDashboardRange = (dateString: string) => {
+    if (dateRangeType === 'siempre') return true;
+
+    const currentDate = parseISO(dateString);
+    const start = startOfDay(parseISO(startDate));
+    const end = endOfDay(parseISO(endDate));
+
+    if (Number.isNaN(currentDate.getTime()) || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return true;
+    }
+
+    return isWithinInterval(currentDate, { start, end });
+  };
+
+  const filteredClosures = useMemo(() => {
+    return closures.filter(c => isWithinDashboardRange(c.date));
+  }, [closures, startDate, endDate, dateRangeType]);
+
+  const filteredMovements = useMemo(() => {
+    return movements.filter(m => isWithinDashboardRange(m.date));
+  }, [movements, startDate, endDate, dateRangeType]);
+
+  const dateRangeLabel = useMemo(() => {
+    if (dateRangeType === 'siempre') return 'Mostrando todos los registros';
+
+    const parsedStart = parseISO(startDate);
+    const parsedEnd = parseISO(endDate);
+
+    if (Number.isNaN(parsedStart.getTime()) || Number.isNaN(parsedEnd.getTime())) {
+      return 'Seleccione un rango de fechas válido';
+    }
+
+    return `${format(parsedStart, 'dd/MM/yyyy')} — ${format(parsedEnd, 'dd/MM/yyyy')}`;
+  }, [startDate, endDate, dateRangeType]);
+
   // 1. Gastos por Categoría (Outflows)
   const expensesByCategory = useMemo(() => {
     const data: Record<string, number> = {};
-    movements
+    filteredMovements
       .filter(m => m.type === 'outflow')
       .forEach(m => {
         const cat = m.category || 'GENERAL';
@@ -56,12 +95,12 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return Object.entries(data)
       .map(([name, value]) => ({ name, value }))
       .sort((a, b) => b.value - a.value);
-  }, [movements]);
+  }, [filteredMovements]);
 
   // 1b. Gastos por Caja (Source Box)
   const expensesByCaja = useMemo(() => {
     const data: Record<string, number> = {};
-    movements
+    filteredMovements
       .filter(m => m.type === 'outflow')
       .forEach(m => {
         const box = m.from || 'GENERAL';
@@ -71,12 +110,12 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return Object.entries(data)
       .map(([name, value]) => ({ name: name.toUpperCase(), value }))
       .sort((a, b) => b.value - a.value);
-  }, [movements]);
+  }, [filteredMovements]);
 
   // 1c. Gastos Diarios
   const dailyExpenses = useMemo(() => {
     const data: Record<string, number> = {};
-    movements
+    filteredMovements
       .filter(m => m.type === 'outflow')
       .forEach(m => {
         const day = format(parseISO(m.date), 'dd/MM');
@@ -91,12 +130,12 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
         return (ma * 100 + da) - (mb * 100 + db);
       })
       .slice(-15);
-  }, [movements]);
+  }, [filteredMovements]);
 
   // 2. Ingresos por Día (Últimos 30 días)
   const dailyIncome = useMemo(() => {
     const data: Record<string, number> = {};
-    closures.forEach(c => {
+    filteredClosures.forEach(c => {
       const day = format(parseISO(c.date), 'dd/MM');
       data[day] = (data[day] || 0) + c.physicalAmount;
     });
@@ -104,24 +143,24 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return Object.entries(data)
       .map(([name, income]) => ({ name, income }))
       .slice(-15); // Mostrar últimos 15 días con datos
-  }, [closures]);
+  }, [filteredClosures]);
 
   // 3. Ingresos por Mes
   const monthlyIncome = useMemo(() => {
     const data: Record<string, number> = {};
-    closures.forEach(c => {
+    filteredClosures.forEach(c => {
       const month = format(parseISO(c.date), 'MMMM yyyy', { locale: es });
       data[month] = (data[month] || 0) + c.physicalAmount;
     });
     
     return Object.entries(data)
       .map(([name, income]) => ({ name, income }));
-  }, [closures]);
+  }, [filteredClosures]);
 
   // 4. Ingresos por Cajero (Responsable)
   const incomeByCashier = useMemo(() => {
     const data: Record<string, number> = {};
-    closures.forEach(c => {
+    filteredClosures.forEach(c => {
       const name = c.responsible || 'Desconocido';
       data[name] = (data[name] || 0) + c.physicalAmount;
     });
@@ -129,11 +168,11 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return Object.entries(data)
       .map(([name, income]) => ({ name, income }))
       .sort((a, b) => b.income - a.income);
-  }, [closures]);
+  }, [filteredClosures]);
 
   const totalExpenses = expensesByCategory.reduce((acc, curr) => acc + curr.value, 0);
-  const totalInflowMovements = movements.filter(m => m.type === 'inflow').reduce((acc, curr) => acc + curr.amount, 0);
-  const totalIncome = closures.reduce((acc, curr) => acc + curr.physicalAmount, 0) + totalInflowMovements;
+  const totalInflowMovements = filteredMovements.filter(m => m.type === 'inflow').reduce((acc, curr) => acc + curr.amount, 0);
+  const totalIncome = filteredClosures.reduce((acc, curr) => acc + curr.physicalAmount, 0) + totalInflowMovements;
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-white p-4 md:p-8">
@@ -169,6 +208,72 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           </div>
         </div>
 
+        <div className="bg-[#1E293B]/60 backdrop-blur-xl border border-white/10 rounded-[2rem] p-5 flex flex-col xl:flex-row xl:items-center justify-between gap-5">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+              <Calendar className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Visualizador de fecha</p>
+              <h2 className="text-lg font-black text-white">{dateRangeLabel}</h2>
+              <p className="text-xs text-slate-500">{filteredClosures.length} cierres y {filteredMovements.length} movimientos en el periodo</p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setStartDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
+                setEndDate(format(new Date(), 'yyyy-MM-dd'));
+                setDateRangeType('semana');
+              }}
+              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'semana' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
+            >
+              Semana
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setStartDate(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
+                setEndDate(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
+                setDateRangeType('mes');
+              }}
+              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'mes' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
+            >
+              Este Mes
+            </button>
+            <button
+              type="button"
+              onClick={() => setDateRangeType('siempre')}
+              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'siempre' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
+            >
+              Siempre
+            </button>
+            <div className="flex items-center bg-[#0F172A] rounded-2xl border border-white/10 p-1">
+              <input
+                type="date"
+                value={startDate}
+                onChange={e => {
+                  setStartDate(e.target.value);
+                  setDateRangeType('custom');
+                }}
+                className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
+              />
+              <span className="text-slate-600 px-1">—</span>
+              <input
+                type="date"
+                value={endDate}
+                onChange={e => {
+                  setEndDate(e.target.value);
+                  setDateRangeType('custom');
+                }}
+                className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
+              />
+            </div>
+          </div>
+        </div>
+
         {/* Charts Grid */}
         {closures.length === 0 && movements.length === 0 ? (
           <div className="bg-[#1E293B]/50 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-20 text-center">
@@ -177,6 +282,14 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
             </div>
             <h3 className="text-2xl font-black text-white mb-2">Sin datos suficientes</h3>
             <p className="text-slate-400">Registra cierres y movimientos para ver las estadísticas aquí.</p>
+          </div>
+        ) : filteredClosures.length === 0 && filteredMovements.length === 0 ? (
+          <div className="bg-[#1E293B]/50 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-20 text-center">
+            <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-6">
+              <Calendar className="w-10 h-10 text-slate-500" />
+            </div>
+            <h3 className="text-2xl font-black text-white mb-2">Sin datos en este periodo</h3>
+            <p className="text-slate-400">Cambia el rango de fechas del visualizador para ver otros registros.</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -235,7 +348,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={(() => {
                     const data: Record<string, number> = {};
-                    movements
+                    filteredMovements
                       .filter(m => m.type === 'outflow' && m.subcategory)
                       .forEach(m => {
                         const sub = m.subcategory!;
@@ -471,9 +584,9 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               <div className="flex-1 overflow-auto p-8 pt-4">
                 <div className="grid gap-8">
                   {Object.entries(
-                    movements
+                    filteredMovements
                       .filter(m => m.type === 'outflow')
-                      .reduce((groups: Record<string, typeof movements>, m) => {
+                      .reduce((groups: Record<string, typeof filteredMovements>, m) => {
                         const date = format(parseISO(m.date), 'yyyy-MM-dd');
                         if (!groups[date]) groups[date] = [];
                         groups[date].push(m);
@@ -531,7 +644,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                     </div>
                   ))}
                   
-                  {movements.filter(m => m.type === 'outflow').length === 0 && (
+                  {filteredMovements.filter(m => m.type === 'outflow').length === 0 && (
                     <div className="text-center py-20 bg-white/5 rounded-[2rem] border border-dashed border-white/10">
                       <div className="w-16 h-16 bg-slate-500/10 rounded-full flex items-center justify-center mx-auto mb-4 text-slate-500">
                         <TrendingDown size={32} />
@@ -545,7 +658,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               <div className="p-6 border-t border-white/5 bg-white/[0.02] flex justify-between items-center px-10">
                 <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Resumen Histórico</span>
                 <span className="text-xl font-black font-mono text-rose-500">
-                  -${movements.filter(m => m.type === 'outflow').reduce((s, m) => s + m.amount,0).toLocaleString('es-CL')}
+                  -${filteredMovements.filter(m => m.type === 'outflow').reduce((s, m) => s + m.amount,0).toLocaleString('es-CL')}
                 </span>
               </div>
             </motion.div>

@@ -81,15 +81,8 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Dashboard } from './components/Dashboard';
 
-type ClosureColumnKey =
-  | 'date'
-  | 'responsible'
-  | 'physicalAmount'
-  | 'systemAmount'
-  | 'systemBalance'
-  | 'difference'
-  | 'status'
-  | 'notes';
+
+type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
 
 const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
   date: '',
@@ -106,7 +99,7 @@ const normalizeSearchText = (value: unknown) =>
   String(value ?? '')
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .trim();
 
 const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
@@ -117,7 +110,6 @@ const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
 
 const getClosureSearchValues = (closure: ShiftClosure) => {
   const parsedDate = parseISO(closure.date);
-
   const dateValues = Number.isNaN(parsedDate.getTime())
     ? [closure.date]
     : [
@@ -145,7 +137,6 @@ const getClosureSearchValues = (closure: ShiftClosure) => {
 
 const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColumnKey) => {
   const parsedDate = parseISO(closure.date);
-
   const dateValue = Number.isNaN(parsedDate.getTime())
     ? closure.date
     : `${closure.date} ${format(parsedDate, 'dd/MM/yyyy HH:mm')} ${format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es })} ${format(parsedDate, 'yyyy-MM-dd')} ${format(parsedDate, 'HH:mm')}`;
@@ -163,6 +154,7 @@ const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColum
 
   return values[column];
 };
+
 function AppContent() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -170,6 +162,8 @@ function AppContent() {
   const [movements, setMovements] = useState<Movement[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
+  const [columnFilters, setColumnFilters] = useState<Record<ClosureColumnKey, string>>(emptyClosureColumnFilters);
   const [currentView, setCurrentView] = useState<'main' | 'dashboard'>('main');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
@@ -432,6 +426,11 @@ function AppContent() {
   };
 
   const filteredClosures = useMemo(() => {
+    const normalizedGlobalSearch = normalizeSearchText(debouncedSearchTerm);
+    const activeColumnFilters = Object.entries(columnFilters)
+      .map(([column, value]) => [column as ClosureColumnKey, normalizeSearchText(value)] as const)
+      .filter(([, value]) => value.length > 0);
+
     return closures.filter(c => {
       const date = parseISO(c.date);
       const start = startOfDay(parseISO(filterStartDate));
@@ -440,14 +439,17 @@ function AppContent() {
       const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(date, { start, end });
       const matchesStatus = filterStatus === 'all' || c.status === filterStatus;
       const matchesResponsible = filterResponsible === 'all' || c.responsible === filterResponsible;
-      const matchesSearch = !debouncedSearchTerm || 
-        c.responsible.toLowerCase().includes(debouncedSearchTerm.toLowerCase()) ||
-        (c.notes && c.notes.toLowerCase().includes(debouncedSearchTerm.toLowerCase()));
+      const matchesSearch = !normalizedGlobalSearch || getClosureSearchValues(c).some(value =>
+        normalizeSearchText(value).includes(normalizedGlobalSearch)
+      );
+      const matchesColumnFilters = activeColumnFilters.every(([column, value]) =>
+        normalizeSearchText(getClosureColumnSearchValue(c, column)).includes(value)
+      );
       const matchesHideCollected = !hideCollected || !c.tripId;
         
-      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesHideCollected;
+      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected;
     });
-  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, hideCollected, filterDateRangeType]);
+  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, filterDateRangeType]);
 
   const uniqueResponsibles = useMemo(() => {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
@@ -1028,6 +1030,69 @@ Notas: ${closure.notes || 'N/A'}`;
     navigator.clipboard.writeText(text);
   };
 
+  const activeColumnFilterCount = Object.values(columnFilters).filter(value => normalizeSearchText(value)).length;
+
+  const updateColumnFilter = (column: ClosureColumnKey, value: string) => {
+    setColumnFilters(prev => ({ ...prev, [column]: value }));
+  };
+
+  const clearColumnFilter = (column: ClosureColumnKey) => {
+    setColumnFilters(prev => ({ ...prev, [column]: '' }));
+  };
+
+  const clearAllColumnFilters = () => {
+    setColumnFilters(emptyClosureColumnFilters);
+    setVisibleColumnFilter(null);
+  };
+
+  const renderColumnHeader = (
+    column: ClosureColumnKey,
+    label: string,
+    icon: React.ReactNode,
+    alignment: 'left' | 'center' = 'left'
+  ) => {
+    const isOpen = visibleColumnFilter === column;
+    const hasValue = normalizeSearchText(columnFilters[column]).length > 0;
+    const alignClass = alignment === 'center' ? 'justify-center text-center' : 'justify-start text-left';
+
+    return (
+      <div className="space-y-3">
+        <div className={`flex items-center gap-2 ${alignClass}`}>
+          {icon}
+          <span>{label}</span>
+          <button
+            type="button"
+            title={`Buscar en ${label}`}
+            onClick={() => setVisibleColumnFilter(isOpen ? null : column)}
+            className={`ml-1 p-1.5 rounded-lg border transition-all ${hasValue || isOpen ? 'bg-blue-500/20 border-blue-500/40 text-blue-300' : 'bg-white/5 border-white/5 text-slate-600 hover:text-white hover:bg-white/10'}`}
+          >
+            <Search className="w-3 h-3" />
+          </button>
+          {hasValue && (
+            <button
+              type="button"
+              title={`Limpiar filtro de ${label}`}
+              onClick={() => clearColumnFilter(column)}
+              className="p-1.5 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-all"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+        {isOpen && (
+          <input
+            autoFocus
+            type="text"
+            value={columnFilters[column]}
+            onChange={e => updateColumnFilter(column, e.target.value)}
+            placeholder={`Filtrar ${label.toLowerCase()}...`}
+            className="w-full min-w-[140px] bg-[#0F172A] border border-blue-500/30 rounded-xl px-3 py-2 text-[11px] font-bold text-white placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-blue-500/30 normal-case tracking-normal"
+          />
+        )}
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0F172A]">
@@ -1567,11 +1632,29 @@ Notas: ${closure.notes || 'N/A'}`;
 
           <div className="flex flex-col lg:flex-row items-center justify-between gap-6 mb-8 text-left">
             <div className="flex-1">
-              <div className="flex items-center gap-4 bg-white/5 p-2 rounded-[2rem] w-fit">
-                 <div className="relative">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-white/5 p-2 rounded-[2rem] w-full lg:w-fit">
+                 <div className="relative flex-1 sm:flex-none">
                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                   <input type="text" placeholder="Buscar por responsable o nota..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="pl-12 pr-6 py-3 bg-white/5 rounded-2xl outline-none text-white w-80 text-sm" />
+                   <input
+                     type="text"
+                     placeholder="Buscar en todas las columnas..."
+                     value={searchTerm}
+                     onChange={e => setSearchTerm(e.target.value)}
+                     className="pl-12 pr-6 py-3 bg-white/5 rounded-2xl outline-none text-white w-full sm:w-96 text-sm"
+                   />
                  </div>
+                 {(searchTerm || activeColumnFilterCount > 0) && (
+                   <button
+                     type="button"
+                     onClick={() => {
+                       setSearchTerm('');
+                       clearAllColumnFilters();
+                     }}
+                     className="px-4 py-3 rounded-2xl bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 text-[10px] font-black uppercase tracking-widest transition-all"
+                   >
+                     Limpiar filtros{activeColumnFilterCount > 0 ? ` (${activeColumnFilterCount})` : ''}
+                   </button>
+                 )}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-4">
@@ -1601,40 +1684,29 @@ Notas: ${closure.notes || 'N/A'}`;
             <div className="overflow-x-auto text-left">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="bg-[#1D283A] border-b border-white/5">
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5">
-                      <div className="flex items-center gap-2">
-                        <Calendar className="w-3 h-3" />
-                        <span>Fecha y Hora</span>
-                      </div>
+                  <tr className="bg-[#1D283A] border-b border-white/5 align-top">
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 min-w-[190px]">
+                      {renderColumnHeader('date', 'Fecha y Hora', <Calendar className="w-3 h-3" />)}
                     </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5">
-                      <div className="flex items-center gap-2">
-                        <UserIcon className="w-3 h-3" />
-                        <span>Responsable</span>
-                      </div>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 min-w-[220px]">
+                      {renderColumnHeader('responsible', 'Responsable', <UserIcon className="w-3 h-3" />)}
                     </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5">$ Físico</th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5">
-                      <div className="flex items-center gap-2 justify-center">
-                        <Calculator className="w-3 h-3" />
-                        <span>Venta Sistema</span>
-                      </div>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
+                      {renderColumnHeader('physicalAmount', '$ Físico', <Banknote className="w-3 h-3" />, 'center')}
                     </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5">
-                      <div className="flex items-center gap-2 justify-center">
-                        <Wallet className="w-3 h-3" />
-                        <span>Cuadre Sistema</span>
-                      </div>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[190px]">
+                      {renderColumnHeader('systemAmount', 'Venta Sistema', <Calculator className="w-3 h-3" />, 'center')}
                     </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5">
-                      <div className="flex items-center gap-2 justify-center">
-                        <AlertCircle className="w-3 h-3" />
-                        <span>Diferencia</span>
-                      </div>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[190px]">
+                      {renderColumnHeader('systemBalance', 'Cuadre Sistema', <Wallet className="w-3 h-3" />, 'center')}
                     </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5">Estado</th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-right">Acciones</th>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
+                      {renderColumnHeader('difference', 'Diferencia', <AlertCircle className="w-3 h-3" />, 'center')}
+                    </th>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
+                      {renderColumnHeader('status', 'Estado', <ShieldCheck className="w-3 h-3" />, 'center')}
+                    </th>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-right min-w-[130px]">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
