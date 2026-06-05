@@ -477,21 +477,21 @@ function AppContent() {
       });
   }, [filteredClosures]);
 
-const dayStatuses = useMemo(() => {
-  const statuses: Record<string, 'safe' | 'transit' | 'bank' | 'mixed'> = {};
+  const dayStatuses = useMemo(() => {
+    const statuses: Record<string, 'safe' | 'transit' | 'bank' | 'mixed'> = {};
 
-  groupedClosures.forEach(group => {
-    const uniqueStatuses = new Set(group.items.map(item => item.status));
+    groupedClosures.forEach(group => {
+      const uniqueStatuses = new Set(group.items.map(item => item.status || 'safe'));
 
-    if (uniqueStatuses.size > 1) {
-      statuses[group.date] = 'mixed';
-    } else {
-      statuses[group.date] = group.items[0]?.status || 'safe';
-    }
-  });
+      if (uniqueStatuses.size === 1) {
+        statuses[group.date] = (group.items[0]?.status || 'safe') as 'safe' | 'transit' | 'bank';
+      } else {
+        statuses[group.date] = 'mixed';
+      }
+    });
 
-  return statuses;
-}, [groupedClosures]);
+    return statuses;
+  }, [groupedClosures]);
 
   const accumulatedSafeTotal = useMemo(() => {
     const closuresSafe = closures.filter(c => c.status === 'safe').reduce((acc, curr) => acc + curr.physicalAmount, 0);
@@ -992,20 +992,51 @@ const dayStatuses = useMemo(() => {
   };
 
   const toggleDayStatus = async (dayString: string) => {
-  const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
-  const currentStatus = dayStatuses[dayString] || 'safe';
-  const nextStatus = currentStatus === 'mixed' ? 'transit' : getNextStatus(currentStatus);
-
-  playSound(nextStatus);
-  
-  try {
-    for (const item of items) {
-      await updateDoc(doc(db, 'closures', item.id!), { status: nextStatus });
+    const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
+    const currentStatus = dayStatuses[dayString] || 'safe';
+    const nextStatus = currentStatus === 'mixed' ? 'transit' : getNextStatus(currentStatus);
+    playSound(nextStatus);
+    
+    try {
+      for (const item of items) {
+        await updateDoc(doc(db, 'closures', item.id!), { status: nextStatus });
+      }
+    } catch (err) {
+      console.error('Day status toggle error:', err);
     }
-  } catch (err) {
-    console.error('Day status toggle error:', err);
-  }
-};
+  };
+
+  const getDayStatusInfo = (status: 'safe' | 'transit' | 'bank' | 'mixed' | undefined) => {
+    if (status === 'bank') {
+      return {
+        label: 'En Banco',
+        Icon: Building2,
+        className: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+      };
+    }
+
+    if (status === 'transit') {
+      return {
+        label: 'En Tránsito',
+        Icon: Truck,
+        className: 'bg-amber-500/10 border-amber-500/20 text-amber-400'
+      };
+    }
+
+    if (status === 'mixed') {
+      return {
+        label: 'Mixto',
+        Icon: ArrowRightLeft,
+        className: 'bg-purple-500/10 border-purple-500/20 text-purple-400'
+      };
+    }
+
+    return {
+      label: 'En Tienda',
+      Icon: ShieldCheck,
+      className: 'bg-rose-500/10 border-rose-500/20 text-rose-400'
+    };
+  };
 
   const handlePrint = () => {
     window.print();
@@ -1869,40 +1900,24 @@ Notas: ${closure.notes || 'N/A'}`;
                               </div>
                            </td>
                            <td className="px-6 py-4 text-center">
-  <button
-    onClick={(e) => {
-      e.stopPropagation();
-      toggleDayStatus(group.date);
-    }}
-    className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${
-      dayStatuses[group.date] === 'bank'
-        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-        : dayStatuses[group.date] === 'transit'
-          ? 'bg-amber-500/10 border-amber-500/20 text-amber-400'
-          : dayStatuses[group.date] === 'mixed'
-            ? 'bg-purple-500/10 border-purple-500/20 text-purple-400'
-            : 'bg-rose-500/10 border-rose-500/20 text-rose-400'
-    }`}
-  >
-    {dayStatuses[group.date] === 'bank' ? (
-      <Building2 className="w-3 h-3" />
-    ) : dayStatuses[group.date] === 'transit' ? (
-      <Truck className="w-3 h-3" />
-    ) : dayStatuses[group.date] === 'mixed' ? (
-      <ArrowRightLeft className="w-3 h-3" />
-    ) : (
-      <ShieldCheck className="w-3 h-3" />
-    )}
+                              {(() => {
+                                const statusInfo = getDayStatusInfo(dayStatuses[group.date]);
+                                const StatusIcon = statusInfo.Icon;
 
-    {dayStatuses[group.date] === 'bank'
-      ? 'En Banco'
-      : dayStatuses[group.date] === 'transit'
-        ? 'En Tránsito'
-        : dayStatuses[group.date] === 'mixed'
-          ? 'Mixto'
-          : 'En Tienda'}
-  </button>
-</td>
+                                return (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleDayStatus(group.date);
+                                    }}
+                                    className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
+                                  >
+                                    <StatusIcon className="w-3 h-3" />
+                                    {statusInfo.label}
+                                  </button>
+                                );
+                              })()}
+                           </td>
                            <td className="px-6 py-4 text-right">
                               <ChevronDown className={`w-5 h-5 text-slate-700 transition-transform ml-auto ${expandedDays[group.date] ? 'rotate-180' : ''}`} />
                            </td>
