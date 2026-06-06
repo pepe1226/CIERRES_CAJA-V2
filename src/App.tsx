@@ -90,7 +90,14 @@ type DisplayClosureStatus = CashBoxStatus | 'mixed';
 const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank'];
 
 const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
-  if (status === 'transit' || status === 'bank') return status;
+  const normalized = String(status || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+  if (['bank', 'banco', 'en banco'].includes(normalized)) return 'bank';
+  if (['transit', 'transito', 'en transito', 'en tránsito', 'camino', 'viaje'].includes(normalized)) return 'transit';
   return 'safe';
 };
 
@@ -452,10 +459,6 @@ function AppContent() {
       balances[closure.id][initialStatus] = Number(closure.physicalAmount) || 0;
     });
 
-    const orderedClosures = [...closures]
-      .filter(closure => closure.id)
-      .sort((a, b) => a.date.localeCompare(b.date));
-
     const orderedTransfers = [...movements]
       .filter(movement =>
         (movement.type === 'transfer' || movement.type === 'internal_transfer') &&
@@ -474,7 +477,22 @@ function AppContent() {
 
       if (remainingAmount <= 0) return;
 
-      for (const closure of orderedClosures) {
+      const movementTime = new Date(movement.date).getTime();
+
+      const candidateClosures = [...closures]
+        .filter(closure => {
+          if (!closure.id) return false;
+
+          const closureTime = new Date(closure.date).getTime();
+
+          if (Number.isNaN(movementTime) || Number.isNaN(closureTime)) return true;
+
+          return closureTime <= movementTime;
+        })
+        // Al mover dinero físicamente, normalmente se toma primero lo más reciente disponible.
+        .sort((a, b) => b.date.localeCompare(a.date));
+
+      for (const closure of candidateClosures) {
         if (!closure.id) continue;
 
         const closureBalance = balances[closure.id];
