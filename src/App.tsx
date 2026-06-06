@@ -84,6 +84,17 @@ import { Dashboard } from './components/Dashboard';
 
 type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
 
+type CashBoxStatus = 'safe' | 'transit' | 'bank';
+type DisplayClosureStatus = CashBoxStatus | 'mixed';
+
+const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank'];
+
+const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
+  if (status === 'transit' || status === 'bank') return status;
+  return 'safe';
+};
+
+
 const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
   date: '',
   responsible: '',
@@ -425,6 +436,79 @@ function AppContent() {
     }
   };
 
+  const derivedClosureStatusById = useMemo(() => {
+    const balances: Record<string, Record<CashBoxStatus, number>> = {};
+
+    closures.forEach(closure => {
+      if (!closure.id) return;
+
+      balances[closure.id] = {
+        safe: 0,
+        transit: 0,
+        bank: 0
+      };
+
+      const initialStatus = normalizeCashBoxStatus(closure.status);
+      balances[closure.id][initialStatus] = Number(closure.physicalAmount) || 0;
+    });
+
+    const orderedClosures = [...closures]
+      .filter(closure => closure.id)
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const orderedTransfers = [...movements]
+      .filter(movement =>
+        (movement.type === 'transfer' || movement.type === 'internal_transfer') &&
+        movement.from &&
+        movement.to
+      )
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    orderedTransfers.forEach(movement => {
+      const from = normalizeCashBoxStatus(movement.from);
+      const to = normalizeCashBoxStatus(movement.to);
+
+      if (from === to) return;
+
+      let remainingAmount = Number(movement.amount) || 0;
+
+      if (remainingAmount <= 0) return;
+
+      for (const closure of orderedClosures) {
+        if (!closure.id) continue;
+
+        const closureBalance = balances[closure.id];
+
+        if (!closureBalance) continue;
+
+        const availableAmount = closureBalance[from];
+
+        if (availableAmount <= 0) continue;
+
+        const movedAmount = Math.min(availableAmount, remainingAmount);
+
+        closureBalance[from] -= movedAmount;
+        closureBalance[to] += movedAmount;
+        remainingAmount -= movedAmount;
+
+        if (remainingAmount <= 0.009) break;
+      }
+    });
+
+    return Object.entries(balances).reduce((result, [closureId, balance]) => {
+      const activeStatuses = cashBoxStatuses.filter(status => balance[status] > 0.009);
+
+      result[closureId] =
+        activeStatuses.length === 1
+          ? activeStatuses[0]
+          : activeStatuses.length > 1
+            ? 'mixed'
+            : 'safe';
+
+      return result;
+    }, {} as Record<string, DisplayClosureStatus>);
+  }, [closures, movements]);
+
   const filteredClosures = useMemo(() => {
     const normalizedGlobalSearch = normalizeSearchText(debouncedSearchTerm);
     const activeColumnFilters = Object.entries(columnFilters)
@@ -437,7 +521,11 @@ function AppContent() {
       const end = endOfDay(parseISO(filterEndDate));
       
       const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(date, { start, end });
-      const matchesStatus = filterStatus === 'all' || c.status === filterStatus;
+      const derivedStatus = c.id
+        ? derivedClosureStatusById[c.id] || normalizeCashBoxStatus(c.status)
+        : normalizeCashBoxStatus(c.status);
+
+      const matchesStatus = filterStatus === 'all' || derivedStatus === filterStatus;
       const matchesResponsible = filterResponsible === 'all' || c.responsible === filterResponsible;
       const matchesSearch = !normalizedGlobalSearch || getClosureSearchValues(c).some(value =>
         normalizeSearchText(value).includes(normalizedGlobalSearch)
@@ -449,16 +537,23 @@ function AppContent() {
         
       return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected;
     });
-  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, filterDateRangeType]);
+  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, filterDateRangeType, derivedClosureStatusById]);
 
   const uniqueResponsibles = useMemo(() => {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
   }, [closures]);
 
-  const getDayStatusFromItems = (items: ShiftClosure[]): 'safe' | 'transit' | 'bank' | 'mixed' => {
+  const getDayStatusFromItems = (items: ShiftClosure[]): DisplayClosureStatus => {
     if (items.length === 0) return 'safe';
 
-    const normalizedStatuses = items.map(item => item.status || 'safe');
+    const normalizedStatuses = items.map(item => {
+      if (item.id && derivedClosureStatusById[item.id]) {
+        return derivedClosureStatusById[item.id];
+      }
+
+      return normalizeCashBoxStatus(item.status);
+    });
+
     const allSafe = normalizedStatuses.every(status => status === 'safe');
     const allTransit = normalizedStatuses.every(status => status === 'transit');
     const allBank = normalizedStatuses.every(status => status === 'bank');
@@ -494,7 +589,7 @@ function AppContent() {
 
         return { date, items: sortedItems, totals, status };
       });
-  }, [filteredClosures]);
+  }, [filteredClosures, derivedClosureStatusById]);
 
 
   const accumulatedSafeTotal = useMemo(() => {
@@ -980,10 +1075,16 @@ function AppContent() {
 
   const toggleStatus = async (id: string) => {
     if (!user) return;
+
     const closure = closures.find(c => c.id === id);
+
     if (!closure) return;
-    const nextStatus = getNextStatus(closure.status);
+
+    const currentStatus = derivedClosureStatusById[id] || normalizeCashBoxStatus(closure.status);
+    const nextStatus = currentStatus === 'mixed' ? 'transit' : getNextStatus(currentStatus);
+
     playSound(nextStatus);
+
     try {
       await updateDoc(doc(db, 'closures', id), { status: nextStatus });
     } catch (err) {
@@ -1010,7 +1111,7 @@ function AppContent() {
     }
   };
 
-  const getDayStatusInfo = (status: 'safe' | 'transit' | 'bank' | 'mixed' | undefined) => {
+  const getDayStatusInfo = (status: DisplayClosureStatus | undefined) => {
     if (status === 'bank') {
       return {
         label: 'En Banco',
@@ -1914,7 +2015,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                       e.stopPropagation();
                                       toggleDayStatus(group.date);
                                     }}
-                                    title={`Estado del resumen del día: ${statusInfo.label} | Registros: ${group.items.map(item => item.status || 'safe').join(', ')}`}
+                                    title={`Estado del resumen del día: ${statusInfo.label} | Registros: ${group.items.map(item => item.id ? derivedClosureStatusById[item.id] || normalizeCashBoxStatus(item.status) : normalizeCashBoxStatus(item.status)).join(', ')}`}
                                     className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
                                   >
                                     <StatusIcon className="w-3 h-3" />
@@ -2036,9 +2137,25 @@ Notas: ${closure.notes || 'N/A'}`;
                                  </div>
                               </td>
                               <td className="px-6 py-4 text-center">
-                                <button onClick={() => toggleStatus(closure.id!)} className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto transition-all ${closure.status === 'transit' ? 'bg-amber-500/20 text-amber-500' : closure.status === 'bank' ? 'bg-emerald-500/20 text-emerald-500' : 'bg-rose-500/20 text-rose-500'}`}>
-                                  {closure.status === 'transit' ? <Truck className="w-4 h-4" /> : closure.status === 'bank' ? <Building2 className="w-4 h-4" /> : <ShieldCheck className="w-4 h-4" />}
-                                </button>
+                                {(() => {
+                                  const displayStatus = closure.id
+                                    ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
+                                    : normalizeCashBoxStatus(closure.status);
+
+                                  const statusInfo = getDayStatusInfo(displayStatus);
+                                  const StatusIcon = statusInfo.Icon;
+
+                                  return (
+                                    <button
+                                      onClick={() => toggleStatus(closure.id!)}
+                                      title={`Estado calculado: ${statusInfo.label}. Este estado considera los movimientos de caja registrados.`}
+                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
+                                    >
+                                      <StatusIcon className="w-3 h-3" />
+                                      {statusInfo.label}
+                                    </button>
+                                  );
+                                })()}
                               </td>
                               <td className="px-6 py-4 text-right">
                                 <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
