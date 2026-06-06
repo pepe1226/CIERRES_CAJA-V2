@@ -455,6 +455,21 @@ function AppContent() {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
   }, [closures]);
 
+  const getDayStatusFromItems = (items: ShiftClosure[]): 'safe' | 'transit' | 'bank' | 'mixed' => {
+    if (items.length === 0) return 'safe';
+
+    const normalizedStatuses = items.map(item => item.status || 'safe');
+    const allSafe = normalizedStatuses.every(status => status === 'safe');
+    const allTransit = normalizedStatuses.every(status => status === 'transit');
+    const allBank = normalizedStatuses.every(status => status === 'bank');
+
+    if (allBank) return 'bank';
+    if (allTransit) return 'transit';
+    if (allSafe) return 'safe';
+
+    return 'mixed';
+  };
+
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
     filteredClosures.forEach(c => {
@@ -462,36 +477,25 @@ function AppContent() {
       if (!groups[day]) groups[day] = [];
       groups[day].push(c);
     });
-    
+
     return Object.entries(groups)
       .sort(([a], [b]) => b.localeCompare(a))
       .map(([date, items]) => {
-        const totals = items.reduce((acc, curr) => ({
+        const sortedItems = [...items].sort((a,b) => b.date.localeCompare(a.date));
+
+        const totals = sortedItems.reduce((acc, curr) => ({
           physicalAmount: acc.physicalAmount + curr.physicalAmount,
           systemAmount: acc.systemAmount + curr.systemAmount,
           systemBalance: acc.systemBalance + curr.systemBalance,
           difference: acc.difference + curr.difference
         }), { physicalAmount: 0, systemAmount: 0, systemBalance: 0, difference: 0 });
-        
-        return { date, items: items.sort((a,b) => b.date.localeCompare(a.date)), totals };
+
+        const status = getDayStatusFromItems(sortedItems);
+
+        return { date, items: sortedItems, totals, status };
       });
   }, [filteredClosures]);
 
-  const dayStatuses = useMemo(() => {
-    const statuses: Record<string, 'safe' | 'transit' | 'bank' | 'mixed'> = {};
-
-    groupedClosures.forEach(group => {
-      const uniqueStatuses = new Set(group.items.map(item => item.status || 'safe'));
-
-      if (uniqueStatuses.size === 1) {
-        statuses[group.date] = (group.items[0]?.status || 'safe') as 'safe' | 'transit' | 'bank';
-      } else {
-        statuses[group.date] = 'mixed';
-      }
-    });
-
-    return statuses;
-  }, [groupedClosures]);
 
   const accumulatedSafeTotal = useMemo(() => {
     const closuresSafe = closures.filter(c => c.status === 'safe').reduce((acc, curr) => acc + curr.physicalAmount, 0);
@@ -990,22 +994,6 @@ function AppContent() {
   const toggleDay = (day: string) => {
     setExpandedDays(prev => ({ ...prev, [day]: !prev[day] }));
   };
-
-  const getDayStatusFromItems = (items: ShiftClosure[]): 'safe' | 'transit' | 'bank' | 'mixed' => {
-    if (items.length === 0) return 'safe';
-
-    const normalizedStatuses = items.map(item => item.status || 'safe');
-    const allSafe = normalizedStatuses.every(status => status === 'safe');
-    const allTransit = normalizedStatuses.every(status => status === 'transit');
-    const allBank = normalizedStatuses.every(status => status === 'bank');
-
-    if (allBank) return 'bank';
-    if (allTransit) return 'transit';
-    if (allSafe) return 'safe';
-
-    return 'mixed';
-  };
-
   const toggleDayStatus = async (dayString: string) => {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
     const currentStatus = getDayStatusFromItems(items);
@@ -1917,8 +1905,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            </td>
                            <td className="px-6 py-4 text-center">
                               {(() => {
-                                const currentDayStatus = getDayStatusFromItems(group.items);
-                                const statusInfo = getDayStatusInfo(currentDayStatus);
+                                const statusInfo = getDayStatusInfo(group.status);
                                 const StatusIcon = statusInfo.Icon;
 
                                 return (
@@ -1927,7 +1914,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                       e.stopPropagation();
                                       toggleDayStatus(group.date);
                                     }}
-                                    title={`Estado del resumen del día: ${statusInfo.label}`}
+                                    title={`Estado del resumen del día: ${statusInfo.label} | Registros: ${group.items.map(item => item.status || 'safe').join(', ')}`}
                                     className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
                                   >
                                     <StatusIcon className="w-3 h-3" />
