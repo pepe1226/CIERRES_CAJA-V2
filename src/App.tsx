@@ -1275,7 +1275,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-700 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl shadow-blue-500/20">
             <DollarSign className="w-12 h-12 text-white" />
           </div>
-          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.1</h1>
+          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.0</h1>
           <p className="text-slate-400 mb-10 leading-relaxed text-lg">Gestiona tus cierres de caja en la nube.</p>
           <button onClick={signInWithGoogle} className="w-full py-5 bg-white text-[#0F172A] rounded-2xl font-black text-lg hover:bg-slate-100 transition-all shadow-xl flex items-center justify-center gap-3">
             <UserIcon className="w-6 h-6" />
@@ -1300,7 +1300,7 @@ Notas: ${closure.notes || 'N/A'}`;
               <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center">
                 <Calculator className="text-white w-7 h-7" />
               </div>
-              <h1 className="text-xl font-black text-white">CIERRES 1.1</h1>
+              <h1 className="text-xl font-black text-white">CIERRES 1.0</h1>
             </div>
             <div className="flex items-center gap-4">
               <button onClick={() => setShowPrintPreview(true)} className="p-3 bg-white/5 hover:bg-blue-500/10 text-slate-400 rounded-2xl border border-white/5"><Printer className="w-5 h-5" /></button>
@@ -2635,6 +2635,25 @@ Notas: ${closure.notes || 'N/A'}`;
                     <button onClick={() => setMovementValues({...movementValues, type: 'outflow'})} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'outflow' ? 'bg-rose-600 text-white shadow-lg shadow-rose-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Gasto</button>
                     <button onClick={() => setMovementValues({...movementValues, type: 'transfer'})} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'transfer' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Banco</button>
                     <button onClick={() => setMovementValues({...movementValues, type: 'internal_transfer'})} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'internal_transfer' ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Interno</button>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Fecha del Movimiento</label>
+                    <input
+                      type="datetime-local"
+                      value={movementValues.date ? format(parseISO(movementValues.date), "yyyy-MM-dd'T'HH:mm") : format(new Date(), "yyyy-MM-dd'T'HH:mm")}
+                      onChange={e => {
+                        const selectedDate = e.target.value ? new Date(e.target.value) : new Date();
+                        setMovementValues({
+                          ...movementValues,
+                          date: selectedDate.toISOString()
+                        });
+                      }}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-sm outline-none focus:ring-2 focus:ring-purple-500"
+                    />
+                    <p className="mt-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
+                      Esta fecha será usada para ordenar el movimiento y afectar el estado del dinero.
+                    </p>
                   </div>
 
                   {(movementValues.type === 'transfer' || movementValues.type === 'internal_transfer') && (
