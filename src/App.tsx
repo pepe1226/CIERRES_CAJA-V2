@@ -86,8 +86,14 @@ type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmoun
 
 type CashBoxStatus = 'safe' | 'transit' | 'bank';
 type DisplayClosureStatus = CashBoxStatus | 'mixed';
+type ClosureLedgerEntry = {
+  displayStatus: CashBoxStatus;
+  hasSplitBalance: boolean;
+  balances: Record<CashBoxStatus, number>;
+};
 
 const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank'];
+const cashBoxStatusPriority: CashBoxStatus[] = ['safe', 'transit', 'bank'];
 
 const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
   const normalized = String(status || '')
@@ -99,6 +105,18 @@ const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
   if (['bank', 'banco', 'en banco'].includes(normalized)) return 'bank';
   if (['transit', 'transito', 'en transito', 'en tránsito', 'camino', 'viaje'].includes(normalized)) return 'transit';
   return 'safe';
+};
+
+const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): CashBoxStatus => {
+  return cashBoxStatusPriority.reduce<CashBoxStatus>((primary, status) => {
+    const primaryAmount = balance[primary] || 0;
+    const statusAmount = balance[status] || 0;
+
+    if (statusAmount > primaryAmount + 0.009) return status;
+    if (Math.abs(statusAmount - primaryAmount) <= 0.009 && statusAmount > 0.009) return status;
+
+    return primary;
+  }, 'safe');
 };
 
 
@@ -117,13 +135,13 @@ const normalizeSearchText = (value: unknown) =>
   String(value ?? '')
     .toLowerCase()
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .trim();
 
 const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
   if (status === 'transit') return 'En Tránsito';
   if (status === 'bank') return 'En Banco';
-  return 'Caja Fuerte';
+  return 'En Tienda';
 };
 
 const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
@@ -502,7 +520,7 @@ function AppContent() {
     }
   };
 
-  const derivedClosureStatusById = useMemo(() => {
+  const closureLedgerById = useMemo(() => {
     const balances: Record<string, Record<CashBoxStatus, number>> = {};
 
     closures.forEach(closure => {
@@ -575,26 +593,34 @@ function AppContent() {
     return Object.entries(balances).reduce((result, [closureId, balance]) => {
       const activeStatuses = cashBoxStatuses.filter(status => balance[status] > 0.009);
 
-      result[closureId] =
-        activeStatuses.length === 1
-          ? activeStatuses[0]
-          : activeStatuses.length > 1
-            ? 'mixed'
-            : 'safe';
+      result[closureId] = {
+        displayStatus: activeStatuses.length === 0 ? 'safe' : getPrimaryCashBoxStatus(balance),
+        hasSplitBalance: activeStatuses.length > 1,
+        balances: balance
+      };
 
       return result;
-    }, {} as Record<string, DisplayClosureStatus>);
+    }, {} as Record<string, ClosureLedgerEntry>);
   }, [closures, movements]);
 
-  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): DisplayClosureStatus =>
+  const derivedClosureStatusById = useMemo(() =>
+    Object.entries(closureLedgerById).reduce((result, [closureId, ledger]) => {
+      result[closureId] = ledger.displayStatus;
+      return result;
+    }, {} as Record<string, CashBoxStatus>),
+  [closureLedgerById]);
+
+  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): CashBoxStatus =>
     closure.id
       ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
       : normalizeCashBoxStatus(closure.status),
   [derivedClosureStatusById]);
 
   const isClosureAvailableForTrip = useCallback((closure: ShiftClosure) =>
-    getClosureDisplayStatus(closure) === 'safe' && !closure.tripId,
-  [getClosureDisplayStatus]);
+    getClosureDisplayStatus(closure) === 'safe' &&
+    !closure.tripId &&
+    !(closure.id && closureLedgerById[closure.id]?.hasSplitBalance),
+  [getClosureDisplayStatus, closureLedgerById]);
 
   const filteredClosures = useMemo(() => {
     const normalizedGlobalSearch = normalizeSearchText(debouncedSearchTerm);
@@ -637,6 +663,8 @@ function AppContent() {
   const getDayStatusFromItems = (items: ShiftClosure[]): DisplayClosureStatus => {
     if (items.length === 0) return 'safe';
 
+    const hasSplitClosure = items.some(item => item.id && closureLedgerById[item.id]?.hasSplitBalance);
+
     const normalizedStatuses = items.map(item => {
       if (item.id && derivedClosureStatusById[item.id]) {
         return derivedClosureStatusById[item.id];
@@ -651,7 +679,7 @@ function AppContent() {
 
     if (allBank) return 'bank';
     if (allTransit) return 'transit';
-    if (allSafe) return 'safe';
+    if (allSafe && !hasSplitClosure) return 'safe';
 
     return 'mixed';
   };
@@ -680,7 +708,7 @@ function AppContent() {
 
         return { date, items: sortedItems, totals, status };
       });
-  }, [filteredClosures, derivedClosureStatusById]);
+  }, [filteredClosures, derivedClosureStatusById, closureLedgerById]);
 
 
   const accumulatedSafeTotal = useMemo(() => {
@@ -754,6 +782,7 @@ function AppContent() {
       systemAmount: c.systemAmount,
       systemBalance: c.systemBalance,
       createdBy: c.createdBy,
+      tripId: c.tripId,
       category: undefined,
       subcategory: undefined,
       from: undefined,
@@ -778,7 +807,7 @@ function AppContent() {
     } else {
       const closure = closures.find(item => item.id === id);
       if (!closure || !isClosureAvailableForTrip(closure)) {
-        alert('Solo puedes seleccionar cierres disponibles en caja fuerte y sin viaje asociado.');
+        alert('Solo puedes seleccionar cierres disponibles en tienda y sin viaje asociado.');
         return;
       }
       newSelected.add(id);
@@ -803,7 +832,7 @@ function AppContent() {
         });
 
     if (selectedList.length === 0) {
-      alert('No hay cierres disponibles en caja fuerte para crear el viaje.');
+      alert('No hay cierres disponibles en tienda para crear el viaje.');
       setIsTripLoading(false);
       return;
     }
@@ -1240,10 +1269,6 @@ function AppContent() {
     if (!closure) return;
 
     const currentStatus = derivedClosureStatusById[id] || normalizeCashBoxStatus(closure.status);
-    if (currentStatus === 'mixed') {
-      alert('Este cierre está mixto por movimientos parciales. Ajusta o elimina los movimientos relacionados antes de cambiarlo manualmente.');
-      return;
-    }
     const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
@@ -1534,7 +1559,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         {viewingCajaMovements === 'safe' && <ShieldCheck className="w-8 h-8 text-blue-400" />}
                         {viewingCajaMovements === 'transit' && <Truck className="w-8 h-8 text-amber-400" />}
                         {viewingCajaMovements === 'bank' && <Building2 className="w-8 h-8 text-emerald-400" />}
-                        Movimientos: {viewingCajaMovements === 'safe' ? 'Caja Fuerte' : viewingCajaMovements === 'transit' ? 'En Tránsito' : 'Banco'}
+                        Movimientos: {viewingCajaMovements === 'safe' ? 'En Tienda' : viewingCajaMovements === 'transit' ? 'En Tránsito' : 'Banco'}
                       </h3>
                       <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Historial detallado de transacciones</p>
                     </div>
@@ -1551,7 +1576,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       {combinedMovements
                         .filter(m => 
                           (m.source === 'movement' && (m.from === viewingCajaMovements || m.to === viewingCajaMovements)) ||
-                          (m.source === 'closure' && m.status === viewingCajaMovements)
+                          (m.source === 'closure' && m.status === viewingCajaMovements && !m.tripId)
                         )
                         .map(m => (
                           <div key={`${m.source}-${m.id}`} className="group bg-white/2 hover:bg-white/5 p-6 rounded-3xl border border-white/5 transition-all flex items-center justify-between">
@@ -1642,7 +1667,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       
                       {combinedMovements.filter(m => 
                         (m.source === 'movement' && (m.from === viewingCajaMovements || m.to === viewingCajaMovements)) ||
-                        (m.source === 'closure' && m.status === viewingCajaMovements)
+                        (m.source === 'closure' && m.status === viewingCajaMovements && !m.tripId)
                       ).length === 0 && (
                         <div className="py-20 text-center">
                           <History className="w-16 h-16 text-slate-800 mx-auto mb-4" />
@@ -1670,7 +1695,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </div>
               <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
                 <ShieldCheck className="w-3 h-3 text-blue-400" />
-                Caja Fuerte
+                En Tienda
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
             </div>
@@ -1924,7 +1949,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
                 <option value="all">Todos los Estados</option>
-                <option value="safe">En Caja Fuerte</option>
+                <option value="safe">En Tienda</option>
                 <option value="transit">En Tránsito</option>
                 <option value="bank">En Banco</option>
               </select>
@@ -2319,14 +2344,12 @@ Notas: ${closure.notes || 'N/A'}`;
 
                                   const statusInfo = getDayStatusInfo(displayStatus);
                                   const StatusIcon = statusInfo.Icon;
-                                  const isMixedStatus = displayStatus === 'mixed';
 
                                   return (
                                     <button
                                       onClick={() => toggleStatus(closure.id!)}
-                                      disabled={isMixedStatus}
                                       title={`Estado calculado: ${statusInfo.label}. Este estado considera los movimientos de caja registrados.`}
-                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className} ${isMixedStatus ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
                                     >
                                       <StatusIcon className="w-3 h-3" />
                                       {statusInfo.label}
@@ -2759,7 +2782,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               <span className="text-[8px] font-black uppercase tracking-widest bg-slate-100 px-2 py-1 rounded">
                                 {(() => {
                                   const itemStatus = getClosureDisplayStatus(item);
-                                  return itemStatus === 'bank' ? 'En Banco' : itemStatus === 'transit' ? 'Tránsito' : itemStatus === 'mixed' ? 'Mixto' : 'Caja Fuerte';
+                                  return itemStatus === 'bank' ? 'En Banco' : itemStatus === 'transit' ? 'Tránsito' : 'En Tienda';
                                 })()}
                               </span>
                             </td>
@@ -2827,7 +2850,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           onChange={e => setMovementValues({...movementValues, from: e.target.value})}
                           className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                         >
-                          <option value="safe" className="bg-[#0F172A] text-white">Caja Fuerte</option>
+                          <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                           <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
                           <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
                         </select>
@@ -2839,7 +2862,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           onChange={e => setMovementValues({...movementValues, to: e.target.value})}
                           className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                         >
-                          <option value="safe" className="bg-[#0F172A] text-white">Caja Fuerte</option>
+                          <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                           <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
                           <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
                         </select>
@@ -2857,7 +2880,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             onChange={e => setMovementValues({...movementValues, from: e.target.value})}
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
-                            <option value="safe" className="bg-[#0F172A] text-white">Caja Fuerte</option>
+                            <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                             <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
                           </select>
