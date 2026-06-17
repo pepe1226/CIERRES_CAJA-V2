@@ -126,6 +126,60 @@ const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
   return 'Caja Fuerte';
 };
 
+const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
+  (Number(closure.physicalAmount) || 0) - (Number(closure.systemBalance) || 0);
+
+const getMovementDefaults = (
+  type: Movement['type'],
+  caja?: string,
+  current: Partial<Movement> = {}
+): Partial<Movement> => {
+  const base = {
+    amount: current.amount || 0,
+    description: current.description || '',
+    date: current.date || new Date().toISOString()
+  };
+
+  if (type === 'outflow') {
+    return {
+      ...base,
+      type,
+      category: current.category || 'Sueldos',
+      subcategory: current.subcategory || '',
+      from: caja || current.from || 'safe',
+      to: undefined
+    };
+  }
+
+  if (type === 'transfer') {
+    const from = caja || (current.from && current.from !== 'bank' ? current.from : 'transit');
+    return {
+      ...base,
+      type,
+      category: undefined,
+      subcategory: '',
+      from,
+      to: 'bank'
+    };
+  }
+
+  const from = caja || current.from || 'safe';
+  const to = current.to && current.to !== from
+    ? current.to
+    : from === 'safe'
+      ? 'transit'
+      : 'safe';
+
+  return {
+    ...base,
+    type,
+    category: undefined,
+    subcategory: '',
+    from,
+    to
+  };
+};
+
 const getClosureSearchValues = (closure: ShiftClosure) => {
   const parsedDate = parseISO(closure.date);
   const dateValues = Number.isNaN(parsedDate.getTime())
@@ -527,6 +581,16 @@ function AppContent() {
     }, {} as Record<string, DisplayClosureStatus>);
   }, [closures, movements]);
 
+  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): DisplayClosureStatus =>
+    closure.id
+      ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
+      : normalizeCashBoxStatus(closure.status),
+  [derivedClosureStatusById]);
+
+  const isClosureAvailableForTrip = useCallback((closure: ShiftClosure) =>
+    getClosureDisplayStatus(closure) === 'safe' && !closure.tripId,
+  [getClosureDisplayStatus]);
+
   const filteredClosures = useMemo(() => {
     const normalizedGlobalSearch = normalizeSearchText(debouncedSearchTerm);
     const activeColumnFilters = Object.entries(columnFilters)
@@ -663,16 +727,7 @@ function AppContent() {
 
   const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string) => {
     setFormError(null);
-    setMovementValues({
-      type,
-      amount: 0,
-      description: '',
-      date: new Date().toISOString(),
-      category: type === 'outflow' ? 'Sueldos' : undefined,
-      subcategory: '',
-      from: caja,
-      to: type === 'transfer' ? 'bank' : type === 'internal_transfer' ? (caja === 'safe' ? 'transit' : 'safe') : undefined
-    });
+    setMovementValues(getMovementDefaults(type, caja));
     setEditingMovementId(null);
     setIsAddingMovement(true);
     setContextMenu(null);
@@ -692,12 +747,12 @@ function AppContent() {
     if (!user || !tripFormValues.description) return;
     
     setIsTripLoading(true);
-    // If there were selected closures, used them. Otherwise, use all 'safe' closures in the date range.
+    // If there are selected closures, use only eligible ones. Otherwise, use all available safe closures in the date range.
     const selectedList = selectedClosures.size > 0 
-      ? closures.filter(c => c.id && selectedClosures.has(c.id))
+      ? closures.filter(c => c.id && selectedClosures.has(c.id) && isClosureAvailableForTrip(c))
       : closures.filter(c => {
           const d = parseISO(c.date);
-          return c.status === 'safe' && 
+          return isClosureAvailableForTrip(c) &&
                  isWithinInterval(d, { 
                    start: startOfDay(parseISO(tripFormValues.startDate)), 
                    end: endOfDay(parseISO(tripFormValues.endDate)) 
@@ -705,7 +760,7 @@ function AppContent() {
         });
 
     if (selectedList.length === 0) {
-      alert('No hay cierres seleccionados o disponibles en este rango para crear el viaje.');
+      alert('No hay cierres disponibles en caja fuerte para crear el viaje.');
       setIsTripLoading(false);
       return;
     }
@@ -767,6 +822,11 @@ function AppContent() {
   };
 
   const handleDeleteTrip = async (tripId: string) => {
+    const trip = trips.find(t => t.id === tripId);
+    if (trip?.status === 'completed') {
+      alert('No se puede eliminar un viaje ya depositado. El dinero ya fue marcado como banco.');
+      return;
+    }
     if (!window.confirm('¿Eliminar este viaje? Los cierres marcados volverán a estar disponibles.')) return;
     try {
       const tripClosures = closures.filter(c => c.tripId === tripId);
@@ -841,7 +901,7 @@ function AppContent() {
     if (!user || !inlineAddValues.responsible || isSaving) return;
     setIsSaving(true);
     try {
-      const diff = (inlineAddValues.physicalAmount || 0) - (inlineAddValues.systemAmount || 0);
+      const diff = calculateClosureDifference(inlineAddValues);
       let dateToUse = new Date();
       if (inlineAddValues.date) {
         const parsed = new Date(inlineAddValues.date);
@@ -888,7 +948,7 @@ function AppContent() {
     if (!user || !inlineEditingId || isSaving) return;
     setIsSaving(true);
     try {
-      const diff = (inlineEditValues.physicalAmount || 0) - (inlineEditValues.systemAmount || 0);
+      const diff = calculateClosureDifference(inlineEditValues);
       await updateDoc(doc(db, 'closures', inlineEditingId), {
         ...inlineEditValues,
         difference: diff,
@@ -920,9 +980,10 @@ function AppContent() {
       for (const [id, values] of Object.entries(bulkEditValues)) {
         const original = closures.find(c => c.id === id);
         if (!original) continue;
-        const physical = values.physicalAmount ?? original.physicalAmount;
-        const system = values.systemAmount ?? original.systemAmount;
-        const diff = physical - system;
+        const diff = calculateClosureDifference({
+          physicalAmount: values.physicalAmount ?? original.physicalAmount,
+          systemBalance: values.systemBalance ?? original.systemBalance
+        });
         await updateDoc(doc(db, 'closures', id), {
           ...values,
           difference: diff,
@@ -969,14 +1030,7 @@ function AppContent() {
       setMovementValues({ ...movement });
     } else {
       setEditingMovementId(null);
-      setMovementValues({
-        type,
-        amount: 0,
-        description: '',
-        date: new Date().toISOString(),
-        from: type === 'outflow' ? 'safe' : (type === 'transfer' ? 'transit' : 'safe'),
-        to: type === 'transfer' ? 'bank' : type === 'internal_transfer' ? 'transit' : (type === 'inflow' ? 'safe' : undefined)
-      });
+      setMovementValues(getMovementDefaults(type));
     }
     setIsAddingMovement(true);
   };
@@ -1016,6 +1070,22 @@ function AppContent() {
       return;
     }
 
+    if ((movementValues.type === 'transfer' || movementValues.type === 'internal_transfer')) {
+      if (!movementValues.from || !movementValues.to) {
+        setFormError('SELECCIONE ORIGEN Y DESTINO');
+        return;
+      }
+      if (movementValues.from === movementValues.to) {
+        setFormError('ORIGEN Y DESTINO DEBEN SER DIFERENTES');
+        return;
+      }
+    }
+
+    if (movementValues.type === 'outflow' && !movementValues.from) {
+      setFormError('SELECCIONE DESDE DONDE SE PAGA');
+      return;
+    }
+
     try {
       // Clean data for Firestore
       const { id: _id, ...rest } = movementValues;
@@ -1025,10 +1095,10 @@ function AppContent() {
         amount: Number(movementValues.amount),
         description: movementValues.description.toUpperCase(),
         createdBy: user.uid,
-        category: currentCategory || null,
-        subcategory: currentSubcategory || null,
+        category: movementValues.type === 'outflow' ? currentCategory || 'Sueldos' : null,
+        subcategory: movementValues.type === 'outflow' ? currentSubcategory || null : null,
         from: movementValues.from || null,
-        to: movementValues.to || null,
+        to: movementValues.type === 'outflow' ? null : movementValues.to || null,
       };
 
       if (!editingMovementId) {
@@ -2273,7 +2343,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             ? selectedClosures.size
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
-                                return c.status === 'safe' && isWithinInterval(d, { 
+                                return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
                                   start: startOfDay(parseISO(tripFormValues.startDate)), 
                                   end: endOfDay(parseISO(tripFormValues.endDate)) 
                                 });
@@ -2288,7 +2358,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             ? closures.filter(c => selectedClosures.has(c.id!)).reduce((a,b) => a + b.physicalAmount, 0)
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
-                                return c.status === 'safe' && isWithinInterval(d, { 
+                                return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
                                   start: startOfDay(parseISO(tripFormValues.startDate)), 
                                   end: endOfDay(parseISO(tripFormValues.endDate)) 
                                 });
@@ -2632,9 +2702,9 @@ Notas: ${closure.notes || 'N/A'}`;
                 <h3 className="text-xl font-black text-white mb-6 uppercase tracking-tight">Movimiento de Caja</h3>
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-4">
-                    <button onClick={() => setMovementValues({...movementValues, type: 'outflow'})} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'outflow' ? 'bg-rose-600 text-white shadow-lg shadow-rose-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Gasto</button>
-                    <button onClick={() => setMovementValues({...movementValues, type: 'transfer'})} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'transfer' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Banco</button>
-                    <button onClick={() => setMovementValues({...movementValues, type: 'internal_transfer'})} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'internal_transfer' ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Interno</button>
+                    <button onClick={() => setMovementValues(getMovementDefaults('outflow', undefined, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'outflow' ? 'bg-rose-600 text-white shadow-lg shadow-rose-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Gasto</button>
+                    <button onClick={() => setMovementValues(getMovementDefaults('transfer', undefined, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'transfer' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Banco</button>
+                    <button onClick={() => setMovementValues(getMovementDefaults('internal_transfer', undefined, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'internal_transfer' ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Interno</button>
                   </div>
 
                   <div>
