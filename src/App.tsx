@@ -482,7 +482,7 @@ function AppContent() {
         c.systemBalance,
         c.physicalAmount,
         c.difference,
-        c.status,
+        getClosureDisplayStatus(c),
         c.notes || ''
       ].join(';'));
       
@@ -739,13 +739,15 @@ function AppContent() {
       ...m, 
       source: 'movement' as const 
     }));
-    const boxClosures = closures.map(c => ({
+    const boxClosures = closures.map(c => {
+      const displayStatus = getClosureDisplayStatus(c);
+      return {
       id: c.id!,
       date: c.date,
       type: 'closure' as const,
       amount: c.physicalAmount,
       description: `CIERRE: ${c.responsible}`,
-      status: c.status,
+      status: displayStatus,
       source: 'closure' as const,
       responsible: c.responsible,
       difference: c.difference,
@@ -755,10 +757,11 @@ function AppContent() {
       category: undefined,
       subcategory: undefined,
       from: undefined,
-      to: c.status
-    }));
+      to: displayStatus
+    };
+    });
     return [...boxMovements, ...boxClosures].sort((a, b) => b.date.localeCompare(a.date));
-  }, [movements, closures]);
+  }, [movements, closures, getClosureDisplayStatus]);
 
   const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string) => {
     setFormError(null);
@@ -2754,7 +2757,10 @@ Notas: ${closure.notes || 'N/A'}`;
                             </td>
                             <td className="py-4 text-center">
                               <span className="text-[8px] font-black uppercase tracking-widest bg-slate-100 px-2 py-1 rounded">
-                                {item.status === 'bank' ? 'En Banco' : item.status === 'transit' ? 'Tránsito' : 'Caja Fuerte'}
+                                {(() => {
+                                  const itemStatus = getClosureDisplayStatus(item);
+                                  return itemStatus === 'bank' ? 'En Banco' : itemStatus === 'transit' ? 'Tránsito' : itemStatus === 'mixed' ? 'Mixto' : 'Caja Fuerte';
+                                })()}
                               </span>
                             </td>
                           </tr>
