@@ -1,4 +1,4 @@
-# CIERRES 1.0
+# CIERRES 1.1
 
 Aplicación React + Vite para control de cierres, movimientos y cajas.
 

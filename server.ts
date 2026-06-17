@@ -3,4 +3,4 @@
 // Para desarrollo local usa: npm run dev
 // Para probar funciones serverless usa: vercel dev
 
-console.log('CIERRES 1.0 usa Vercel Functions en la carpeta api/.');
+console.log('CIERRES 1.1 usa Vercel Functions en la carpeta api/.');

@@ -1424,7 +1424,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-700 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl shadow-blue-500/20">
             <DollarSign className="w-12 h-12 text-white" />
           </div>
-          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.0</h1>
+          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.1</h1>
           <p className="text-slate-400 mb-10 leading-relaxed text-lg">Gestiona tus cierres de caja en la nube.</p>
           <button onClick={signInWithGoogle} className="w-full py-5 bg-white text-[#0F172A] rounded-2xl font-black text-lg hover:bg-slate-100 transition-all shadow-xl flex items-center justify-center gap-3">
             <UserIcon className="w-6 h-6" />
@@ -1449,7 +1449,7 @@ Notas: ${closure.notes || 'N/A'}`;
               <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center">
                 <Calculator className="text-white w-7 h-7" />
               </div>
-              <h1 className="text-xl font-black text-white">CIERRES 1.0</h1>
+              <h1 className="text-xl font-black text-white">CIERRES 1.1</h1>
             </div>
             <div className="flex items-center gap-4">
               <button onClick={() => setShowPrintPreview(true)} className="p-3 bg-white/5 hover:bg-blue-500/10 text-slate-400 rounded-2xl border border-white/5"><Printer className="w-5 h-5" /></button>
@@ -2688,7 +2688,7 @@ Notas: ${closure.notes || 'N/A'}`;
               <div className="flex justify-between items-start border-b-4 border-slate-950 pb-10 mb-12">
                 <div>
                   <h1 className="text-5xl font-black text-slate-950 mb-2 font-sans">REPORTE DE CIERRES</h1>
-                  <p className="text-slate-500 font-sans font-black tracking-widest text-sm uppercase">Consolidado de Operaciones • Sistema 1.0</p>
+                  <p className="text-slate-500 font-sans font-black tracking-widest text-sm uppercase">Consolidado de Operaciones • Sistema 1.1</p>
                   <p className="text-slate-500 text-xs mt-4 uppercase font-bold tracking-widest flex items-center gap-2">
                     <Calendar className="w-3 h-3" />
                     Periodo: {format(parseISO(filterStartDate), 'dd/MM/yyyy')} — {format(parseISO(filterEndDate), 'dd/MM/yyyy')}
