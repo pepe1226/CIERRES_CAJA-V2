@@ -129,13 +129,18 @@ const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
 const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
   (Number(closure.physicalAmount) || 0) - (Number(closure.systemBalance) || 0);
 
+const toNonNegativeNumber = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
 const getMovementDefaults = (
   type: Movement['type'],
   caja?: string,
   current: Partial<Movement> = {}
 ): Partial<Movement> => {
   const base = {
-    amount: current.amount || 0,
+    amount: toNonNegativeNumber(current.amount),
     description: current.description || '',
     date: current.date || new Date().toISOString()
   };
@@ -625,6 +630,10 @@ function AppContent() {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
   }, [closures]);
 
+  const selectedTripClosures = useMemo(() =>
+    closures.filter(c => c.id && selectedClosures.has(c.id) && isClosureAvailableForTrip(c)),
+  [closures, selectedClosures, isClosureAvailableForTrip]);
+
   const getDayStatusFromItems = (items: ShiftClosure[]): DisplayClosureStatus => {
     if (items.length === 0) return 'safe';
 
@@ -699,6 +708,32 @@ function AppContent() {
     return movements.filter(m => m.type === 'outflow').reduce((acc, curr) => acc + curr.amount, 0);
   }, [movements]);
 
+  const getBoxBalance = useCallback((box?: string | null) => {
+    const normalizedBox = normalizeCashBoxStatus(box);
+    if (normalizedBox === 'transit') return accumulatedTransitTotal;
+    if (normalizedBox === 'bank') return accumulatedBankTotal;
+    return accumulatedSafeTotal;
+  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal]);
+
+  const getAvailableSourceBalance = useCallback((box?: string | null) => {
+    let available = getBoxBalance(box);
+    const currentMovement = editingMovementId
+      ? movements.find(movement => movement.id === editingMovementId)
+      : undefined;
+
+    if (currentMovement) {
+      const normalizedBox = normalizeCashBoxStatus(box);
+      if (currentMovement.from && normalizeCashBoxStatus(currentMovement.from) === normalizedBox) {
+        available += Number(currentMovement.amount) || 0;
+      }
+      if (currentMovement.to && normalizeCashBoxStatus(currentMovement.to) === normalizedBox) {
+        available -= Number(currentMovement.amount) || 0;
+      }
+    }
+
+    return Math.max(0, available);
+  }, [editingMovementId, getBoxBalance, movements]);
+
   const combinedMovements = useMemo(() => {
     const boxMovements = movements.map(m => ({ 
       ...m, 
@@ -738,6 +773,11 @@ function AppContent() {
     if (newSelected.has(id)) {
       newSelected.delete(id);
     } else {
+      const closure = closures.find(item => item.id === id);
+      if (!closure || !isClosureAvailableForTrip(closure)) {
+        alert('Solo puedes seleccionar cierres disponibles en caja fuerte y sin viaje asociado.');
+        return;
+      }
       newSelected.add(id);
     }
     setSelectedClosures(newSelected);
@@ -749,7 +789,7 @@ function AppContent() {
     setIsTripLoading(true);
     // If there are selected closures, use only eligible ones. Otherwise, use all available safe closures in the date range.
     const selectedList = selectedClosures.size > 0 
-      ? closures.filter(c => c.id && selectedClosures.has(c.id) && isClosureAvailableForTrip(c))
+      ? selectedTripClosures
       : closures.filter(c => {
           const d = parseISO(c.date);
           return isClosureAvailableForTrip(c) &&
@@ -901,17 +941,23 @@ function AppContent() {
     if (!user || !inlineAddValues.responsible || isSaving) return;
     setIsSaving(true);
     try {
-      const diff = calculateClosureDifference(inlineAddValues);
+      const sanitizedValues = {
+        ...inlineAddValues,
+        physicalAmount: toNonNegativeNumber(inlineAddValues.physicalAmount),
+        systemAmount: toNonNegativeNumber(inlineAddValues.systemAmount),
+        systemBalance: toNonNegativeNumber(inlineAddValues.systemBalance)
+      };
+      const diff = calculateClosureDifference(sanitizedValues);
       let dateToUse = new Date();
-      if (inlineAddValues.date) {
-        const parsed = new Date(inlineAddValues.date);
+      if (sanitizedValues.date) {
+        const parsed = new Date(sanitizedValues.date);
         if (!isNaN(parsed.getTime())) {
           dateToUse = parsed;
         }
       }
 
       await addDoc(collection(db, 'closures'), {
-        ...inlineAddValues,
+        ...sanitizedValues,
         difference: diff,
         date: Timestamp.fromDate(dateToUse),
         createdBy: user.uid,
@@ -948,11 +994,17 @@ function AppContent() {
     if (!user || !inlineEditingId || isSaving) return;
     setIsSaving(true);
     try {
-      const diff = calculateClosureDifference(inlineEditValues);
-      await updateDoc(doc(db, 'closures', inlineEditingId), {
+      const sanitizedValues = {
         ...inlineEditValues,
+        physicalAmount: toNonNegativeNumber(inlineEditValues.physicalAmount),
+        systemAmount: toNonNegativeNumber(inlineEditValues.systemAmount),
+        systemBalance: toNonNegativeNumber(inlineEditValues.systemBalance)
+      };
+      const diff = calculateClosureDifference(sanitizedValues);
+      await updateDoc(doc(db, 'closures', inlineEditingId), {
+        ...sanitizedValues,
         difference: diff,
-        date: Timestamp.fromDate(new Date(inlineEditValues.date!))
+        date: Timestamp.fromDate(new Date(sanitizedValues.date!))
       });
       setInlineEditingId(null);
     } catch (err) {
@@ -980,14 +1032,20 @@ function AppContent() {
       for (const [id, values] of Object.entries(bulkEditValues)) {
         const original = closures.find(c => c.id === id);
         if (!original) continue;
+        const sanitizedValues = {
+          ...values,
+          physicalAmount: values.physicalAmount === undefined ? undefined : toNonNegativeNumber(values.physicalAmount),
+          systemAmount: values.systemAmount === undefined ? undefined : toNonNegativeNumber(values.systemAmount),
+          systemBalance: values.systemBalance === undefined ? undefined : toNonNegativeNumber(values.systemBalance)
+        };
         const diff = calculateClosureDifference({
-          physicalAmount: values.physicalAmount ?? original.physicalAmount,
-          systemBalance: values.systemBalance ?? original.systemBalance
+          physicalAmount: sanitizedValues.physicalAmount ?? original.physicalAmount,
+          systemBalance: sanitizedValues.systemBalance ?? original.systemBalance
         });
         await updateDoc(doc(db, 'closures', id), {
-          ...values,
+          ...sanitizedValues,
           difference: diff,
-          date: values.date ? Timestamp.fromDate(new Date(values.date)) : Timestamp.fromDate(new Date(original.date))
+          date: sanitizedValues.date ? Timestamp.fromDate(new Date(sanitizedValues.date)) : Timestamp.fromDate(new Date(original.date))
         });
       }
       setIsBulkEditing(false);
@@ -1060,7 +1118,9 @@ function AppContent() {
       currentSubcategory = sub;
     }
 
-    if (!movementValues.amount || movementValues.amount <= 0) {
+    const movementAmount = toNonNegativeNumber(movementValues.amount);
+
+    if (movementAmount <= 0) {
       setFormError('EL MONTO DEBE SER MAYOR A 0');
       return;
     }
@@ -1086,13 +1146,21 @@ function AppContent() {
       return;
     }
 
+    if (movementValues.from) {
+      const available = getAvailableSourceBalance(movementValues.from);
+      if (movementAmount > available + 0.009) {
+        setFormError(`SALDO INSUFICIENTE EN ${getClosureStatusLabel(normalizeCashBoxStatus(movementValues.from))}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
+        return;
+      }
+    }
+
     try {
       // Clean data for Firestore
       const { id: _id, ...rest } = movementValues;
       const data: any = {
         date: Timestamp.fromDate(new Date(movementValues.date!)),
         type: movementValues.type,
-        amount: Number(movementValues.amount),
+        amount: movementAmount,
         description: movementValues.description.toUpperCase(),
         createdBy: user.uid,
         category: movementValues.type === 'outflow' ? currentCategory || 'Sueldos' : null,
@@ -1169,7 +1237,11 @@ function AppContent() {
     if (!closure) return;
 
     const currentStatus = derivedClosureStatusById[id] || normalizeCashBoxStatus(closure.status);
-    const nextStatus = currentStatus === 'mixed' ? 'transit' : getNextStatus(currentStatus);
+    if (currentStatus === 'mixed') {
+      alert('Este cierre está mixto por movimientos parciales. Ajusta o elimina los movimientos relacionados antes de cambiarlo manualmente.');
+      return;
+    }
+    const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
 
@@ -1186,7 +1258,11 @@ function AppContent() {
   const toggleDayStatus = async (dayString: string) => {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
     const currentStatus = getDayStatusFromItems(items);
-    const nextStatus = currentStatus === 'mixed' ? 'transit' : getNextStatus(currentStatus);
+    if (currentStatus === 'mixed') {
+      alert('Este día tiene cierres en estado mixto. Ajusta cada movimiento parcial antes de cambiar todo el día.');
+      return;
+    }
+    const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
     
@@ -1985,10 +2061,11 @@ Notas: ${closure.notes || 'N/A'}`;
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
                           <input 
                             ref={physicalAmountRef}
-                            type="number" 
+                            type="number"
+                            min="0"
                             value={inlineAddValues.physicalAmount || ''} 
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: parseFloat(e.target.value) || 0})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})} 
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemAmountRef, responsibleInputRef)}
                             className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
                             placeholder="FÍSICO"
@@ -1999,10 +2076,11 @@ Notas: ${closure.notes || 'N/A'}`;
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
                           <input 
                             ref={systemAmountRef}
-                            type="number" 
+                            type="number"
+                            min="0"
                             value={inlineAddValues.systemAmount || ''} 
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: parseFloat(e.target.value) || 0})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value)})} 
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemBalanceRef, physicalAmountRef)}
                             className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
                             placeholder="VENTA"
@@ -2013,10 +2091,11 @@ Notas: ${closure.notes || 'N/A'}`;
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
                           <input 
                             ref={systemBalanceRef}
-                            type="number" 
+                            type="number"
+                            min="0"
                             value={inlineAddValues.systemBalance || ''} 
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: parseFloat(e.target.value) || 0})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value)})} 
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, undefined, systemAmountRef)}
                             className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
                             placeholder="CUADRE"
@@ -2096,6 +2175,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               {(() => {
                                 const statusInfo = getDayStatusInfo(group.status);
                                 const StatusIcon = statusInfo.Icon;
+                                const isMixedStatus = group.status === 'mixed';
 
                                 return (
                                   <button
@@ -2103,8 +2183,9 @@ Notas: ${closure.notes || 'N/A'}`;
                                       e.stopPropagation();
                                       toggleDayStatus(group.date);
                                     }}
+                                    disabled={isMixedStatus}
                                     title={`Estado del resumen del día: ${statusInfo.label} | Registros: ${group.items.map(item => item.id ? derivedClosureStatusById[item.id] || normalizeCashBoxStatus(item.status) : normalizeCashBoxStatus(item.status)).join(', ')}`}
-                                    className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
+                                    className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className} ${isMixedStatus ? 'opacity-60 cursor-not-allowed' : ''}`}
                                   >
                                     <StatusIcon className="w-3 h-3" />
                                     {statusInfo.label}
@@ -2144,10 +2225,11 @@ Notas: ${closure.notes || 'N/A'}`;
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
                                   <input 
-                                    type="number" 
+                                    type="number"
+                                    min="0"
                                     value={inlineEditValues.physicalAmount} 
                                     onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, physicalAmount: parseFloat(e.target.value) || 0})}
+                                    onChange={e => setInlineEditValues({...inlineEditValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
                                     className="bg-transparent outline-none text-white text-center font-black font-sans text-sm w-full"
                                   />
@@ -2156,10 +2238,11 @@ Notas: ${closure.notes || 'N/A'}`;
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
                                   <input 
-                                    type="number" 
+                                    type="number"
+                                    min="0"
                                     value={inlineEditValues.systemAmount} 
                                     onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, systemAmount: parseFloat(e.target.value) || 0})}
+                                    onChange={e => setInlineEditValues({...inlineEditValues, systemAmount: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
                                     className="bg-transparent outline-none text-slate-400 text-center font-black font-sans text-sm w-full"
                                   />
@@ -2168,10 +2251,11 @@ Notas: ${closure.notes || 'N/A'}`;
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
                                   <input 
-                                    type="number" 
+                                    type="number"
+                                    min="0"
                                     value={inlineEditValues.systemBalance} 
                                     onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, systemBalance: parseFloat(e.target.value) || 0})}
+                                    onChange={e => setInlineEditValues({...inlineEditValues, systemBalance: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
                                     className="bg-transparent outline-none text-slate-400 text-center font-black font-sans text-sm w-full"
                                   />
@@ -2232,12 +2316,14 @@ Notas: ${closure.notes || 'N/A'}`;
 
                                   const statusInfo = getDayStatusInfo(displayStatus);
                                   const StatusIcon = statusInfo.Icon;
+                                  const isMixedStatus = displayStatus === 'mixed';
 
                                   return (
                                     <button
                                       onClick={() => toggleStatus(closure.id!)}
+                                      disabled={isMixedStatus}
                                       title={`Estado calculado: ${statusInfo.label}. Este estado considera los movimientos de caja registrados.`}
-                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
+                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className} ${isMixedStatus ? 'opacity-60 cursor-not-allowed' : ''}`}
                                     >
                                       <StatusIcon className="w-3 h-3" />
                                       {statusInfo.label}
@@ -2265,12 +2351,12 @@ Notas: ${closure.notes || 'N/A'}`;
         </main>
 
         <AnimatePresence>
-          {selectedClosures.size > 0 && (
+          {selectedTripClosures.length > 0 && (
             <motion.div initial={{ y: 100 }} animate={{ y: 0 }} exit={{ y: 100 }} className="fixed bottom-10 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 text-left">
               <div className="bg-[#1E293B]/90 backdrop-blur-xl border border-blue-500/30 rounded-[2rem] p-4 shadow-2xl flex items-center justify-between">
                 <div className="pl-4">
-                  <p className="text-sm font-black text-white">{selectedClosures.size} Cierres Seleccionados</p>
-                  <p className="text-xs text-slate-400">Total: ${closures.filter(c => selectedClosures.has(c.id!)).reduce((a,b) => a + b.physicalAmount, 0).toLocaleString('es-CL')}</p>
+                  <p className="text-sm font-black text-white">{selectedTripClosures.length} Cierres Seleccionados</p>
+                  <p className="text-xs text-slate-400">Total: ${selectedTripClosures.reduce((a,b) => a + b.physicalAmount, 0).toLocaleString('es-CL')}</p>
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => setSelectedClosures(new Set())} className="px-4 py-2 text-slate-400 text-xs font-black uppercase">Cancelar</button>
@@ -2339,8 +2425,8 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div>
                         <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Cierres a incluir</p>
                         <p className="text-xl font-black text-white">
-                          {selectedClosures.size > 0 
-                            ? selectedClosures.size
+                            {selectedTripClosures.length > 0
+                              ? selectedTripClosures.length
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
                                 return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
@@ -2354,8 +2440,8 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div className="text-right">
                         <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Total Estimado</p>
                         <p className="text-xl font-black text-white font-sans">
-                          ${(selectedClosures.size > 0 
-                            ? closures.filter(c => selectedClosures.has(c.id!)).reduce((a,b) => a + b.physicalAmount, 0)
+                          ${(selectedTripClosures.length > 0
+                            ? selectedTripClosures.reduce((a,b) => a + b.physicalAmount, 0)
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
                                 return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
@@ -2846,7 +2932,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       </div>
                     </div>
                   )}
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Monto</label><input type="number" value={movementValues.amount || ''} onFocus={e => e.target.select()} onChange={e => setMovementValues({...movementValues, amount: parseFloat(e.target.value) || 0})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-2xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="0" /></div>
+                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Monto</label><input type="number" min="0" value={movementValues.amount || ''} onFocus={e => e.target.select()} onChange={e => setMovementValues({...movementValues, amount: toNonNegativeNumber(e.target.value)})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-2xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="0" /></div>
                   <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Descripción</label><input type="text" value={movementValues.description} onChange={e => setMovementValues({...movementValues, description: e.target.value})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-purple-500" placeholder="Ej: Pago de flete..." /></div>
                   
                   {formError && (
