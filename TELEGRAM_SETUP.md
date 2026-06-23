@@ -101,6 +101,7 @@ TELEGRAM_BOT_TOKEN=token_de_botfather
 TELEGRAM_SECRET_TOKEN=una_clave_interna_inventada_por_ti
 TELEGRAM_ALLOWED_CHAT_ID=
 TELEGRAM_CREATED_BY_UID=uid_del_usuario_google_admin
+CRON_SECRET=una_clave_larga_para_reintentos_automaticos
 
 FIREBASE_PROJECT_ID=gen-lang-client-0181048054
 FIRESTORE_DATABASE_ID=ai-studio-1c7e2a21-6400-4184-8dda-2ebe06e9d591
@@ -135,6 +136,7 @@ Después de publicar en Vercel, tendrás:
 ```txt
 https://TU_APP.vercel.app/api/telegram/status
 https://TU_APP.vercel.app/api/telegram/webhook
+https://TU_APP.vercel.app/api/telegram/retry-pending
 ```
 
 También dejé rutas limpias:
@@ -142,7 +144,39 @@ También dejé rutas limpias:
 ```txt
 https://TU_APP.vercel.app/telegram/status
 https://TU_APP.vercel.app/telegram/webhook
+https://TU_APP.vercel.app/telegram/retry-pending
 ```
+
+## 7.1 Reintento automatico de fotos pendientes
+
+Si Gemini responde saturado o temporalmente no disponible, el webhook guarda la foto en:
+
+```txt
+telegram_pending_photos
+```
+
+El archivo `vercel.json` programa un Cron Job cada 5 minutos para llamar:
+
+```txt
+/api/telegram/retry-pending
+```
+
+Para que Vercel autorice esa llamada, configura en Vercel:
+
+```txt
+CRON_SECRET=una_clave_larga_para_reintentos_automaticos
+```
+
+El endpoint también se puede ejecutar manualmente:
+
+```bash
+curl -H "Authorization: Bearer TU_CRON_SECRET" \
+  "https://TU_APP.vercel.app/api/telegram/retry-pending"
+```
+
+También acepta `?secret=TU_CRON_SECRET` para una prueba rápida desde el navegador, pero es mejor usar el header `Authorization`.
+
+Cada foto pendiente se intenta hasta 5 veces. Si una función queda en `processing` por timeout, el siguiente cron la retoma después de 10 minutos.
 
 ## 8. Verificar configuración
 

@@ -7,6 +7,10 @@ import {
 } from "../_lib/telegramPhotoProcessor.js";
 import { getTelegramConfig, isTemporaryGeminiError } from "../_lib/telegramMovement.js";
 
+const MAX_ITEMS = 5;
+const MAX_ATTEMPTS_PER_PHOTO = 5;
+const STALE_PROCESSING_MINUTES = 10;
+
 function getQuerySecret(req: any) {
   try {
     const url = new URL(req.url || "", "https://local.vercel.app");
@@ -41,6 +45,24 @@ function isAuthorized(req: any) {
   );
 }
 
+function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate();
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isStaleProcessing(pending: any) {
+  if (pending.status !== "processing") return false;
+
+  const updatedAt = toDate(pending.updatedAt) || toDate(pending.createdAt);
+  if (!updatedAt) return true;
+
+  return Date.now() - updatedAt.getTime() >= STALE_PROCESSING_MINUTES * 60 * 1000;
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "GET" && req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -54,22 +76,33 @@ export default async function handler(req: any, res: any) {
   }
 
   const db = getFirebaseAdminDb();
-  const maxItems = 5;
-  const maxAttemptsPerPhoto = 5;
 
   const snapshot = await db
     .collection("telegram_pending_photos")
-    .where("status", "==", "pending")
-    .limit(maxItems)
+    .where("status", "in", ["pending", "processing"])
+    .limit(MAX_ITEMS * 2)
     .get();
 
   const results: any[] = [];
+  let processedCount = 0;
 
   for (const pendingDoc of snapshot.docs) {
     const pending = pendingDoc.data();
     const pendingId = pendingDoc.id;
     const attempts = Number(pending.attempts || 0);
     const message = pending.rawMessage;
+
+    if (pending.status === "processing" && !isStaleProcessing(pending)) {
+      results.push({ pendingId, ok: true, skipped: true, reason: "already-processing" });
+      continue;
+    }
+
+    if (processedCount >= MAX_ITEMS) {
+      results.push({ pendingId, ok: true, skipped: true, reason: "batch-limit" });
+      continue;
+    }
+
+    processedCount += 1;
 
     if (!message) {
       await markPendingStatus({
@@ -82,11 +115,11 @@ export default async function handler(req: any, res: any) {
       continue;
     }
 
-    if (attempts >= maxAttemptsPerPhoto) {
+    if (attempts >= MAX_ATTEMPTS_PER_PHOTO) {
       await markPendingStatus({
         pendingId,
         status: "failed",
-        error: `Superó el máximo de ${maxAttemptsPerPhoto} intentos automáticos.`,
+        error: `Supero el maximo de ${MAX_ATTEMPTS_PER_PHOTO} intentos automaticos.`,
       });
 
       results.push({ pendingId, ok: false, reason: "max-attempts" });
@@ -159,7 +192,8 @@ export default async function handler(req: any, res: any) {
 
   return res.status(200).json({
     ok: true,
-    processed: results.length,
+    checked: snapshot.docs.length,
+    processed: processedCount,
     results,
   });
 }
