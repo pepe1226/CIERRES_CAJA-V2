@@ -155,7 +155,7 @@ Si Gemini responde saturado o temporalmente no disponible, el webhook guarda la 
 telegram_pending_photos
 ```
 
-El archivo `vercel.json` programa un Cron Job cada 5 minutos para llamar:
+El archivo `vercel.json` programa un Cron Job cada 8 horas para llamar:
 
 ```txt
 /api/telegram/retry-pending
@@ -176,7 +176,7 @@ curl -H "Authorization: Bearer TU_CRON_SECRET" \
 
 También acepta `?secret=TU_CRON_SECRET` para una prueba rápida desde el navegador, pero es mejor usar el header `Authorization`.
 
-Cada foto pendiente se intenta hasta 5 veces. Si una función queda en `processing` por timeout, el siguiente cron la retoma después de 10 minutos.
+Cada foto pendiente se intenta hasta 5 veces. Si una función queda en `processing` por timeout, el siguiente cron la retoma después de 10 minutos cuando vuelva a ejecutarse.
 
 ## 8. Verificar configuración
 
