@@ -26,6 +26,10 @@ export default function handler(_req: any, res: any) {
       allowedChatId: process.env.TELEGRAM_ALLOWED_CHAT_ID || null,
       telegramCreatedByUid: process.env.TELEGRAM_CREATED_BY_UID || "telegram-bot"
     },
+    perseo: {
+      hasPerseoImportSecret: Boolean(process.env.PERSEO_IMPORT_SECRET),
+      acceptsCronSecretFallback: Boolean(process.env.CRON_SECRET)
+    },
     gemini: {
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
       geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash"

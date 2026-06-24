@@ -83,7 +83,7 @@ service cloud.firestore {
     function isValidClosure(data) {
       return hasRequiredFields(['date', 'responsible', 'systemAmount', 'physicalAmount', 'difference', 'status', 'createdBy']) &&
              // Allow id, createdAt, and tripId
-             hasOnlyAllowedFields(['id', 'date', 'responsible', 'systemAmount', 'systemBalance', 'physicalAmount', 'difference', 'notes', 'status', 'createdBy', 'createdAt', 'tripId']) &&
+             hasOnlyAllowedFields(['id', 'date', 'responsible', 'systemAmount', 'systemBalance', 'physicalAmount', 'difference', 'notes', 'status', 'createdBy', 'createdAt', 'tripId', 'systemSource', 'perseoReportId', 'perseoMatchedAt', 'perseoAuditStatus', 'perseoRaw']) &&
              (data.date is timestamp || data.date is string) &&
              data.responsible is string && data.responsible.size() <= 100 &&
              data.systemAmount is number &&
@@ -93,7 +93,12 @@ service cloud.firestore {
              data.createdBy is string &&
              (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
              (!('createdAt' in data) || data.createdAt is timestamp) &&
-             (!('tripId' in data) || data.tripId is string);
+             (!('tripId' in data) || data.tripId is string) &&
+             (!('systemSource' in data) || data.systemSource is string) &&
+             (!('perseoReportId' in data) || data.perseoReportId == null || data.perseoReportId is string) &&
+             (!('perseoMatchedAt' in data) || data.perseoMatchedAt is timestamp || data.perseoMatchedAt is string) &&
+             (!('perseoAuditStatus' in data) || data.perseoAuditStatus is string) &&
+             (!('perseoRaw' in data) || data.perseoRaw is map);
     }
 
     function isValidMovement(data) {

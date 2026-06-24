@@ -66,9 +66,18 @@ Consulta el archivo:
 TELEGRAM_SETUP.md
 ```
 
+## Perseo 21:00
+
+Para importar reportes de Perseo y llenar automaticamente Venta/Cuadre Sistema, consulta:
+
+```txt
+PERSEO_SETUP.md
+```
+
 Endpoints principales:
 
 ```txt
 /api/telegram/status
 /api/telegram/webhook
+/api/perseo/import-report
 ```

@@ -25,6 +25,14 @@
     {
       "source": "/telegram/retry-pending",
       "destination": "/api/telegram/retry-pending"
+    },
+    {
+      "source": "/perseo/import-report",
+      "destination": "/api/perseo/import-report"
+    },
+    {
+      "source": "/perseo/audit-closures",
+      "destination": "/api/perseo/audit-closures"
     }
   ]
 }

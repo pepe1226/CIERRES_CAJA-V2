@@ -10,6 +10,11 @@ export interface ShiftClosure {
   createdBy: string;
   status?: 'safe' | 'transit' | 'bank';
   tripId?: string;
+  systemSource?: 'perseo' | 'manual' | string;
+  perseoReportId?: string | null;
+  perseoMatchedAt?: string;
+  perseoAuditStatus?: 'matched' | 'difference' | 'missing_report' | 'ambiguous' | string;
+  perseoRaw?: Record<string, unknown>;
 }
 
 export interface CollectionTrip {
