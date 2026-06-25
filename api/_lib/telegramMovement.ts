@@ -131,6 +131,12 @@ export async function downloadTelegramPhoto(fileId: string) {
       mimeType = "image/png";
     } else if (lowerPath.endsWith(".webp")) {
       mimeType = "image/webp";
+    } else if (lowerPath.endsWith(".pdf")) {
+      mimeType = "application/pdf";
+    } else if (lowerPath.endsWith(".csv")) {
+      mimeType = "text/csv";
+    } else if (lowerPath.endsWith(".txt")) {
+      mimeType = "text/plain";
     } else {
       mimeType = "image/jpeg";
     }

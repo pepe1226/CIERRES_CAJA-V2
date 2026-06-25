@@ -9,6 +9,10 @@ import {
   getTelegramConfig,
   sendTelegramMessage,
 } from "../_lib/telegramMovement.js";
+import {
+  isLikelyPerseoReportMessage,
+  processTelegramPerseoReportMessage,
+} from "../_lib/telegramPerseoReportProcessor.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -85,6 +89,35 @@ export default async function handler(req: any, res: any) {
   }
 
   const photos = Array.isArray(message.photo) ? message.photo : [];
+  const largestPhoto = photos.length > 0 ? getLargestTelegramPhoto(photos) : null;
+
+  if (isLikelyPerseoReportMessage(message)) {
+    try {
+      const result = await processTelegramPerseoReportMessage({
+        chatId,
+        message,
+        largestPhoto,
+      });
+
+      return res.status(200).json(result);
+    } catch (error: any) {
+      console.error("Error procesando reporte Perseo desde Telegram:", error);
+
+      await sendTelegramMessage(
+        chatId,
+        [
+          "No pude procesar el reporte de Perseo automaticamente.",
+          error?.message || String(error),
+        ].join("\n")
+      );
+
+      return res.status(200).json({
+        ok: false,
+        report: true,
+        error: error?.message || String(error),
+      });
+    }
+  }
 
   if (photos.length === 0) {
     return res.status(200).json({
@@ -93,8 +126,6 @@ export default async function handler(req: any, res: any) {
       reason: "No photo",
     });
   }
-
-  const largestPhoto = getLargestTelegramPhoto(photos);
 
   try {
     const result = await processTelegramPhotoMessage({
