@@ -120,6 +120,16 @@ export default async function handler(req: any, res: any) {
   }
 
   if (photos.length === 0) {
+    if (message.document?.file_id) {
+      console.log("Documento de Telegram ignorado por no coincidir con reporte Perseo:", {
+        fileName: message.document?.file_name || null,
+        mimeType: message.document?.mime_type || null,
+        caption: message.caption || message.text || null,
+        messageId: message.message_id,
+        chatId,
+      });
+    }
+
     return res.status(200).json({
       ok: true,
       ignored: true,

@@ -14,30 +14,97 @@ function normalizeText(value: unknown) {
   return String(value ?? "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[_\-./]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasAny(text: string, terms: string[]) {
+  return terms.some((term) => text.includes(term));
+}
+
+function getEcuadorHourFromTelegramMessage(message: any) {
+  const unixSeconds = Number(message.date || message.edit_date || 0);
+
+  if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) {
+    return null;
+  }
+
+  const hourText = new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    hour12: false,
+    timeZone: "America/Guayaquil",
+  }).format(new Date(unixSeconds * 1000));
+
+  return Number(hourText);
 }
 
 export function isLikelyPerseoReportMessage(message: any) {
+  const isDocument = Boolean(message.document?.file_id);
+  const mimeType = normalizeText(message.document?.mime_type);
+  const fileName = normalizeText(message.document?.file_name);
+  const caption = normalizeText(message.caption);
   const text = normalizeText([
     message.text,
     message.caption,
     message.document?.file_name,
     message.document?.mime_type,
   ].filter(Boolean).join(" "));
-  const isPdf = text.includes("application/pdf") || text.endsWith(".pdf") || text.includes(".pdf");
+  const rawFileName = String(message.document?.file_name || "").toLowerCase();
+  const isPdf =
+    isDocument &&
+    (mimeType.includes("application pdf") ||
+      rawFileName.endsWith(".pdf") ||
+      text.includes(" pdf"));
+  const strongReportTerms = [
+    "perseo",
+    "reporte 21",
+    "21:00",
+    "21h",
+    "cuadre sistema",
+    "venta sistema",
+    "saldo sistema",
+    "estado cierres",
+    "estado de cierres",
+    "cierres de caja",
+    "cierre de caja",
+    "cierre caja",
+    "cierres caja",
+    "corte de caja",
+    "cortes de caja",
+  ];
+  const documentReportTerms = [
+    ...strongReportTerms,
+    "cuadres",
+    "cuadre",
+    "cuadrar",
+    "saldo caja",
+    "sistema",
+    "arqueo",
+    "arqueos",
+  ];
+  const pdfNameTerms = [
+    "cierre",
+    "cierres",
+    "caja",
+    "cuadre",
+    "cuadres",
+    "estado",
+    "saldo",
+    "sistema",
+    "arqueo",
+    "corte",
+  ];
+  const ecuadorHour = getEcuadorHourFromTelegramMessage(message);
+  const isNearDailyReportTime =
+    ecuadorHour === null || (ecuadorHour >= 20 && ecuadorHour <= 23);
 
   return (
-    text.includes("perseo") ||
-    text.includes("reporte 21") ||
-    text.includes("21:00") ||
-    text.includes("cuadre sistema") ||
-    text.includes("cuadres") ||
-    text.includes("venta sistema") ||
-    text.includes("estado cierres") ||
-    text.includes("estado de cierres") ||
-    (isPdf && text.includes("reporte")) ||
-    (isPdf && text.includes("cuadre")) ||
-    (isPdf && text.includes("cierre") && text.includes("caja"))
+    hasAny(text, strongReportTerms) ||
+    (isPdf && hasAny(caption, documentReportTerms)) ||
+    (isPdf && hasAny(fileName, ["reporte", ...documentReportTerms])) ||
+    (isPdf && hasAny(fileName, pdfNameTerms) && isNearDailyReportTime)
   );
 }
 
