@@ -19,6 +19,17 @@ function roundMoney(value: unknown) {
   return Number.isFinite(number) ? Number(number.toFixed(2)) : 0;
 }
 
+function getEcuadorTelegramRange(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  const start = Date.UTC(year, month - 1, day, 5, 0, 0, 0);
+  const end = start + 24 * 60 * 60 * 1000 - 1;
+
+  return {
+    startSeconds: Math.floor(start / 1000),
+    endSeconds: Math.floor(end / 1000),
+  };
+}
+
 export default async function handler(req: any, res: any) {
   if (req.method !== "GET") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -43,13 +54,19 @@ export default async function handler(req: any, res: any) {
   const db = getFirebaseAdminDb();
   const start = new Date(`${date}T00:00:00.000Z`);
   const end = new Date(`${date}T23:59:59.999Z`);
+  const telegramRange = getEcuadorTelegramRange(date);
 
-  const [reportsSnapshot, closuresSnapshot] = await Promise.all([
+  const [reportsSnapshot, closuresSnapshot, ignoredDocumentsSnapshot] = await Promise.all([
     db.collection("perseo_reports").where("businessDates", "array-contains", date).get(),
     db
       .collection("closures")
       .where("date", ">=", Timestamp.fromDate(start))
       .where("date", "<=", Timestamp.fromDate(end))
+      .get(),
+    db
+      .collection("telegram_ignored_documents")
+      .where("telegramDate", ">=", telegramRange.startSeconds)
+      .where("telegramDate", "<=", telegramRange.endSeconds)
       .get(),
   ]);
 
@@ -98,6 +115,20 @@ export default async function handler(req: any, res: any) {
     })
     .sort((a, b) => String(a.responsible || "").localeCompare(String(b.responsible || "")));
 
+  const ignoredDocuments = ignoredDocumentsSnapshot.docs
+    .map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        telegramDate: data.telegramDate || null,
+        fileName: data.fileName || null,
+        mimeType: data.mimeType || null,
+        caption: data.caption || null,
+        ignoredAt: toIso(data.ignoredAt),
+      };
+    })
+    .sort((a, b) => Number(a.telegramDate || 0) - Number(b.telegramDate || 0));
+
   return res.status(200).json({
     ok: true,
     date,
@@ -105,7 +136,9 @@ export default async function handler(req: any, res: any) {
     reportRows: reports.reduce((sum, report) => sum + report.rows.length, 0),
     closuresFound: closures.length,
     closuresMatched: closures.filter((closure) => closure.systemSource === "perseo").length,
+    ignoredDocumentsFound: ignoredDocuments.length,
     reports,
     closures,
+    ignoredDocuments,
   });
 }
