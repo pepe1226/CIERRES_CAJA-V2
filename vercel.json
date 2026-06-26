@@ -33,6 +33,10 @@
     {
       "source": "/perseo/audit-closures",
       "destination": "/api/perseo/audit-closures"
+    },
+    {
+      "source": "/perseo/debug-date",
+      "destination": "/api/perseo/debug-date"
     }
   ]
 }
