@@ -104,7 +104,8 @@ export function isLikelyPerseoReportMessage(message: any) {
     hasAny(text, strongReportTerms) ||
     (isPdf && hasAny(caption, documentReportTerms)) ||
     (isPdf && hasAny(fileName, ["reporte", ...documentReportTerms])) ||
-    (isPdf && hasAny(fileName, pdfNameTerms) && isNearDailyReportTime)
+    (isPdf && hasAny(fileName, pdfNameTerms) && isNearDailyReportTime) ||
+    (isPdf && isNearDailyReportTime)
   );
 }
 

@@ -4,6 +4,7 @@ import {
   processTelegramPhotoMessage,
   savePendingTelegramPhoto,
 } from "../_lib/telegramPhotoProcessor.js";
+import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import {
   getFriendlyGeminiErrorMessage,
   getTelegramConfig,
@@ -18,6 +19,30 @@ function getBody(req: any) {
   if (!req.body) return {};
   if (typeof req.body === "string") return JSON.parse(req.body);
   return req.body;
+}
+
+async function saveIgnoredTelegramDocument(message: any, chatId: number | string) {
+  try {
+    const db = getFirebaseAdminDb();
+    const document = message.document || {};
+    const id = getTelegramMessageKey(chatId, message.message_id || Date.now());
+
+    await db.collection("telegram_ignored_documents").doc(id).set(
+      {
+        chatId: String(chatId),
+        messageId: message.message_id || null,
+        telegramDate: message.date || null,
+        fileId: document.file_id || null,
+        fileName: document.file_name || null,
+        mimeType: document.mime_type || null,
+        caption: message.caption || message.text || null,
+        ignoredAt: new Date(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    console.error("No se pudo guardar documento ignorado de Telegram:", error);
+  }
 }
 
 export default async function handler(req: any, res: any) {
@@ -128,6 +153,7 @@ export default async function handler(req: any, res: any) {
         messageId: message.message_id,
         chatId,
       });
+      await saveIgnoredTelegramDocument(message, chatId);
     }
 
     return res.status(200).json({
