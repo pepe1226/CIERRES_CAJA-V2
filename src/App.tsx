@@ -295,6 +295,7 @@ function AppContent() {
   const [filterResponsible, setFilterResponsible] = useState('all');
   const [filterDateRangeType, setFilterDateRangeType] = useState('mes');
   const [hideCollected, setHideCollected] = useState(false);
+  const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
 
   const [movementValues, setMovementValues] = useState<Partial<Movement>>({
     type: 'outflow',
@@ -647,10 +648,11 @@ function AppContent() {
         normalizeSearchText(getClosureColumnSearchValue(c, column)).includes(value)
       );
       const matchesHideCollected = !hideCollected || !c.tripId;
+      const matchesOnlyStoreClosures = !showOnlyStoreClosures || isClosureAvailableForTrip(c);
         
-      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected;
+      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected && matchesOnlyStoreClosures;
     });
-  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, filterDateRangeType, derivedClosureStatusById]);
+  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
 
   const uniqueResponsibles = useMemo(() => {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
@@ -1961,6 +1963,15 @@ Notas: ${closure.notes || 'N/A'}`;
                   {hideCollected && <Check className="w-3 h-3 text-slate-950 font-black" />}
                 </div>
                 <span className="text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Ocultar recolectados</span>
+              </button>
+              <button
+                onClick={() => setShowOnlyStoreClosures(!showOnlyStoreClosures)}
+                className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${showOnlyStoreClosures ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
+              >
+                <div className={`w-4 h-4 rounded-md border flex items-center justify-center ${showOnlyStoreClosures ? 'bg-blue-500 border-blue-500' : 'border-slate-600'}`}>
+                  {showOnlyStoreClosures && <Check className="w-3 h-3 text-slate-950 font-black" />}
+                </div>
+                <span className="text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Solo en tienda</span>
               </button>
             </div>
           </div>
