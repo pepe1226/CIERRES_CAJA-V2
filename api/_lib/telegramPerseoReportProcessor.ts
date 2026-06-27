@@ -1,9 +1,11 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { FieldValue } from "firebase-admin/firestore";
 import {
   auditClosuresWithPerseoRows,
   parsePerseoReport,
   savePerseoReport,
 } from "./perseoAudit.js";
+import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   downloadTelegramPhoto,
   getTelegramConfig,
@@ -111,6 +113,54 @@ export function isLikelyPerseoReportMessage(message: any) {
 
 function getReportText(message: any) {
   return String(message.text || message.caption || "").trim();
+}
+
+function getAttemptId(chatId: number | string, messageId: number | string) {
+  return `telegram_${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_")}_${messageId}`;
+}
+
+async function saveReportAttempt(params: {
+  chatId: number | string;
+  message: any;
+  status: string;
+  rows?: number;
+  reportId?: string;
+  error?: string;
+  audit?: any;
+}) {
+  try {
+    const db = getFirebaseAdminDb();
+    const document = params.message.document || {};
+    const attemptId = getAttemptId(params.chatId, params.message.message_id || Date.now());
+
+    await db.collection("telegram_perseo_report_attempts").doc(attemptId).set(
+      {
+        chatId: String(params.chatId),
+        messageId: params.message.message_id || null,
+        telegramDate: params.message.date || null,
+        fileId: document.file_id || null,
+        fileName: document.file_name || null,
+        mimeType: document.mime_type || null,
+        caption: params.message.caption || params.message.text || null,
+        status: params.status,
+        rows: params.rows ?? null,
+        reportId: params.reportId || null,
+        error: params.error || null,
+        auditSummary: params.audit
+          ? {
+              totalRows: params.audit.totalRows,
+              updated: params.audit.updated,
+              unmatched: params.audit.unmatched,
+            }
+          : null,
+        updatedAt: FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    console.error("No se pudo guardar intento de reporte Perseo:", error);
+  }
 }
 
 async function extractRowsFromReportFile(params: {
@@ -243,9 +293,35 @@ export async function processTelegramPerseoReportMessage(params: {
   message: any;
   largestPhoto?: any;
 }) {
-  const rows = await getReportRowsFromMessage(params.message, params.largestPhoto);
+  await saveReportAttempt({
+    chatId: params.chatId,
+    message: params.message,
+    status: "processing",
+  });
+
+  let rows: ReturnType<typeof parsePerseoReport>;
+
+  try {
+    rows = await getReportRowsFromMessage(params.message, params.largestPhoto);
+  } catch (error: any) {
+    await saveReportAttempt({
+      chatId: params.chatId,
+      message: params.message,
+      status: "error",
+      error: error?.message || String(error),
+    });
+
+    throw error;
+  }
 
   if (rows.length === 0) {
+    await saveReportAttempt({
+      chatId: params.chatId,
+      message: params.message,
+      status: "no_valid_rows",
+      rows: 0,
+    });
+
     await sendTelegramMessage(
       params.chatId,
       "Recibi un posible reporte de Perseo, pero no pude extraer filas validas para cruzar."
@@ -266,6 +342,15 @@ export async function processTelegramPerseoReportMessage(params: {
   const audit = await auditClosuresWithPerseoRows({
     rows,
     reportId,
+  });
+
+  await saveReportAttempt({
+    chatId: params.chatId,
+    message: params.message,
+    status: "processed",
+    rows: rows.length,
+    reportId,
+    audit,
   });
 
   await sendTelegramMessage(

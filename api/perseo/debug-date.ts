@@ -56,7 +56,7 @@ export default async function handler(req: any, res: any) {
   const end = new Date(`${date}T23:59:59.999Z`);
   const telegramRange = getEcuadorTelegramRange(date);
 
-  const [reportsSnapshot, closuresSnapshot, ignoredDocumentsSnapshot] = await Promise.all([
+  const [reportsSnapshot, closuresSnapshot, ignoredDocumentsSnapshot, attemptsSnapshot] = await Promise.all([
     db.collection("perseo_reports").where("businessDates", "array-contains", date).get(),
     db
       .collection("closures")
@@ -65,6 +65,11 @@ export default async function handler(req: any, res: any) {
       .get(),
     db
       .collection("telegram_ignored_documents")
+      .where("telegramDate", ">=", telegramRange.startSeconds)
+      .where("telegramDate", "<=", telegramRange.endSeconds)
+      .get(),
+    db
+      .collection("telegram_perseo_report_attempts")
       .where("telegramDate", ">=", telegramRange.startSeconds)
       .where("telegramDate", "<=", telegramRange.endSeconds)
       .get(),
@@ -129,6 +134,25 @@ export default async function handler(req: any, res: any) {
     })
     .sort((a, b) => Number(a.telegramDate || 0) - Number(b.telegramDate || 0));
 
+  const attempts = attemptsSnapshot.docs
+    .map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        telegramDate: data.telegramDate || null,
+        fileName: data.fileName || null,
+        mimeType: data.mimeType || null,
+        caption: data.caption || null,
+        status: data.status || null,
+        rows: data.rows ?? null,
+        reportId: data.reportId || null,
+        error: data.error || null,
+        auditSummary: data.auditSummary || null,
+        updatedAt: toIso(data.updatedAt),
+      };
+    })
+    .sort((a, b) => Number(a.telegramDate || 0) - Number(b.telegramDate || 0));
+
   return res.status(200).json({
     ok: true,
     date,
@@ -137,8 +161,10 @@ export default async function handler(req: any, res: any) {
     closuresFound: closures.length,
     closuresMatched: closures.filter((closure) => closure.systemSource === "perseo").length,
     ignoredDocumentsFound: ignoredDocuments.length,
+    attemptsFound: attempts.length,
     reports,
     closures,
     ignoredDocuments,
+    attempts,
   });
 }
