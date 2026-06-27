@@ -86,6 +86,7 @@ type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmoun
 
 type CashBoxStatus = 'safe' | 'transit' | 'bank';
 type DisplayClosureStatus = CashBoxStatus | 'mixed';
+type ClosureAuditStatus = 'all' | 'matched' | 'difference' | 'pending_report' | 'not_audited';
 type ClosureLedgerEntry = {
   displayStatus: CashBoxStatus;
   hasSplitBalance: boolean;
@@ -142,6 +143,43 @@ const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
   if (status === 'transit') return 'En Tránsito';
   if (status === 'bank') return 'En Banco';
   return 'En Tienda';
+};
+
+const getClosureAuditInfo = (closure: ShiftClosure) => {
+  const isTelegramPhoto = closure.source === 'telegram' || Boolean(closure.telegramFileId);
+  const hasPerseoReport = closure.systemSource === 'perseo' || Boolean(closure.perseoReportId);
+  const difference = Number(closure.difference) || 0;
+
+  if (hasPerseoReport) {
+    const isDifference =
+      closure.perseoAuditStatus === 'difference' ||
+      Math.abs(difference) > 0.009;
+
+    return {
+      status: isDifference ? 'difference' : 'matched',
+      label: isDifference ? 'Diferencia' : 'Auditado OK',
+      detail: isTelegramPhoto ? 'Foto Telegram cruzada con Perseo' : 'Cierre cruzado con Perseo',
+      className: isDifference
+        ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+        : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+    } as const;
+  }
+
+  if (isTelegramPhoto) {
+    return {
+      status: 'pending_report',
+      label: 'Pendiente Perseo',
+      detail: 'Foto Telegram recibida; falta cruzar reporte de venta',
+      className: 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+    } as const;
+  }
+
+  return {
+    status: 'not_audited',
+    label: 'Sin auditoría',
+    detail: 'Cierre manual o sin reporte Perseo asociado',
+    className: 'bg-slate-500/10 text-slate-500 border-slate-500/20'
+  } as const;
 };
 
 const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
@@ -293,6 +331,7 @@ function AppContent() {
   const [filterEndDate, setFilterEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterResponsible, setFilterResponsible] = useState('all');
+  const [filterAudit, setFilterAudit] = useState<ClosureAuditStatus>('all');
   const [filterDateRangeType, setFilterDateRangeType] = useState('mes');
   const [hideCollected, setHideCollected] = useState(false);
   const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
@@ -493,7 +532,7 @@ function AppContent() {
   const handleExportCSV = async () => {
     setIsExporting(true);
     try {
-      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'Físico', 'Diferencia', 'Estado', 'Notas'].join(';');
+      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'Físico', 'Diferencia', 'Estado', 'Auditoría', 'Notas'].join(';');
       const rows = closures.map(c => [
         format(parseISO(c.date), 'dd/MM/yyyy HH:mm'),
         c.responsible,
@@ -502,6 +541,7 @@ function AppContent() {
         c.physicalAmount,
         c.difference,
         getClosureDisplayStatus(c),
+        getClosureAuditInfo(c).label,
         c.notes || ''
       ].join(';'));
       
@@ -649,10 +689,12 @@ function AppContent() {
       );
       const matchesHideCollected = !hideCollected || !c.tripId;
       const matchesOnlyStoreClosures = !showOnlyStoreClosures || isClosureAvailableForTrip(c);
+      const auditInfo = getClosureAuditInfo(c);
+      const matchesAudit = filterAudit === 'all' || auditInfo.status === filterAudit;
         
-      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected && matchesOnlyStoreClosures;
+      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected && matchesOnlyStoreClosures && matchesAudit;
     });
-  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
+  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, filterAudit, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
 
   const uniqueResponsibles = useMemo(() => {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
@@ -1955,6 +1997,17 @@ Notas: ${closure.notes || 'N/A'}`;
                 <option value="transit">En Tránsito</option>
                 <option value="bank">En Banco</option>
               </select>
+              <select
+                value={filterAudit}
+                onChange={e => setFilterAudit(e.target.value as ClosureAuditStatus)}
+                className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
+              >
+                <option value="all">Toda Auditoría</option>
+                <option value="difference">Con Diferencia</option>
+                <option value="pending_report">Pendiente Perseo</option>
+                <option value="matched">Auditado OK</option>
+                <option value="not_audited">Sin Auditoría</option>
+              </select>
               <button 
                 onClick={() => setHideCollected(!hideCollected)}
                 className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${hideCollected ? 'bg-amber-500/10 border-amber-500/50 text-amber-500' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
@@ -2333,7 +2386,27 @@ Notas: ${closure.notes || 'N/A'}`;
                                    <div className="w-8 h-8 bg-white/5 rounded-full flex items-center justify-center border border-white/5">
                                       <UserIcon className="w-4 h-4 text-slate-500" />
                                    </div>
-                                   <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
+                                   <div className="flex flex-col gap-2">
+                                     <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
+                                     {(() => {
+                                       const auditInfo = getClosureAuditInfo(closure);
+                                       if (auditInfo.status === 'not_audited') return null;
+
+                                       return (
+                                         <span
+                                           title={auditInfo.detail}
+                                           className={`w-fit inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[8px] font-black uppercase tracking-widest ${auditInfo.className}`}
+                                         >
+                                           {auditInfo.status === 'difference'
+                                             ? <ShieldAlert className="w-3 h-3" />
+                                             : auditInfo.status === 'matched'
+                                               ? <CheckCircle2 className="w-3 h-3" />
+                                               : <FileText className="w-3 h-3" />}
+                                           {auditInfo.label}
+                                         </span>
+                                       );
+                                     })()}
+                                   </div>
                                 </div>
                               </td>
                               <td className="px-6 py-4 text-center font-black text-white font-sans text-sm">
