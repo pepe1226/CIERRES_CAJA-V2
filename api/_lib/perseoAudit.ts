@@ -18,6 +18,9 @@ type AuditResult = {
   closureId?: string;
   reason?: string;
   candidates?: number;
+  physicalAmount?: number;
+  difference?: number;
+  auditStatus?: "matched" | "difference";
 };
 
 function stripAccents(value: string) {
@@ -373,14 +376,36 @@ export async function auditClosuresWithPerseoRows(params: {
       { merge: true }
     );
 
-    results.push({ row, ok: true, closureId: best.id, candidates: closures.length });
+    results.push({
+      row,
+      ok: true,
+      closureId: best.id,
+      candidates: closures.length,
+      physicalAmount,
+      difference,
+      auditStatus,
+    });
   }
+
+  const matchedResults = results.filter((result) => result.ok);
+  const differenceResults = matchedResults.filter((result) => result.auditStatus === "difference");
 
   return {
     ok: true,
     totalRows: params.rows.length,
-    updated: results.filter((result) => result.ok).length,
+    updated: matchedResults.length,
     unmatched: results.filter((result) => !result.ok).length,
+    matched: matchedResults.filter((result) => result.auditStatus === "matched").length,
+    differences: differenceResults.length,
+    totalPhysicalAmount: Number(
+      matchedResults.reduce((sum, result) => sum + Number(result.physicalAmount || 0), 0).toFixed(2)
+    ),
+    totalSystemBalance: Number(
+      matchedResults.reduce((sum, result) => sum + Number(result.row.systemBalance || 0), 0).toFixed(2)
+    ),
+    totalDifference: Number(
+      matchedResults.reduce((sum, result) => sum + Number(result.difference || 0), 0).toFixed(2)
+    ),
     results: results.map((result) => ({
       ok: result.ok,
       closureId: result.closureId,
@@ -390,6 +415,9 @@ export async function auditClosuresWithPerseoRows(params: {
       responsible: result.row.responsible,
       systemAmount: result.row.systemAmount,
       systemBalance: result.row.systemBalance,
+      physicalAmount: result.physicalAmount,
+      difference: result.difference,
+      auditStatus: result.auditStatus,
     })),
   };
 }
