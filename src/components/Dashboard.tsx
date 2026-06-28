@@ -31,7 +31,12 @@ import {
   Building2,
   Tag,
   Wallet,
-  ReceiptText
+  ReceiptText,
+  Eye,
+  Share2,
+  Repeat2,
+  RefreshCw,
+  ShieldCheck
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
@@ -180,8 +185,21 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return filteredMovements
       .filter(m => m.type === 'outflow')
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-      .slice(0, 3);
+      .slice(0, 5);
   }, [filteredMovements]);
+  const statementRows = useMemo(() => {
+    let runningTotal = totalExpenses;
+
+    return recentExpenses.map(m => {
+      const balanceAfter = runningTotal;
+      runningTotal = Math.max(0, runningTotal - m.amount);
+
+      return {
+        ...m,
+        balanceAfter,
+      };
+    });
+  }, [recentExpenses, totalExpenses]);
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-white p-4 md:p-8">
@@ -201,69 +219,113 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
             </div>
           </div>
           
-          <div className="w-full md:w-[430px] rounded-2xl border border-white/10 bg-slate-950/70 p-4 shadow-2xl shadow-black/20">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Estado de cuenta</p>
-                <p className={`text-3xl font-black font-mono ${netBalance < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
-                  ${netBalance.toLocaleString('es-CL')}
+          <div className="w-full md:w-[430px] overflow-hidden rounded-[1.75rem] border border-slate-200 bg-slate-50 text-slate-900 shadow-2xl shadow-black/25">
+            <div className="px-5 py-4 border-b border-slate-200 bg-white">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Wallet className="w-5 h-5 text-blue-700" />
+                  <span className="text-sm font-black text-slate-800">Mi cuenta</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-black text-blue-700"
+                >
+                  <ReceiptText className="w-4 h-4" />
+                  Detalle
+                </button>
+              </div>
+            </div>
+
+            <div className="px-5 py-5 bg-white">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-bold text-slate-500 uppercase">Gastos totales <span className="text-amber-400">★</span></p>
+                  <div className="flex items-center gap-2 mt-1">
+                    <p className="text-3xl font-black tracking-tight">${totalExpenses.toLocaleString('es-CL')}</p>
+                    <Eye className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <p className="text-[11px] font-bold text-slate-400 mt-1">Balance periodo: ${netBalance.toLocaleString('es-CL')}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600 mt-4"
+                >
+                  <Share2 className="w-4 h-4" />
+                  Compartir cuenta
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-4 px-7 py-4 border-y border-slate-200 bg-slate-50">
+              {[
+                { icon: Repeat2, label: 'Mover' },
+                { icon: RefreshCw, label: 'Cruzar' },
+                { icon: ReceiptText, label: 'Detalle' },
+                { icon: ShieldCheck, label: 'Nuevo' },
+              ].map(action => (
+                <button
+                  key={action.label}
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="flex flex-col items-center gap-1 text-blue-600"
+                  title={action.label}
+                >
+                  <span className="w-10 h-10 rounded-full border border-slate-200 bg-white shadow-sm flex items-center justify-center">
+                    <action.icon className="w-5 h-5" />
+                  </span>
+                  <span className="text-[9px] font-black uppercase text-slate-500">{action.label}</span>
+                </button>
+              ))}
+            </div>
+
+            <div className="px-4 py-4 bg-white">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-black text-slate-950">Movimientos</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-600"
+                >
+                  <Calendar className="w-4 h-4" />
+                  Filtrar por fechas
+                </button>
+              </div>
+
+              {statementRows.length > 0 && (
+                <p className="text-[11px] font-bold text-slate-500 mb-2">
+                  {format(parseISO(statementRows[0].date), 'EEEE, dd MMM. yyyy', { locale: es })}
                 </p>
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Balance del periodo</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowHistory(true)}
-                className="p-3 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 transition-all"
-                title="Ver historial de gastos"
-              >
-                <ReceiptText className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 mt-4">
-              <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-3">
-                <div className="flex items-center gap-2 text-emerald-400 mb-1">
-                  <Wallet className="w-4 h-4" />
-                  <span className="text-[9px] font-black uppercase tracking-widest">Ingresos</span>
-                </div>
-                <p className="text-lg font-black font-mono text-emerald-300">${totalIncome.toLocaleString('es-CL')}</p>
-              </div>
-              <div className="rounded-xl bg-rose-500/10 border border-rose-500/20 p-3">
-                <div className="flex items-center gap-2 text-rose-400 mb-1">
-                  <TrendingDown className="w-4 h-4" />
-                  <span className="text-[9px] font-black uppercase tracking-widest">Gastos</span>
-                </div>
-                <p className="text-lg font-black font-mono text-rose-300">-${totalExpenses.toLocaleString('es-CL')}</p>
-              </div>
-            </div>
-
-            <div className="mt-4 space-y-2">
-              {recentExpenses.length > 0 ? recentExpenses.map(m => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => setShowHistory(true)}
-                  className="w-full flex items-center justify-between gap-3 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] px-3 py-2 transition-all text-left"
-                >
-                  <span className="min-w-0">
-                    <span className="block text-xs font-black text-white uppercase truncate">{m.description}</span>
-                    <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                      {format(parseISO(m.date), 'dd/MM HH:mm')} · {m.category || 'GENERAL'}
-                    </span>
-                  </span>
-                  <span className="text-sm font-black font-mono text-rose-400 whitespace-nowrap">
-                    -${m.amount.toLocaleString('es-CL')}
-                  </span>
-                </button>
-              )) : (
-                <button
-                  type="button"
-                  onClick={() => setShowHistory(true)}
-                  className="w-full rounded-xl bg-white/[0.03] px-3 py-3 text-left text-[10px] font-black text-slate-500 uppercase tracking-widest"
-                >
-                  Sin gastos en el periodo
-                </button>
               )}
+
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                {statementRows.length > 0 ? statementRows.map(m => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setShowHistory(true)}
+                    className="w-full min-h-[66px] flex items-center justify-between gap-3 border-b border-slate-200 last:border-b-0 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
+                  >
+                    <span className="min-w-0 pr-2">
+                      <span className="block text-xs font-semibold text-slate-700 leading-snug line-clamp-2">{m.description}</span>
+                      <span className="block text-[10px] font-bold text-slate-400 mt-1 uppercase">{m.category || 'GENERAL'}</span>
+                    </span>
+                    <span className="text-right shrink-0">
+                      <span className="block text-sm font-bold text-slate-700">-${m.amount.toLocaleString('es-CL')}</span>
+                      <span className="block text-xs font-semibold text-slate-500">${m.balanceAfter.toLocaleString('es-CL')}</span>
+                    </span>
+                  </button>
+                )) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowHistory(true)}
+                    className="w-full px-4 py-8 text-center text-xs font-black text-slate-400 uppercase tracking-widest"
+                  >
+                    Sin gastos en el periodo
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
