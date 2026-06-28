@@ -76,7 +76,9 @@ import {
   LayoutDashboard,
   ChevronLeft,
   ChevronRight,
-  ShieldAlert
+  ShieldAlert,
+  Eye,
+  Share2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Dashboard } from './components/Dashboard';
@@ -836,6 +838,34 @@ function AppContent() {
     return [...boxMovements, ...boxClosures].sort((a, b) => b.date.localeCompare(a.date));
   }, [movements, closures, getClosureDisplayStatus]);
 
+  const cashBoxStatementRows = useMemo(() => {
+    return cashBoxStatuses.reduce((result, status) => {
+      let runningBalance = getBoxBalance(status);
+
+      result[status] = combinedMovements
+        .filter(m =>
+          (m.source === 'movement' && (m.from === status || m.to === status)) ||
+          (m.source === 'closure' && m.status === status && !m.tripId)
+        )
+        .slice(0, 5)
+        .map(m => {
+          const signedAmount = m.source === 'closure' || m.to === status
+            ? Number(m.amount) || 0
+            : -(Number(m.amount) || 0);
+          const balanceAfter = runningBalance;
+          runningBalance -= signedAmount;
+
+          return {
+            ...m,
+            signedAmount,
+            balanceAfter,
+          };
+        });
+
+      return result;
+    }, {} as Record<CashBoxStatus, Array<(typeof combinedMovements)[number] & { signedAmount: number; balanceAfter: number }>>);
+  }, [combinedMovements, getBoxBalance]);
+
   const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string) => {
     setFormError(null);
     setMovementValues(getMovementDefaults(type, caja));
@@ -1379,6 +1409,178 @@ function AppContent() {
     };
   };
 
+  const renderCashBoxStatementCard = (status: CashBoxStatus) => {
+    const config = {
+      safe: {
+        label: 'En Tienda',
+        shortLabel: 'Tienda',
+        Icon: ShieldCheck,
+        color: 'text-blue-600',
+        accent: 'border-blue-200',
+        balance: accumulatedSafeTotal,
+      },
+      transit: {
+        label: 'En Tránsito',
+        shortLabel: 'Tránsito',
+        Icon: Truck,
+        color: 'text-amber-600',
+        accent: 'border-amber-200',
+        balance: accumulatedTransitTotal,
+      },
+      bank: {
+        label: 'Banco',
+        shortLabel: 'Banco',
+        Icon: Building2,
+        color: 'text-emerald-600',
+        accent: 'border-emerald-200',
+        balance: accumulatedBankTotal,
+      },
+    }[status];
+    const rows = cashBoxStatementRows[status] || [];
+    const actions = [
+      {
+        label: 'Gasto',
+        Icon: ArrowUpRight,
+        onClick: () => handleOpenAddMovement('outflow', status),
+      },
+      {
+        label: status === 'bank' ? 'Interno' : 'Banco',
+        Icon: status === 'bank' ? ArrowRightLeft : Building2,
+        onClick: () => handleOpenAddMovement(status === 'bank' ? 'internal_transfer' : 'transfer', status),
+      },
+      {
+        label: 'Traspaso',
+        Icon: ArrowRightLeft,
+        onClick: () => handleOpenAddMovement('internal_transfer', status),
+      },
+      {
+        label: 'Historial',
+        Icon: History,
+        onClick: () => setViewingCajaMovements(status),
+      },
+    ];
+    const firstDate = rows[0]?.date;
+
+    return (
+      <div
+        key={status}
+        onDoubleClick={() => setViewingCajaMovements(status)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY, caja: status });
+        }}
+        className={`overflow-hidden rounded-[1.75rem] border ${config.accent} bg-slate-50 text-slate-900 shadow-2xl shadow-black/20 cursor-pointer`}
+      >
+        <div className="px-5 py-4 border-b border-slate-200 bg-white">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <config.Icon className={`w-5 h-5 ${config.color}`} />
+              <span className="text-sm font-black text-slate-800">Mi cuenta</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setViewingCajaMovements(status)}
+              className={`inline-flex items-center gap-1.5 text-xs font-black ${config.color}`}
+            >
+              <History className="w-4 h-4" />
+              Detalle
+            </button>
+          </div>
+        </div>
+
+        <div className="px-5 py-5 bg-white">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-slate-500 uppercase">{config.label} <span className="text-amber-400">★</span></p>
+              <div className="flex items-center gap-2 mt-1">
+                <p className="text-3xl font-black tracking-tight">${config.balance.toLocaleString('es-CL')}</p>
+                <Eye className={`w-5 h-5 ${config.color}`} />
+              </div>
+              <p className="text-[11px] font-bold text-slate-400 mt-1">{rows.length} movimientos recientes</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setViewingCajaMovements(status)}
+              className={`inline-flex items-center gap-1.5 text-xs font-bold ${config.color} mt-4`}
+            >
+              <Share2 className="w-4 h-4" />
+              Compartir cuenta
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-4 gap-3 px-5 py-4 border-y border-slate-200 bg-slate-50">
+          {actions.map(action => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={action.onClick}
+              className={`flex flex-col items-center gap-1 ${config.color}`}
+              title={action.label}
+            >
+              <span className="w-10 h-10 rounded-full border border-slate-200 bg-white shadow-sm flex items-center justify-center">
+                <action.Icon className="w-5 h-5" />
+              </span>
+              <span className="text-[9px] font-black uppercase text-slate-500">{action.label}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="px-4 py-4 bg-white">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-base font-black text-slate-950">Movimientos</h3>
+            <button
+              type="button"
+              onClick={() => setViewingCajaMovements(status)}
+              className={`inline-flex items-center gap-1.5 text-xs font-bold ${config.color}`}
+            >
+              <Calendar className="w-4 h-4" />
+              Filtrar por fechas
+            </button>
+          </div>
+
+          {firstDate && (
+            <p className="text-[11px] font-bold text-slate-500 mb-2">
+              {format(parseISO(firstDate), 'EEEE, dd MMM. yyyy', { locale: es })}
+            </p>
+          )}
+
+          <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+            {rows.length > 0 ? rows.map(row => (
+              <button
+                key={`${row.source}-${row.id}`}
+                type="button"
+                onClick={() => setViewingCajaMovements(status)}
+                className="w-full min-h-[66px] flex items-center justify-between gap-3 border-b border-slate-200 last:border-b-0 px-4 py-3 text-left hover:bg-slate-50 transition-colors"
+              >
+                <span className="min-w-0 pr-2">
+                  <span className="block text-xs font-semibold text-slate-700 leading-snug line-clamp-2">{row.description}</span>
+                  <span className="block text-[10px] font-bold text-slate-400 mt-1 uppercase">
+                    {row.source === 'closure' ? 'Cierre de caja' : row.category || row.type}
+                  </span>
+                </span>
+                <span className="text-right shrink-0">
+                  <span className={`block text-sm font-bold ${row.signedAmount < 0 ? 'text-slate-700' : 'text-emerald-600'}`}>
+                    {row.signedAmount >= 0 ? '+' : '-'}${Math.abs(row.signedAmount).toLocaleString('es-CL')}
+                  </span>
+                  <span className="block text-xs font-semibold text-slate-500">${row.balanceAfter.toLocaleString('es-CL')}</span>
+                </span>
+              </button>
+            )) : (
+              <button
+                type="button"
+                onClick={() => setViewingCajaMovements(status)}
+                className="w-full px-4 py-8 text-center text-xs font-black text-slate-400 uppercase tracking-widest"
+              >
+                Sin movimientos en {config.shortLabel}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const handlePrint = () => {
     window.print();
   };
@@ -1725,58 +1927,8 @@ Notas: ${closure.notes || 'N/A'}`;
             )}
           </AnimatePresence>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12 text-left">
-            <div 
-              onDoubleClick={() => setViewingCajaMovements('safe')}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setContextMenu({ x: e.clientX, y: e.clientY, caja: 'safe' });
-              }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-blue-500/50 transition-colors"
-            >
-              <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
-                <ShieldCheck className="w-16 h-16 text-blue-400" />
-              </div>
-              <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                <ShieldCheck className="w-3 h-3 text-blue-400" />
-                En Tienda
-              </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
-            </div>
-            <div 
-              onDoubleClick={() => setViewingCajaMovements('transit')}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setContextMenu({ x: e.clientX, y: e.clientY, caja: 'transit' });
-              }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-amber-500/50 transition-colors"
-            >
-              <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
-                <Truck className="w-16 h-16 text-amber-400" />
-              </div>
-              <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                <Truck className="w-3 h-3 text-amber-400" />
-                En Tránsito
-              </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedTransitTotal.toLocaleString('es-CL')}</p>
-            </div>
-            <div 
-              onDoubleClick={() => setViewingCajaMovements('bank')}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setContextMenu({ x: e.clientX, y: e.clientY, caja: 'bank' });
-              }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-emerald-500/50 transition-colors"
-            >
-              <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
-                <Building2 className="w-16 h-16 text-emerald-400" />
-              </div>
-              <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                <Building2 className="w-3 h-3 text-emerald-400" />
-                Banco
-              </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBankTotal.toLocaleString('es-CL')}</p>
-            </div>
+          <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 mb-12 text-left items-start">
+            {cashBoxStatuses.map(status => renderCashBoxStatementCard(status))}
             <div 
               onDoubleClick={() => setHistoryView({ type: 'outflow', title: 'GASTOS TOTALES' })}
               className="bg-[#1E293B] p-8 rounded-[2rem] border border-rose-500/20 relative overflow-hidden group cursor-pointer hover:border-rose-500/50 transition-colors shadow-2xl"
