@@ -176,8 +176,8 @@ const getClosureAuditInfo = (closure: ShiftClosure) => {
   if (isTelegramPhoto) {
     return {
       status: 'pending_report',
-      label: 'Pendiente Perseo',
-      detail: 'Foto Telegram recibida; falta cruzar reporte de venta',
+      label: 'Falta Venta Sistema',
+      detail: 'Foto Telegram recibida; falta llenar Venta Sistema',
       className: 'bg-amber-500/10 text-amber-400 border-amber-500/20'
     } as const;
   }
@@ -185,7 +185,7 @@ const getClosureAuditInfo = (closure: ShiftClosure) => {
   return {
     status: 'not_audited',
     label: 'Sin auditoría',
-    detail: 'Cierre manual o sin reporte Perseo asociado',
+    detail: 'Cierre manual o sin venta de sistema asociada',
     className: 'bg-slate-500/10 text-slate-500 border-slate-500/20'
   } as const;
 };
@@ -2367,7 +2367,7 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 <option value="all">Toda Auditoría</option>
                 <option value="difference">Con Diferencia</option>
-                <option value="pending_report">Pendiente Perseo</option>
+                <option value="pending_report">Falta Venta Sistema</option>
                 <option value="matched">Auditado OK</option>
                 <option value="not_audited">Sin Auditoría</option>
               </select>

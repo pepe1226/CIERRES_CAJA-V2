@@ -76,6 +76,26 @@ function businessDateKey(date: Date) {
   ].join("-");
 }
 
+function ecuadorBusinessDateKey(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Guayaquil",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function getEcuadorBusinessDateRange(businessDate: string) {
+  const [year, month, day] = businessDate.split("-").map(Number);
+  const start = new Date(Date.UTC(year, month - 1, day, 5, 0, 0, 0));
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+  return { start, end };
+}
+
 function parseBusinessDate(value: unknown, fallback = new Date()) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
 
@@ -309,7 +329,7 @@ export function parsePerseoReport(input: unknown) {
 }
 
 function closureBusinessDate(data: any) {
-  return businessDateKey(parseBusinessDate(data.date));
+  return ecuadorBusinessDateKey(parseBusinessDate(data.date));
 }
 
 function scoreCandidate(row: PerseoReportRow, closure: any) {
@@ -327,8 +347,7 @@ function scoreCandidate(row: PerseoReportRow, closure: any) {
 
 async function getClosuresForDate(businessDate: string) {
   const db = getFirebaseAdminDb();
-  const start = new Date(`${businessDate}T00:00:00.000Z`);
-  const end = new Date(`${businessDate}T23:59:59.999Z`);
+  const { start, end } = getEcuadorBusinessDateRange(businessDate);
 
   const snapshot = await db
     .collection("closures")
