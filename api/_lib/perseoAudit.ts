@@ -111,6 +111,29 @@ function getFirst(record: Record<string, unknown>, keys: string[]) {
   return undefined;
 }
 
+function getFirstByHeaderTerms(
+  record: Record<string, unknown>,
+  includeTerms: string[],
+  excludeTerms: string[] = []
+) {
+  const include = includeTerms.map(normalizeHeader);
+  const exclude = excludeTerms.map(normalizeHeader);
+
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+
+    const normalizedKey = normalizeHeader(key);
+    const matchesInclude = include.some((term) => normalizedKey.includes(term));
+    const matchesExclude = exclude.some((term) => normalizedKey.includes(term));
+
+    if (matchesInclude && !matchesExclude) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
 function splitCsvLine(line: string, delimiter: string) {
   const result: string[] = [];
   let current = "";
@@ -235,11 +258,24 @@ export function parsePerseoReport(input: unknown) {
         getFirst(raw, [
           "venta_sistema",
           "ventas_sistema",
-          "total_sistema",
+          "venta_total",
+          "ventas_total",
           "total_venta",
+          "total_ventas",
+          "total_vendido",
+          "venta_neta",
+          "ventas_netas",
+          "monto_venta",
+          "importe_venta",
+          "ingreso_sistema",
+          "valor_sistema_venta",
           "venta",
-          "sistema",
-        ])
+        ]) ??
+          getFirstByHeaderTerms(
+            raw,
+            ["venta", "ventas", "vendido", "facturado", "total_venta", "ingreso"],
+            ["diferencia", "diff", "saldo", "cuadre", "cierre", "esperado", "efectivo", "fisico", "funda"]
+          )
       );
       const systemBalanceRaw = getFirst(raw, [
         "cuadre_sistema",
@@ -249,7 +285,12 @@ export function parsePerseoReport(input: unknown) {
         "esperado",
         "saldo",
         "sistema",
-      ]);
+      ]) ??
+        getFirstByHeaderTerms(
+          raw,
+          ["cuadre", "saldo", "cierre", "esperado", "efectivo", "sistema"],
+          ["venta", "ventas", "vendido", "facturado", "diferencia", "diff", "fisico", "funda"]
+        );
       const systemBalance = parseMoney(systemBalanceRaw ?? systemAmount);
       const date = parseBusinessDate(dateValue);
       const responsibleKey = normalizeResponsible(responsible);

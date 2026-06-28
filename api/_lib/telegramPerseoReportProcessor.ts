@@ -119,62 +119,6 @@ function getAttemptId(chatId: number | string, messageId: number | string) {
   return `telegram_${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_")}_${messageId}`;
 }
 
-function formatMoney(value: unknown) {
-  const number = Number(value || 0);
-  return Number.isFinite(number) ? number.toFixed(2) : "0.00";
-}
-
-function buildAuditTelegramMessage(audit: any, reportId: string) {
-  const differenceRows = Array.isArray(audit.results)
-    ? audit.results.filter((result: any) => result.ok && result.auditStatus === "difference")
-    : [];
-  const unmatchedRows = Array.isArray(audit.results)
-    ? audit.results.filter((result: any) => !result.ok)
-    : [];
-  const lines = [
-    "Reporte de cierres procesado.",
-    `Filas: ${audit.totalRows}`,
-    `Cierres cruzados: ${audit.updated}`,
-    `Auditados OK: ${audit.matched || 0}`,
-    `Con diferencia: ${audit.differences || 0}`,
-    `Sin coincidencia/revision: ${audit.unmatched}`,
-    `Total fisico fotos: USD ${formatMoney(audit.totalPhysicalAmount)}`,
-    `Total sistema cierre: USD ${formatMoney(audit.totalSystemBalance)}`,
-    `Diferencia total: USD ${formatMoney(audit.totalDifference)}`,
-  ];
-
-  if (differenceRows.length > 0) {
-    lines.push("", "Diferencias:");
-
-    differenceRows.slice(0, 8).forEach((result: any) => {
-      lines.push(
-        [
-          `- ${result.responsible || "SIN RESPONSABLE"}`,
-          `foto USD ${formatMoney(result.physicalAmount)}`,
-          `sistema USD ${formatMoney(result.systemBalance)}`,
-          `dif USD ${formatMoney(result.difference)}`,
-        ].join(" | ")
-      );
-    });
-
-    if (differenceRows.length > 8) {
-      lines.push(`... y ${differenceRows.length - 8} diferencias mas.`);
-    }
-  }
-
-  if (unmatchedRows.length > 0) {
-    lines.push("", "Sin coincidencia:");
-
-    unmatchedRows.slice(0, 5).forEach((result: any) => {
-      lines.push(`- ${result.responsible || "SIN RESPONSABLE"} (${result.reason || "revision"})`);
-    });
-  }
-
-  lines.push("", `Reporte: ${reportId}`);
-
-  return lines.join("\n");
-}
-
 async function saveReportAttempt(params: {
   chatId: number | string;
   message: any;
@@ -244,12 +188,14 @@ Objetivo:
 Por cada cajero/responsable/local que aparezca, devuelve una fila con:
 - fecha en formato YYYY-MM-DD
 - responsable o cajero
-- venta_sistema si existe
+- venta_sistema si existe. Usa aqui valores llamados venta, ventas, total venta, total vendido, venta neta, facturado, ingresos o total de ventas.
 - cuadre_sistema, saldo_sistema, efectivo esperado o sistema si existe
 - sistema si solo hay un valor general de sistema
 
 Reglas:
 - No inventes filas.
+- No dejes venta_sistema en null si el reporte muestra una venta/total vendido para ese cajero.
+- No pongas la diferencia en venta_sistema.
 - Si solo existe una columna "sistema", usala como sistema.
 - Si hay totales generales y filas por cajero, prefiere filas por cajero.
 - Devuelve JSON valido.
@@ -288,6 +234,10 @@ ${params.caption || "Sin texto adicional"}
                 responsable: { type: Type.STRING, nullable: true },
                 cajero: { type: Type.STRING, nullable: true },
                 venta_sistema: { type: Type.NUMBER, nullable: true },
+                venta_total: { type: Type.NUMBER, nullable: true },
+                total_venta: { type: Type.NUMBER, nullable: true },
+                total_vendido: { type: Type.NUMBER, nullable: true },
+                facturado: { type: Type.NUMBER, nullable: true },
                 cuadre_sistema: { type: Type.NUMBER, nullable: true },
                 sistema: { type: Type.NUMBER, nullable: true },
               },
@@ -414,7 +364,16 @@ export async function processTelegramPerseoReportMessage(params: {
     audit,
   });
 
-  await sendTelegramMessage(params.chatId, buildAuditTelegramMessage(audit, reportId));
+  await sendTelegramMessage(
+    params.chatId,
+    [
+      "Reporte Perseo procesado.",
+      `Filas: ${audit.totalRows}`,
+      `Cierres actualizados: ${audit.updated}`,
+      `Sin coincidencia/revision: ${audit.unmatched}`,
+      `Reporte: ${reportId}`,
+    ].join("\n")
+  );
 
   return {
     ok: true,

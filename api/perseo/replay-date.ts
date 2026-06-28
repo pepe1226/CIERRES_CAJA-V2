@@ -54,12 +54,18 @@ export default async function handler(req: any, res: any) {
     rows
       .filter((row: any) => row?.businessDate === date)
       .forEach((row: any) => {
-        rowsInput.push({
+        const rowInput: Record<string, unknown> = {
+          ...(row.raw && typeof row.raw === "object" ? row.raw : {}),
           fecha: row.businessDate,
           responsable: row.responsible,
-          venta_sistema: roundMoney(row.systemAmount),
-          cuadre_sistema: roundMoney(row.systemBalance),
-        });
+        };
+        const systemAmount = roundMoney(row.systemAmount);
+        const systemBalance = roundMoney(row.systemBalance);
+
+        if (systemAmount > 0) rowInput.venta_sistema = systemAmount;
+        if (systemBalance > 0) rowInput.cuadre_sistema = systemBalance;
+
+        rowsInput.push(rowInput);
       });
   });
 
