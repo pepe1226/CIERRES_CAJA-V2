@@ -1,4 +1,5 @@
 import { FieldValue } from "firebase-admin/firestore";
+import { auditSavedPerseoReportsForDate, getEcuadorBusinessDateKeyFromValue } from "./perseoAudit.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   buildMovementFromExtraction,
@@ -133,6 +134,51 @@ function formatMoney(value: any) {
   const number = typeof value === "number" && Number.isFinite(value) ? value : 0;
   return number.toFixed(2);
 }
+function parseOptionalMoney(value: any) {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+
+  const text = String(value ?? "")
+    .replace(/\s/g, "")
+    .replace(/[^\d,.-]/g, "");
+
+  if (!text) return 0;
+
+  const comma = text.lastIndexOf(",");
+  const dot = text.lastIndexOf(".");
+  const decimalSeparator = comma > dot ? "," : ".";
+  const normalized = decimalSeparator === ","
+    ? text.replace(/\./g, "").replace(",", ".")
+    : text.replace(/,/g, "");
+
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function getExtractedSystemValues(raw: Record<string, any>) {
+  const systemAmount = parseOptionalMoney(
+    raw.venta_sistema ??
+      raw.ventas_sistema ??
+      raw.venta_total ??
+      raw.total_venta ??
+      raw.total_vendido ??
+      raw.facturado ??
+      raw.ingresos
+  );
+  const systemBalance = parseOptionalMoney(
+    raw.cuadre_sistema ??
+      raw.saldo_sistema ??
+      raw.efectivo_esperado ??
+      raw.sistema ??
+      raw.cierre_sistema
+  );
+  const fallbackBalance = systemBalance || systemAmount || parseOptionalMoney(raw.sistema);
+
+  return {
+    systemAmount,
+    systemBalance: fallbackBalance,
+  };
+}
+
 
 async function replyDuplicate(params: {
   chatId: number | string;

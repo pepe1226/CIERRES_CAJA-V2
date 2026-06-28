@@ -10,6 +10,9 @@ const ACTIVE_BUSINESS_YEAR = 2026;
 export type TelegramFinancialExtraction = {
   tipo: GeminiTipo;
   monto: number | null;
+  venta_sistema?: number | null;
+  cuadre_sistema?: number | null;
+  sistema?: number | null;
   moneda: string | null;
   fecha: string | null;
   caja: string | null;
@@ -533,7 +536,9 @@ Eres un asistente para registrar cierres de caja desde fotos enviadas por Telegr
 Regla principal:
 La mayoría de imágenes tendrán solamente:
 - fecha escrita a mano
-- valor o monto
+- valor o monto fisico de la funda
+- venta sistema, venta total o total vendido si aparece
+- cuadre sistema, saldo sistema o sistema si aparece
 - responsable o nombre de persona
 
 Ejemplo:
@@ -592,6 +597,9 @@ ${params.caption || "Sin texto adicional"}
             enum: ["ingreso", "egreso", "transferencia", "desconocido"],
           },
           monto: { type: Type.NUMBER, nullable: true },
+          venta_sistema: { type: Type.NUMBER, nullable: true },
+          cuadre_sistema: { type: Type.NUMBER, nullable: true },
+          sistema: { type: Type.NUMBER, nullable: true },
           moneda: { type: Type.STRING, nullable: true },
           fecha: {
             type: Type.STRING,
@@ -615,6 +623,9 @@ ${params.caption || "Sin texto adicional"}
         required: [
           "tipo",
           "monto",
+          "venta_sistema",
+          "cuadre_sistema",
+          "sistema",
           "moneda",
           "fecha",
           "caja",

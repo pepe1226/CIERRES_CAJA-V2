@@ -930,6 +930,7 @@ function AppContent() {
       tripId: c.tripId,
       category: undefined,
       subcategory: undefined,
+      tags: undefined,
       from: undefined,
       to: displayStatus
     };
@@ -1469,6 +1470,18 @@ function AppContent() {
 
     try {
       await updateDoc(doc(db, 'closures', id), { status: nextStatus });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
+    }
+  };
+
+  const setClosureStatus = async (id: string, status: CashBoxStatus) => {
+    if (!user) return;
+
+    playSound(status);
+
+    try {
+      await updateDoc(doc(db, 'closures', id), { status });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
     }
@@ -2563,12 +2576,15 @@ Notas: ${closure.notes || 'N/A'}`;
                         </div>
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <button
-                          onClick={() => setInlineAddValues({...inlineAddValues, status: getNextStatus(inlineAddValues.status!)})}
-                          className={`p-2 rounded-xl transition-all shadow-lg border ${inlineAddValues.status === 'safe' ? 'bg-rose-500/20 text-rose-500 border-rose-500/20' : inlineAddValues.status === 'transit' ? 'bg-amber-500/20 text-amber-500 border-amber-500/20' : 'bg-emerald-500/20 text-emerald-500 border-emerald-500/20'}`}
+                        <select
+                          value={inlineAddValues.status || 'safe'}
+                          onChange={e => setInlineAddValues({...inlineAddValues, status: e.target.value as CashBoxStatus})}
+                          className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
                         >
-                          <ShieldCheck className="w-4 h-4" />
-                        </button>
+                          <option value="safe">Tienda</option>
+                          <option value="transit">Transito</option>
+                          <option value="bank">Banco</option>
+                        </select>
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex justify-end gap-2">
@@ -2722,12 +2738,15 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </div>
                               </td>
                               <td className="px-6 py-4 text-center">
-                                <button
-                                  onClick={() => setInlineEditValues({...inlineEditValues, status: getNextStatus(inlineEditValues.status!)})}
-                                  className={`p-2 rounded-xl transition-all shadow-lg border ${inlineEditValues.status === 'safe' ? 'bg-rose-500/20 text-rose-500 border-rose-500/20' : inlineEditValues.status === 'transit' ? 'bg-amber-500/20 text-amber-500 border-amber-500/20' : 'bg-emerald-500/20 text-emerald-500 border-emerald-500/20'}`}
+                                <select
+                                  value={inlineEditValues.status || 'safe'}
+                                  onChange={e => setInlineEditValues({...inlineEditValues, status: e.target.value as CashBoxStatus})}
+                                  className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
                                 >
-                                  <ShieldCheck className="w-4 h-4" />
-                                </button>
+                                  <option value="safe">Tienda</option>
+                                  <option value="transit">Transito</option>
+                                  <option value="bank">Banco</option>
+                                </select>
                               </td>
                               <td className="px-6 py-4 text-right">
                                 <div className="flex justify-end gap-2">
@@ -2784,25 +2803,29 @@ Notas: ${closure.notes || 'N/A'}`;
                                  </div>
                               </td>
                               <td className="px-6 py-4 text-center">
-                                {(() => {
-                                  const displayStatus = closure.id
-                                    ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
-                                    : normalizeCashBoxStatus(closure.status);
+                                <div className="flex items-center justify-center gap-1">
+                                  {cashBoxStatuses.map(status => {
+                                    const currentStatus = closure.id
+                                      ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
+                                      : normalizeCashBoxStatus(closure.status);
+                                    const statusInfo = getDayStatusInfo(status);
+                                    const StatusIcon = statusInfo.Icon;
+                                    const active = currentStatus === status;
 
-                                  const statusInfo = getDayStatusInfo(displayStatus);
-                                  const StatusIcon = statusInfo.Icon;
-
-                                  return (
-                                    <button
-                                      onClick={() => toggleStatus(closure.id!)}
-                                      title={`Estado calculado: ${statusInfo.label}. Este estado considera los movimientos de caja registrados.`}
-                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
-                                    >
-                                      <StatusIcon className="w-3 h-3" />
-                                      {statusInfo.label}
-                                    </button>
-                                  );
-                                })()}
+                                    return (
+                                      <button
+                                        key={status}
+                                        type="button"
+                                        onClick={() => setClosureStatus(closure.id!, status)}
+                                        title={statusInfo.label}
+                                        className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                                      >
+                                        <StatusIcon className="w-3 h-3" />
+                                        {status === 'safe' ? 'Tienda' : status === 'transit' ? 'Transito' : 'Banco'}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
                               </td>
                               <td className="px-6 py-4 text-right">
                                 <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">

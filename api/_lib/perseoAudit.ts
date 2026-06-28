@@ -88,6 +88,11 @@ function ecuadorBusinessDateKey(date: Date) {
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
+export function getEcuadorBusinessDateKeyFromValue(value: unknown) {
+  const date = parseBusinessDate(value);
+  return Number.isNaN(date.getTime()) ? "" : ecuadorBusinessDateKey(date);
+}
+
 function getEcuadorBusinessDateRange(businessDate: string) {
   const [year, month, day] = businessDate.split("-").map(Number);
   const start = new Date(Date.UTC(year, month - 1, day, 5, 0, 0, 0));
@@ -479,6 +484,68 @@ export async function auditClosuresWithPerseoRows(params: {
       difference: result.difference,
       auditStatus: result.auditStatus,
     })),
+  };
+}
+
+export async function auditSavedPerseoReportsForDate(params: {
+  businessDate: string;
+}) {
+  const db = getFirebaseAdminDb();
+  const reportsSnapshot = await db
+    .collection("perseo_reports")
+    .where("businessDates", "array-contains", params.businessDate)
+    .get();
+
+  const rowsInput: Record<string, unknown>[] = [];
+  const reportIds: string[] = [];
+
+  reportsSnapshot.docs.forEach((doc) => {
+    const data = doc.data();
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+
+    reportIds.push(doc.id);
+
+    rows
+      .filter((row: any) => row?.businessDate === params.businessDate)
+      .forEach((row: any) => {
+        const rowInput: Record<string, unknown> = {
+          ...(row.raw && typeof row.raw === "object" ? row.raw : {}),
+          fecha: row.businessDate,
+          responsable: row.responsible,
+        };
+
+        const systemAmount = parseMoney(row.systemAmount);
+        const systemBalance = parseMoney(row.systemBalance);
+
+        if (systemAmount > 0) rowInput.venta_sistema = systemAmount;
+        if (systemBalance > 0) rowInput.cuadre_sistema = systemBalance;
+
+        rowsInput.push(rowInput);
+      });
+  });
+
+  const rows = parsePerseoReport(rowsInput);
+
+  if (rows.length === 0) {
+    return {
+      ok: true,
+      businessDate: params.businessDate,
+      reportsFound: reportsSnapshot.size,
+      reportIds,
+      updated: 0,
+      reason: "no_saved_rows",
+    };
+  }
+
+  const reportId = `auto:${params.businessDate}:${reportIds.join(",")}`;
+  const audit = await auditClosuresWithPerseoRows({ rows, reportId });
+
+  return {
+    ...audit,
+    businessDate: params.businessDate,
+    reportsFound: reportsSnapshot.size,
+    reportIds,
+    reportId,
   };
 }
 
