@@ -5,6 +5,8 @@ type GeminiTipo = "ingreso" | "egreso" | "transferencia" | "desconocido";
 type AppMovementType = "inflow" | "outflow" | "transfer" | "internal_transfer";
 type CajaId = "safe" | "transit" | "bank";
 
+const ACTIVE_BUSINESS_YEAR = 2026;
+
 export type TelegramFinancialExtraction = {
   tipo: GeminiTipo;
   monto: number | null;
@@ -219,23 +221,25 @@ function isValidDateParts(year: number, month: number, day: number) {
 
 function getFallbackDateParts(fallbackDate: Date) {
   return {
-    year: fallbackDate.getUTCFullYear(),
+    year: ACTIVE_BUSINESS_YEAR,
     month: fallbackDate.getUTCMonth() + 1,
     day: fallbackDate.getUTCDate(),
   };
 }
 
 function toBusinessDate(year: number, month: number, day: number, fallbackDate: Date) {
-  const fallback = getFallbackDateParts(fallbackDate);
-  const minYear = fallback.year - 1;
-  const maxYear = fallback.year + 1;
+  let normalizedYear = year;
 
-  if (year < 100) year += 2000;
-  if (year < minYear || year > maxYear || !isValidDateParts(year, month, day)) {
+  if (normalizedYear < 100) normalizedYear += 2000;
+  if (normalizedYear !== ACTIVE_BUSINESS_YEAR) {
+    normalizedYear = ACTIVE_BUSINESS_YEAR;
+  }
+
+  if (!isValidDateParts(normalizedYear, month, day)) {
     return null;
   }
 
-  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  return new Date(Date.UTC(normalizedYear, month - 1, day, 12, 0, 0));
 }
 
 function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
@@ -538,10 +542,11 @@ $45.15
 ESQ Yulexi
 
 En estos casos:
+- El anio operativo del sistema es 2026.
 - Interpretar la fecha como DD-MM-YY.
 - 03-05-26 significa 2026-05-03.
-- Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes y anio del mensaje de Telegram.
-- Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio del mensaje de Telegram.
+- Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes del mensaje de Telegram y anio 2026.
+- Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio 2026.
 - Nunca uses 26 como anio 0026 ni intercambies dia y anio.
 - El monto es el valor escrito junto al símbolo $.
 - El responsable/cajero es el nombre escrito en la etiqueta, normalmente despues de ESQ, Responsable, Sr. o Sra.
