@@ -215,7 +215,13 @@ const getMovementDefaults = (
   }
 
   if (type === 'transfer') {
-    const from = caja || (current.from && current.from !== 'bank' ? current.from : 'transit');
+    const currentFrom = current.from ? normalizeCashBoxStatus(current.from) : null;
+    const selectedBox = caja ? normalizeCashBoxStatus(caja) : null;
+    const from = selectedBox && selectedBox !== 'bank'
+      ? selectedBox
+      : currentFrom && currentFrom !== 'bank'
+        ? currentFrom
+        : 'safe';
     return {
       ...base,
       type,
@@ -1224,6 +1230,13 @@ function AppContent() {
     }
 
     const movementAmount = toNonNegativeNumber(movementValues.amount);
+    const movementType = movementValues.type;
+    const normalizedFrom = movementValues.from ? normalizeCashBoxStatus(movementValues.from) : undefined;
+    const normalizedTo = movementType === 'transfer'
+      ? 'bank'
+      : movementValues.to
+        ? normalizeCashBoxStatus(movementValues.to)
+        : undefined;
 
     if (movementAmount <= 0) {
       setFormError('EL MONTO DEBE SER MAYOR A 0');
@@ -1235,26 +1248,37 @@ function AppContent() {
       return;
     }
 
-    if ((movementValues.type === 'transfer' || movementValues.type === 'internal_transfer')) {
-      if (!movementValues.from || !movementValues.to) {
+    if (movementType === 'transfer') {
+      if (!normalizedFrom) {
         setFormError('SELECCIONE ORIGEN Y DESTINO');
         return;
       }
-      if (movementValues.from === movementValues.to) {
+      if (normalizedFrom === 'bank') {
+        setFormError('PARA ENVIAR A BANCO, EL ORIGEN DEBE SER TIENDA O TRÁNSITO');
+        return;
+      }
+    }
+
+    if (movementType === 'internal_transfer') {
+      if (!normalizedFrom || !normalizedTo) {
+        setFormError('SELECCIONE ORIGEN Y DESTINO');
+        return;
+      }
+      if (normalizedFrom === normalizedTo) {
         setFormError('ORIGEN Y DESTINO DEBEN SER DIFERENTES');
         return;
       }
     }
 
-    if (movementValues.type === 'outflow' && !movementValues.from) {
+    if (movementType === 'outflow' && !normalizedFrom) {
       setFormError('SELECCIONE DESDE DONDE SE PAGA');
       return;
     }
 
-    if (movementValues.from) {
-      const available = getAvailableSourceBalance(movementValues.from);
+    if (normalizedFrom) {
+      const available = getAvailableSourceBalance(normalizedFrom);
       if (movementAmount > available + 0.009) {
-        setFormError(`SALDO INSUFICIENTE EN ${getClosureStatusLabel(normalizeCashBoxStatus(movementValues.from))}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
+        setFormError(`SALDO INSUFICIENTE EN ${getClosureStatusLabel(normalizedFrom)}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
         return;
       }
     }
@@ -1264,14 +1288,14 @@ function AppContent() {
       const { id: _id, ...rest } = movementValues;
       const data: any = {
         date: Timestamp.fromDate(new Date(movementValues.date!)),
-        type: movementValues.type,
+        type: movementType,
         amount: movementAmount,
         description: movementValues.description.toUpperCase(),
         createdBy: user.uid,
-        category: movementValues.type === 'outflow' ? currentCategory || 'Sueldos' : null,
-        subcategory: movementValues.type === 'outflow' ? currentSubcategory || null : null,
-        from: movementValues.from || null,
-        to: movementValues.type === 'outflow' ? null : movementValues.to || null,
+        category: movementType === 'outflow' ? currentCategory || 'Sueldos' : null,
+        subcategory: movementType === 'outflow' ? currentSubcategory || null : null,
+        from: normalizedFrom || null,
+        to: movementType === 'outflow' ? null : normalizedTo || null,
       };
 
       if (!editingMovementId) {
@@ -3163,25 +3187,41 @@ Notas: ${closure.notes || 'N/A'}`;
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Origen</label>
                         <select 
                           value={movementValues.from || ''} 
-                          onChange={e => setMovementValues({...movementValues, from: e.target.value})}
+                          onChange={e => setMovementValues({
+                            ...movementValues,
+                            from: e.target.value,
+                            to: movementValues.type === 'transfer'
+                              ? 'bank'
+                              : movementValues.to === e.target.value
+                                ? ''
+                                : movementValues.to
+                          })}
                           className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                         >
                           <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                           <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
-                          <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                          {movementValues.type === 'internal_transfer' && (
+                            <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                          )}
                         </select>
                       </div>
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Destino</label>
-                        <select 
-                          value={movementValues.to || ''} 
-                          onChange={e => setMovementValues({...movementValues, to: e.target.value})}
-                          className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
-                        >
-                          <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                          <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
-                          <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
-                        </select>
+                        {movementValues.type === 'transfer' ? (
+                          <div className="w-full px-4 py-3 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-400 text-xs font-black uppercase">
+                            Banco
+                          </div>
+                        ) : (
+                          <select
+                            value={movementValues.to || ''}
+                            onChange={e => setMovementValues({...movementValues, to: e.target.value})}
+                            className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
+                          >
+                            <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
+                            <option value="transit" className="bg-[#0F172A] text-white">En Tr�nsito</option>
+                            <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                          </select>
+                        )}
                       </div>
                     </div>
                   )}
