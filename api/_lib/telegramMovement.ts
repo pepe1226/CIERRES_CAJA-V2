@@ -207,12 +207,64 @@ function mapTipoToMovementType(
   return "outflow";
 }
 
+function isValidDateParts(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+function getFallbackDateParts(fallbackDate: Date) {
+  return {
+    year: fallbackDate.getUTCFullYear(),
+    month: fallbackDate.getUTCMonth() + 1,
+    day: fallbackDate.getUTCDate(),
+  };
+}
+
+function toBusinessDate(year: number, month: number, day: number, fallbackDate: Date) {
+  const fallback = getFallbackDateParts(fallbackDate);
+  const minYear = fallback.year - 1;
+  const maxYear = fallback.year + 1;
+
+  if (year < 100) year += 2000;
+  if (year < minYear || year > maxYear || !isValidDateParts(year, month, day)) {
+    return null;
+  }
+
+  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+}
+
 function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
   if (!value) {
     return fallbackDate;
   }
 
-  const text = value.trim();
+  const text = value
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.]/g, "-");
+
+  const fallback = getFallbackDateParts(fallbackDate);
+
+  const dayOnlyMatch = text.match(/^(\d{1,2})$/);
+
+  if (dayOnlyMatch) {
+    const parsed = toBusinessDate(fallback.year, fallback.month, Number(dayOnlyMatch[1]), fallbackDate);
+
+    return parsed || fallbackDate;
+  }
+
+  const dayMonthMatch = text.match(/^(\d{1,2})[-/](\d{1,2})$/);
+
+  if (dayMonthMatch) {
+    const parsed = toBusinessDate(fallback.year, Number(dayMonthMatch[2]), Number(dayMonthMatch[1]), fallbackDate);
+
+    return parsed || fallbackDate;
+  }
 
   const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
 
@@ -221,7 +273,7 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
     const month = Number(isoMatch[2]);
     const day = Number(isoMatch[3]);
 
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    return toBusinessDate(year, month, day, fallbackDate) || fallbackDate;
   }
 
   const shortDateMatch = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
@@ -229,16 +281,16 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
   if (shortDateMatch) {
     const day = Number(shortDateMatch[1]);
     const month = Number(shortDateMatch[2]);
-    let year = Number(shortDateMatch[3]);
+    const year = Number(shortDateMatch[3]);
 
-    if (year < 100) {
-      year = 2000 + year;
-    }
-
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    return toBusinessDate(year, month, day, fallbackDate) || fallbackDate;
   }
 
-  const parsed = new Date(text);
+  if (/^\d+$/.test(text)) {
+    return fallbackDate;
+  }
+
+  const parsed = new Date(value);
 
   if (!Number.isNaN(parsed.getTime())) {
     return parsed;
@@ -272,7 +324,7 @@ export function buildMovementFromExtraction(
 
   const hasValidDate =
     typeof extraction.fecha === "string" &&
-    extraction.fecha.trim().length >= 8 &&
+    extraction.fecha.trim().length > 0 &&
     !Number.isNaN(movementDate.getTime());
 
   const hasResponsible = Boolean(
@@ -488,8 +540,12 @@ ESQ Yulexi
 En estos casos:
 - Interpretar la fecha como DD-MM-YY.
 - 03-05-26 significa 2026-05-03.
+- Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes y anio del mensaje de Telegram.
+- Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio del mensaje de Telegram.
+- Nunca uses 26 como anio 0026 ni intercambies dia y anio.
 - El monto es el valor escrito junto al símbolo $.
-- El responsable es el nombre escrito en la etiqueta.
+- El responsable/cajero es el nombre escrito en la etiqueta, normalmente despues de ESQ, Responsable, Sr. o Sra.
+- Coloca el responsable/cajero en proveedor_cliente, no solo en descripcion.
 - El tipo debe ser "ingreso".
 - La caja debe ser "Principal".
 - La categoría debe ser "Cierre de caja".

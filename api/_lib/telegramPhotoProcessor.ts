@@ -55,6 +55,8 @@ function cleanResponsible(value: any): string {
   const text = String(value || "SIN RESPONSABLE")
     .replace(/^ESQ\s+/i, "")
     .replace(/^RESPONSABLE\s*:?/i, "")
+    .replace(/^CAJER[OA]\s*:?/i, "")
+    .replace(/^CAJA\s*:?/i, "")
     .replace(/^SR\.?\s*/i, "")
     .replace(/^SRA\.?\s*/i, "")
     .trim();
@@ -68,6 +70,8 @@ function normalizeDuplicateText(value: any): string {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/^ESQ\s+/i, "")
     .replace(/^RESPONSABLE\s*:?/i, "")
+    .replace(/^CAJER[OA]\s*:?/i, "")
+    .replace(/^CAJA\s*:?/i, "")
     .replace(/^SR\.?\s*/i, "")
     .replace(/^SRA\.?\s*/i, "")
     .replace(/[^a-zA-Z0-9]+/g, "-")
@@ -113,6 +117,16 @@ function buildDuplicateKey(params: {
   const userKey = normalizeDuplicateText(params.createdBy);
 
   return `${dateKey}_${amountInCents}_${responsibleKey}_${userKey}`;
+}
+
+function getTelegramFallbackDate(message: any) {
+  const unixSeconds = Number(message?.date || 0);
+
+  if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) {
+    return new Date();
+  }
+
+  return new Date(unixSeconds * 1000);
 }
 
 function formatMoney(value: any) {
@@ -295,7 +309,10 @@ export async function processTelegramPhotoMessage(params: {
     baseDelayMs: 1500,
   });
 
-  const parsedMovement = buildMovementFromExtraction(extraction, new Date());
+  const parsedMovement = buildMovementFromExtraction(
+    extraction,
+    getTelegramFallbackDate(params.message)
+  );
 
   const firestoreMovement = removeUndefinedDeep({
     ...parsedMovement,

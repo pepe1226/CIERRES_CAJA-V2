@@ -29,7 +29,9 @@ import {
   X,
   Search,
   Building2,
-  Tag
+  Tag,
+  Wallet,
+  ReceiptText
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
@@ -173,6 +175,13 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
   const totalExpenses = expensesByCategory.reduce((acc, curr) => acc + curr.value, 0);
   const totalInflowMovements = filteredMovements.filter(m => m.type === 'inflow').reduce((acc, curr) => acc + curr.amount, 0);
   const totalIncome = filteredClosures.reduce((acc, curr) => acc + curr.physicalAmount, 0) + totalInflowMovements;
+  const netBalance = totalIncome - totalExpenses;
+  const recentExpenses = useMemo(() => {
+    return filteredMovements
+      .filter(m => m.type === 'outflow')
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      .slice(0, 3);
+  }, [filteredMovements]);
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-white p-4 md:p-8">
@@ -192,18 +201,69 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
             </div>
           </div>
           
-          <div className="flex gap-4">
-            <div className="bg-emerald-500/10 border border-emerald-500/20 p-4 rounded-2xl">
-              <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-1">Total Ingresos</p>
-              <p className="text-2xl font-black font-mono text-emerald-400">${totalIncome.toLocaleString('es-CL')}</p>
+          <div className="w-full md:w-[430px] rounded-2xl border border-white/10 bg-slate-950/70 p-4 shadow-2xl shadow-black/20">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Estado de cuenta</p>
+                <p className={`text-3xl font-black font-mono ${netBalance < 0 ? 'text-rose-400' : 'text-emerald-400'}`}>
+                  ${netBalance.toLocaleString('es-CL')}
+                </p>
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Balance del periodo</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowHistory(true)}
+                className="p-3 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 transition-all"
+                title="Ver historial de gastos"
+              >
+                <ReceiptText className="w-5 h-5" />
+              </button>
             </div>
-            <div 
-              onDoubleClick={() => setShowHistory(true)}
-              className="bg-rose-500/10 border border-rose-500/20 p-4 rounded-2xl cursor-pointer select-none"
-              title="Doble clic para ver historial"
-            >
-              <p className="text-[10px] font-black text-rose-500 uppercase tracking-widest mb-1">GASTOS TOTALES</p>
-              <p className="text-2xl font-black font-mono text-rose-400">${totalExpenses.toLocaleString('es-CL')}</p>
+
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/20 p-3">
+                <div className="flex items-center gap-2 text-emerald-400 mb-1">
+                  <Wallet className="w-4 h-4" />
+                  <span className="text-[9px] font-black uppercase tracking-widest">Ingresos</span>
+                </div>
+                <p className="text-lg font-black font-mono text-emerald-300">${totalIncome.toLocaleString('es-CL')}</p>
+              </div>
+              <div className="rounded-xl bg-rose-500/10 border border-rose-500/20 p-3">
+                <div className="flex items-center gap-2 text-rose-400 mb-1">
+                  <TrendingDown className="w-4 h-4" />
+                  <span className="text-[9px] font-black uppercase tracking-widest">Gastos</span>
+                </div>
+                <p className="text-lg font-black font-mono text-rose-300">-${totalExpenses.toLocaleString('es-CL')}</p>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {recentExpenses.length > 0 ? recentExpenses.map(m => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="w-full flex items-center justify-between gap-3 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] px-3 py-2 transition-all text-left"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-xs font-black text-white uppercase truncate">{m.description}</span>
+                    <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                      {format(parseISO(m.date), 'dd/MM HH:mm')} · {m.category || 'GENERAL'}
+                    </span>
+                  </span>
+                  <span className="text-sm font-black font-mono text-rose-400 whitespace-nowrap">
+                    -${m.amount.toLocaleString('es-CL')}
+                  </span>
+                </button>
+              )) : (
+                <button
+                  type="button"
+                  onClick={() => setShowHistory(true)}
+                  className="w-full rounded-xl bg-white/[0.03] px-3 py-3 text-left text-[10px] font-black text-slate-500 uppercase tracking-widest"
+                >
+                  Sin gastos en el periodo
+                </button>
+              )}
             </div>
           </div>
         </div>
