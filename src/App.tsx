@@ -192,6 +192,61 @@ const toNonNegativeNumber = (value: unknown) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 };
 
+type ExpenseClassificationRule = {
+  category: string;
+  subcategory: string;
+  tags: string[];
+  terms: string[];
+};
+const EXPENSE_CLASSIFICATION_RULES: ExpenseClassificationRule[] = [
+  { category: 'Sueldos', subcategory: 'NOMINA', tags: ['PERSONAL', 'SUELDOS'], terms: ['sueldo', 'salario', 'nomina', 'pago empleado', 'anticipo', 'decimo', 'beneficio'] },
+  { category: 'Arriendo', subcategory: 'LOCAL', tags: ['LOCAL', 'FIJO'], terms: ['arriendo', 'alquiler', 'renta', 'local'] },
+  { category: 'Luz', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['luz', 'energia', 'electrica', 'empresa electrica'] },
+  { category: 'Agua', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['agua', 'interagua'] },
+  { category: 'Internet', subcategory: 'CONECTIVIDAD', tags: ['SERVICIOS', 'FIJO'], terms: ['internet', 'wifi', 'cnt', 'claro', 'netlife', 'fibra'] },
+  { category: 'Transporte', subcategory: 'MOVILIZACION', tags: ['OPERACION', 'TRANSPORTE'], terms: ['taxi', 'uber', 'flete', 'envio', 'gasolina', 'combustible', 'parqueo', 'peaje', 'bus'] },
+  { category: 'Insumos', subcategory: 'COMPRAS', tags: ['OPERACION', 'INSUMOS'], terms: ['insumo', 'compra', 'proveedor', 'material', 'fundas', 'papeleria', 'limpieza', 'cinta'] },
+  { category: 'Mantenimiento', subcategory: 'REPARACION', tags: ['OPERACION', 'MANTENIMIENTO'], terms: ['mantenimiento', 'reparacion', 'arreglo', 'tecnico', 'equipo'] },
+  { category: 'Banco', subcategory: 'COMISIONES', tags: ['BANCO', 'COMISION'], terms: ['comision', 'banco', 'transferencia bancaria', 'deposito', 'retiro'] },
+  { category: 'Impuestos', subcategory: 'SRI', tags: ['IMPUESTOS'], terms: ['sri', 'iva', 'impuesto', 'patente', 'municipio'] },
+];
+const normalizeExpenseText = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+const normalizeExpenseTag = (value: string) =>
+  normalizeExpenseText(value)
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+const mergeExpenseTags = (tags: Array<string | undefined | null>) =>
+  Array.from(new Set(tags.map(tag => tag ? normalizeExpenseTag(tag) : '').filter(Boolean))).slice(0, 8);
+const classifyExpenseDescription = (description: string) => {
+  const normalized = normalizeExpenseText(description);
+  if (!normalized) return null;
+  const matchedRule = EXPENSE_CLASSIFICATION_RULES
+    .map(rule => ({
+      rule,
+      score: rule.terms.reduce((acc, term) => normalized.includes(normalizeExpenseText(term)) ? acc + 1 : acc, 0)
+    }))
+    .sort((a, b) => b.score - a.score)[0];
+  if (!matchedRule || matchedRule.score === 0) {
+    return {
+      category: 'Otros',
+      subcategory: 'GENERAL',
+      tags: mergeExpenseTags(['SIN CLASIFICAR'])
+    };
+  }
+  return {
+    category: matchedRule.rule.category,
+    subcategory: matchedRule.rule.subcategory,
+    tags: mergeExpenseTags(matchedRule.rule.tags)
+  };
+};
 const getMovementDefaults = (
   type: Movement['type'],
   caja?: string,
@@ -200,7 +255,8 @@ const getMovementDefaults = (
   const base = {
     amount: toNonNegativeNumber(current.amount),
     description: current.description || '',
-    date: current.date || new Date().toISOString()
+    date: current.date || new Date().toISOString(),
+    tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : []
   };
 
   if (type === 'outflow') {
@@ -210,7 +266,8 @@ const getMovementDefaults = (
       category: current.category || 'Sueldos',
       subcategory: current.subcategory || '',
       from: caja || current.from || 'safe',
-      to: undefined
+      to: undefined,
+      tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : []
     };
   }
 
@@ -227,6 +284,7 @@ const getMovementDefaults = (
       type,
       category: undefined,
       subcategory: '',
+      tags: [],
       from,
       to: 'bank'
     };
@@ -244,6 +302,7 @@ const getMovementDefaults = (
     type,
     category: undefined,
     subcategory: '',
+    tags: [],
     from,
     to
   };
@@ -332,6 +391,7 @@ function AppContent() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isAddingNewSubcategory, setIsAddingNewSubcategory] = useState(false);
   const [newSubcategoryName, setNewSubcategoryName] = useState('');
+  const [newExpenseTag, setNewExpenseTag] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [isEditingCategories, setIsEditingCategories] = useState(false);
   
@@ -350,8 +410,38 @@ function AppContent() {
     description: '',
     date: new Date().toISOString(),
     category: 'Sueldos',
-    subcategory: ''
+    subcategory: '',
+    tags: []
   });
+
+  const applySmartExpenseDescription = (description: string) => {
+    const suggestion = classifyExpenseDescription(description);
+    setMovementValues(prev => ({
+      ...prev,
+      description,
+      ...(prev.type === 'outflow' && suggestion ? {
+        category: suggestion.category,
+        subcategory: suggestion.subcategory,
+        tags: mergeExpenseTags([...(prev.tags || []), ...suggestion.tags])
+      } : {})
+    }));
+  };
+  const addExpenseTag = () => {
+    const tag = normalizeExpenseTag(newExpenseTag);
+    if (!tag) return;
+    setMovementValues(prev => ({
+      ...prev,
+      tags: mergeExpenseTags([...(prev.tags || []), tag])
+    }));
+    setNewExpenseTag('');
+  };
+  const removeExpenseTag = (tagToRemove: string) => {
+    const normalized = normalizeExpenseTag(tagToRemove);
+    setMovementValues(prev => ({
+      ...prev,
+      tags: (prev.tags || []).filter(tag => normalizeExpenseTag(tag) !== normalized)
+    }));
+  };
 
   const [isInlineAdding, setIsInlineAdding] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -1210,6 +1300,7 @@ function AppContent() {
     
     let currentCategory = movementValues.category;
     let currentSubcategory = movementValues.subcategory;
+    const currentTags = mergeExpenseTags(movementValues.tags || []);
 
     // Auto-commit pending new category
     if (isAddingNewCategory && newCategoryName.trim()) {
@@ -1294,6 +1385,7 @@ function AppContent() {
         createdBy: user.uid,
         category: movementType === 'outflow' ? currentCategory || 'Sueldos' : null,
         subcategory: movementType === 'outflow' ? currentSubcategory || null : null,
+        tags: movementType === 'outflow' ? currentTags : null,
         from: normalizedFrom || null,
         to: movementType === 'outflow' ? null : normalizedTo || null,
       };
@@ -1304,7 +1396,7 @@ function AppContent() {
 
       // Remove null/undefined fields that are not needed or not allowed to be null if they shouldn't be
       Object.keys(data).forEach(key => {
-        if (data[key] === undefined || data[key] === null) {
+        if (data[key] === undefined || data[key] === null || (Array.isArray(data[key]) && data[key].length === 0)) {
           delete data[key];
         }
       });
@@ -1322,6 +1414,7 @@ function AppContent() {
       setNewCategoryName('');
       setIsAddingNewSubcategory(false);
       setNewSubcategoryName('');
+      setNewExpenseTag('');
       setFormError(null);
     } catch (err: any) {
       console.error('Error saving movement:', err);
@@ -1672,6 +1765,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         </span>
                         {m.category && <span>{m.category}</span>}
                         {m.subcategory && <span>{m.subcategory}</span>}
+                        {m.tags?.map(tag => <span key={tag}>{tag}</span>)}
                       </div>
                       <p className="text-[10px] font-bold text-slate-400 uppercase mt-2">
                         {m.source === 'closure'
@@ -3153,7 +3247,7 @@ Notas: ${closure.notes || 'N/A'}`;
        <AnimatePresence>
           {isAddingMovement && (
             <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
-              <motion.div initial={{ opacity:0, scale:0.95 }} animate={{ opacity:1, scale:1 }} className="w-full max-w-lg bg-[#1E293B] p-8 rounded-[2.5rem] border border-purple-500/20 shadow-2xl">
+              <motion.div initial={{ opacity:0, scale:0.95 }} animate={{ opacity:1, scale:1 }} className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-[#1E293B] p-8 rounded-[2.5rem] border border-purple-500/20 shadow-2xl">
                 <h3 className="text-xl font-black text-white mb-6 uppercase tracking-tight">Movimiento de Caja</h3>
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-4">
@@ -3179,6 +3273,53 @@ Notas: ${closure.notes || 'N/A'}`;
                     <p className="mt-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
                       Esta fecha será usada para ordenar el movimiento y afectar el estado del dinero.
                     </p>
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Monto</label>
+                    <input
+                      type="number"
+                      min="0"
+                      inputMode="decimal"
+                      value={movementValues.amount || ''}
+                      onFocus={e => e.target.select()}
+                      onKeyDown={e => ['-', '+', 'e', 'E'].includes(e.key) && e.preventDefault()}
+                      onChange={e => setMovementValues({...movementValues, amount: toNonNegativeNumber(e.target.value)})}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-2xl outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="0"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                      {movementValues.type === 'outflow' ? 'Descripcion inteligente' : 'Descripcion'}
+                    </label>
+                    <input
+                      type="text"
+                      value={movementValues.description}
+                      onChange={e => {
+                        const description = e.target.value;
+                        if (movementValues.type === 'outflow') {
+                          applySmartExpenseDescription(description);
+                        } else {
+                          setMovementValues({...movementValues, description});
+                        }
+                      }}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="Ej: Pago de flete, sueldo, internet..."
+                    />
+                    {movementValues.type === 'outflow' && movementValues.description && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span className="px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-300 text-[10px] font-black uppercase tracking-widest">
+                          {movementValues.category || 'Otros'}
+                        </span>
+                        {movementValues.subcategory && (
+                          <span className="px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-300 text-[10px] font-black uppercase tracking-widest">
+                            {movementValues.subcategory}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {(movementValues.type === 'transfer' || movementValues.type === 'internal_transfer') && (
@@ -3273,7 +3414,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               onChange={e => setMovementValues({...movementValues, category: e.target.value})}
                               className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                             >
-                              {categories.map(c => <option key={c} value={c} className="bg-[#0F172A] text-white">{c}</option>)}
+                              {Array.from(new Set([...categories, movementValues.category || ''].filter(Boolean))).map(c => <option key={c} value={c} className="bg-[#0F172A] text-white">{c}</option>)}
                             </select>
                           )}
                         </div>
@@ -3311,15 +3452,45 @@ Notas: ${closure.notes || 'N/A'}`;
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="" className="bg-[#0F172A] text-slate-500">SIN SUBCATEGORIA</option>
-                            {subcategories.map(s => <option key={s} value={s} className="bg-[#0F172A] text-white">{s}</option>)}
+                            {Array.from(new Set([...subcategories, movementValues.subcategory || ''].filter(Boolean))).map(s => <option key={s} value={s} className="bg-[#0F172A] text-white">{s}</option>)}
                           </select>
                         )}
                       </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Etiquetas para reportes</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newExpenseTag}
+                            onChange={e => setNewExpenseTag(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                addExpenseTag();
+                              }
+                            }}
+                            placeholder="Ej: OPERACION, FIJO, BANCO"
+                            className="flex-1 px-4 py-3 bg-white/5 border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
+                          />
+                          <button onClick={addExpenseTag} className="px-4 py-3 bg-purple-600 rounded-2xl text-white">
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(movementValues.tags || []).map(tag => (
+                            <button
+                              key={tag}
+                              onClick={() => removeExpenseTag(tag)}
+                              className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-slate-300 text-[10px] font-black uppercase tracking-widest hover:border-rose-500/40 hover:text-rose-300 transition-colors"
+                            >
+                              {tag} x
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   )}
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Monto</label><input type="number" min="0" value={movementValues.amount || ''} onFocus={e => e.target.select()} onChange={e => setMovementValues({...movementValues, amount: toNonNegativeNumber(e.target.value)})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-2xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="0" /></div>
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Descripción</label><input type="text" value={movementValues.description} onChange={e => setMovementValues({...movementValues, description: e.target.value})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-purple-500" placeholder="Ej: Pago de flete..." /></div>
-                  
                   {formError && (
                     <motion.div 
                       initial={{ opacity: 0, y: -10 }} 
@@ -3336,6 +3507,7 @@ Notas: ${closure.notes || 'N/A'}`;
                     setNewCategoryName('');
                     setIsAddingNewSubcategory(false);
                     setNewSubcategoryName('');
+                    setNewExpenseTag('');
                   }} className="flex-1 py-4 text-slate-400 font-black">Cancelar</button><button onClick={handleSaveMovement} className="flex-[2] bg-purple-600 text-white py-4 rounded-2xl font-black">Registrar</button></div>
                 </div>
               </motion.div>

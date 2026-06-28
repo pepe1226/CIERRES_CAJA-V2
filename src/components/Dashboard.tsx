@@ -119,6 +119,23 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
       .sort((a, b) => b.value - a.value);
   }, [filteredMovements]);
 
+  const expensesByTag = useMemo(() => {
+    const data: Record<string, number> = {};
+    filteredMovements
+      .filter(m => m.type === 'outflow')
+      .forEach(m => {
+        const tags = m.tags?.length ? m.tags : ['SIN ETIQUETA'];
+        tags.forEach(tag => {
+          data[tag] = (data[tag] || 0) + m.amount;
+        });
+      });
+
+    return Object.entries(data)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
+  }, [filteredMovements]);
+
   // 1c. Gastos Diarios
   const dailyExpenses = useMemo(() => {
     const data: Record<string, number> = {};
@@ -416,7 +433,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             {/* Gastos por Categoría */}
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               className="bg-[#1E293B]/50 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-8"
@@ -453,8 +470,34 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               </div>
             </motion.div>
 
+            {/* Gastos por Etiqueta */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="bg-[#1E293B]/50 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-8"
+            >
+              <div className="flex items-center gap-3 mb-8">
+                <div className="p-2 bg-blue-500/10 rounded-xl">
+                  <Tag className="w-5 h-5 text-blue-400" />
+                </div>
+                <h3 className="text-xl font-black">Gastos por Etiqueta</h3>
+              </div>
+              <div className="space-y-3">
+                {expensesByTag.map((entry, index) => (
+                  <div key={entry.name} className="flex items-center justify-between gap-4 rounded-2xl bg-white/5 border border-white/5 px-4 py-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                      <span className="text-xs font-black uppercase tracking-widest text-slate-300 truncate">{entry.name}</span>
+                    </div>
+                    <span className="font-mono font-black text-rose-300">${entry.value.toLocaleString('es-CL')}</span>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+
             {/* Gastos por Subcategoría */}
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.1 }}
@@ -496,7 +539,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
             </motion.div>
 
           {/* Gastos por Caja */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
@@ -526,7 +569,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           </motion.div>
 
           {/* Gastos Diarios */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15 }}
@@ -562,7 +605,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           </motion.div>
 
           {/* Ingresos por Cajero */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
@@ -592,7 +635,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           </motion.div>
 
           {/* Ingresos Diarios */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.2 }}
@@ -628,7 +671,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           </motion.div>
 
           {/* Ingresos Mensuales */}
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.3 }}
@@ -661,7 +704,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
         {/* Modal Historial de Gastos */}
         {showHistory && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-md z-50 flex items-center justify-center p-4">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               className="bg-[#0F172A] border border-white/10 rounded-[2.5rem] w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl"
@@ -752,6 +795,11 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                                         {m.subcategory}
                                       </span>
                                     )}
+                                    {m.tags?.map(tag => (
+                                      <span key={tag} className="text-[9px] bg-blue-500/10 text-blue-300 px-2 py-0.5 rounded-lg font-black tracking-widest uppercase">
+                                        {tag}
+                                      </span>
+                                    ))}
                                   </div>
                                   <h4 className="text-white font-black text-sm uppercase leading-tight">{m.description}</h4>
                                 </div>
