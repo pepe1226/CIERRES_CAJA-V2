@@ -8,25 +8,25 @@ import { ShiftClosure, Movement, UserProfile, CollectionTrip } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { auth, db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
-import { 
-  collection, 
-  doc, 
-  setDoc, 
-  getDoc, 
-  onSnapshot, 
-  query, 
-  orderBy, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
+import {
+  collection,
+  doc,
+  setDoc,
+  getDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  addDoc,
+  updateDoc,
+  deleteDoc,
   serverTimestamp,
   Timestamp
 } from 'firebase/firestore';
-import { 
-  format, 
-  startOfMonth, 
-  endOfMonth, 
-  isWithinInterval, 
+import {
+  format,
+  startOfMonth,
+  endOfMonth,
+  isWithinInterval,
   parseISO,
   startOfDay,
   endOfDay,
@@ -35,15 +35,15 @@ import {
 } from 'date-fns';
 import { es } from 'date-fns/locale';
 import html2pdf from 'html2pdf.js';
-import { 
-  Plus, 
-  LogOut, 
-  History, 
-  TrendingDown, 
-  TrendingUp, 
+import {
+  Plus,
+  LogOut,
+  History,
+  TrendingDown,
+  TrendingUp,
   ChevronDown,
-  AlertCircle, 
-  CheckCircle2, 
+  AlertCircle,
+  CheckCircle2,
   User as UserIcon,
   DollarSign,
   Banknote,
@@ -109,6 +109,12 @@ const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
   if (['transit', 'transito', 'en transito', 'en tránsito', 'camino', 'viaje'].includes(normalized)) return 'transit';
   return 'safe';
 };
+
+const cashBoxValueMatches = (value: string | undefined | null, status: CashBoxStatus) =>
+  Boolean(value) && normalizeCashBoxStatus(value) === status;
+
+const closureStatusMatches = (value: string | undefined | null, status: CashBoxStatus) =>
+  normalizeCashBoxStatus(value) === status;
 
 const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): CashBoxStatus => {
   return cashBoxStatusPriority.reduce<CashBoxStatus>((primary, status) => {
@@ -394,7 +400,7 @@ function AppContent() {
   const [newExpenseTag, setNewExpenseTag] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [isEditingCategories, setIsEditingCategories] = useState(false);
-  
+
   const [filterStartDate, setFilterStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
   const [filterEndDate, setFilterEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
   const [filterStatus, setFilterStatus] = useState('all');
@@ -597,10 +603,10 @@ function AppContent() {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     const oscillator = audioContext.createOscillator();
     const gainNode = audioContext.createGain();
-    
+
     oscillator.connect(gainNode);
     gainNode.connect(audioContext.destination);
-    
+
     if (type === 'transit') {
       oscillator.type = 'sine';
       oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
@@ -613,10 +619,10 @@ function AppContent() {
       oscillator.type = 'square';
       oscillator.frequency.setValueAtTime(220, audioContext.currentTime);
     }
-    
+
     gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
-    
+
     oscillator.start();
     oscillator.stop(audioContext.currentTime + 0.2);
   };
@@ -642,7 +648,7 @@ function AppContent() {
         getClosureAuditInfo(c).label,
         c.notes || ''
       ].join(';'));
-      
+
       const csvContent = "\ufeff" + [headers, ...rows].join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -771,7 +777,7 @@ function AppContent() {
       const date = parseISO(c.date);
       const start = startOfDay(parseISO(filterStartDate));
       const end = endOfDay(parseISO(filterEndDate));
-      
+
       const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(date, { start, end });
       const derivedStatus = c.id
         ? derivedClosureStatusById[c.id] || normalizeCashBoxStatus(c.status)
@@ -789,7 +795,7 @@ function AppContent() {
       const matchesOnlyStoreClosures = !showOnlyStoreClosures || isClosureAvailableForTrip(c);
       const auditInfo = getClosureAuditInfo(c);
       const matchesAudit = filterAudit === 'all' || auditInfo.status === filterAudit;
-        
+
       return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected && matchesOnlyStoreClosures && matchesAudit;
     });
   }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, filterAudit, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
@@ -853,26 +859,23 @@ function AppContent() {
   }, [filteredClosures, derivedClosureStatusById, closureLedgerById]);
 
 
-  const accumulatedSafeTotal = useMemo(() => {
-    const closuresSafe = closures.filter(c => c.status === 'safe').reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements.filter(m => m.to === 'safe').reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements.filter(m => m.from === 'safe').reduce((acc, curr) => acc + curr.amount, 0);
-    return closuresSafe + movementsIn - movementsOut;
+  const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
+    const closuresInBox = closures
+      .filter(c => closureStatusMatches(c.status, status))
+      .reduce((acc, curr) => acc + curr.physicalAmount, 0);
+    const movementsIn = movements
+      .filter(m => cashBoxValueMatches(m.to, status))
+      .reduce((acc, curr) => acc + curr.amount, 0);
+    const movementsOut = movements
+      .filter(m => cashBoxValueMatches(m.from, status))
+      .reduce((acc, curr) => acc + curr.amount, 0);
+
+    return closuresInBox + movementsIn - movementsOut;
   }, [closures, movements]);
 
-  const accumulatedTransitTotal = useMemo(() => {
-    const closuresTransit = closures.filter(c => c.status === 'transit').reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements.filter(m => m.to === 'transit').reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements.filter(m => m.from === 'transit').reduce((acc, curr) => acc + curr.amount, 0);
-    return closuresTransit + movementsIn - movementsOut;
-  }, [closures, movements]);
-
-  const accumulatedBankTotal = useMemo(() => {
-    const closuresBank = closures.filter(c => c.status === 'bank').reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements.filter(m => m.to === 'bank').reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements.filter(m => m.from === 'bank').reduce((acc, curr) => acc + curr.amount, 0);
-    return closuresBank + movementsIn - movementsOut;
-  }, [closures, movements]);
+  const accumulatedSafeTotal = useMemo(() => getAccumulatedBoxTotal('safe'), [getAccumulatedBoxTotal]);
+  const accumulatedTransitTotal = useMemo(() => getAccumulatedBoxTotal('transit'), [getAccumulatedBoxTotal]);
+  const accumulatedBankTotal = useMemo(() => getAccumulatedBoxTotal('bank'), [getAccumulatedBoxTotal]);
 
   const accumulatedOutflowTotal = useMemo(() => {
     return movements.filter(m => m.type === 'outflow').reduce((acc, curr) => acc + curr.amount, 0);
@@ -905,9 +908,9 @@ function AppContent() {
   }, [editingMovementId, getBoxBalance, movements]);
 
   const combinedMovements = useMemo(() => {
-    const boxMovements = movements.map(m => ({ 
-      ...m, 
-      source: 'movement' as const 
+    const boxMovements = movements.map(m => ({
+      ...m,
+      source: 'movement' as const
     }));
     const boxClosures = closures.map(c => {
       const displayStatus = getClosureDisplayStatus(c);
@@ -940,11 +943,11 @@ function AppContent() {
 
       result[status] = combinedMovements
         .filter(m =>
-          (m.source === 'movement' && (m.from === status || m.to === status)) ||
+          (m.source === 'movement' && (cashBoxValueMatches(m.from, status) || cashBoxValueMatches(m.to, status))) ||
           (m.source === 'closure' && m.status === status && !m.tripId)
         )
         .map(m => {
-          const signedAmount = m.source === 'closure' || m.to === status
+          const signedAmount = m.source === 'closure' || cashBoxValueMatches(m.to, status)
             ? Number(m.amount) || 0
             : -(Number(m.amount) || 0);
           const balanceAfter = runningBalance;
@@ -961,9 +964,10 @@ function AppContent() {
     }, {} as Record<CashBoxStatus, Array<(typeof combinedMovements)[number] & { signedAmount: number; balanceAfter: number }>>);
   }, [combinedMovements, getBoxBalance]);
 
-  const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string) => {
+  const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string, destination?: CashBoxStatus) => {
     setFormError(null);
-    setMovementValues(getMovementDefaults(type, caja));
+    const defaults = getMovementDefaults(type, caja);
+    setMovementValues(destination ? { ...defaults, to: destination } : defaults);
     setEditingMovementId(null);
     setIsAddingMovement(true);
     setContextMenu(null);
@@ -986,17 +990,17 @@ function AppContent() {
 
   const handleCreateTrip = async () => {
     if (!user || !tripFormValues.description) return;
-    
+
     setIsTripLoading(true);
     // If there are selected closures, use only eligible ones. Otherwise, use all available safe closures in the date range.
-    const selectedList = selectedClosures.size > 0 
+    const selectedList = selectedClosures.size > 0
       ? selectedTripClosures
       : closures.filter(c => {
           const d = parseISO(c.date);
           return isClosureAvailableForTrip(c) &&
-                 isWithinInterval(d, { 
-                   start: startOfDay(parseISO(tripFormValues.startDate)), 
-                   end: endOfDay(parseISO(tripFormValues.endDate)) 
+                 isWithinInterval(d, {
+                   start: startOfDay(parseISO(tripFormValues.startDate)),
+                   end: endOfDay(parseISO(tripFormValues.endDate))
                  });
         });
 
@@ -1030,9 +1034,9 @@ function AppContent() {
 
       setIsCreatingTrip(false);
       setSelectedClosures(new Set());
-      setTripFormValues({ 
-        description: '', 
-        notes: '', 
+      setTripFormValues({
+        description: '',
+        notes: '',
         startDate: format(new Date(), 'yyyy-MM-dd'),
         endDate: format(new Date(), 'yyyy-MM-dd')
       });
@@ -1050,7 +1054,7 @@ function AppContent() {
         status: 'completed',
         completionDate: serverTimestamp()
       });
-      
+
       const tripClosures = closures.filter(c => c.tripId === tripId);
       for (const c of tripClosures) {
         if (c.id) {
@@ -1073,7 +1077,7 @@ function AppContent() {
       const tripClosures = closures.filter(c => c.tripId === tripId);
       for (const c of tripClosures) {
         if (c.id) {
-          await updateDoc(doc(db, 'closures', c.id), { 
+          await updateDoc(doc(db, 'closures', c.id), {
             tripId: null,
             status: 'safe'
           });
@@ -1088,14 +1092,14 @@ function AppContent() {
 
   const lastEnterPress = useRef<number>(0);
   const handleKeyDown = (
-    e: React.KeyboardEvent, 
-    onSave: () => void, 
+    e: React.KeyboardEvent,
+    onSave: () => void,
     nextRef?: React.RefObject<HTMLInputElement | null>,
     prevRef?: React.RefObject<HTMLInputElement | null>
   ) => {
     if (e.key === 'Enter') {
       const now = Date.now();
-      
+
       // If there is a next field, go to it on single enter
       if (nextRef && nextRef.current) {
         e.preventDefault();
@@ -1127,7 +1131,7 @@ function AppContent() {
       prevRef.current.focus();
       if (prevRef.current.type !== 'datetime-local') prevRef.current.select();
     }
-    
+
     // Space bar shortcut to save (since space is not used in numeric/code fields here)
     if (e.key === ' ' && !e.repeat && (e.target as HTMLElement).tagName === 'INPUT') {
       const type = (e.target as HTMLInputElement).type;
@@ -1297,7 +1301,7 @@ function AppContent() {
   const handleSaveMovement = async () => {
     if (!user) return;
     setFormError(null);
-    
+
     let currentCategory = movementValues.category;
     let currentSubcategory = movementValues.subcategory;
     const currentTags = mergeExpenseTags(movementValues.tags || []);
@@ -1333,7 +1337,7 @@ function AppContent() {
       setFormError('EL MONTO DEBE SER MAYOR A 0');
       return;
     }
-    
+
     if (!movementValues.description.trim()) {
       setFormError('INGRESE UNA DESCRIPCIÓN');
       return;
@@ -1406,7 +1410,7 @@ function AppContent() {
       } else {
         await addDoc(collection(db, 'movements'), data);
       }
-      
+
       setIsAddingMovement(false);
       setEditingMovementId(null);
       setViewingCajaMovements(null);
@@ -1483,7 +1487,7 @@ function AppContent() {
     const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
-    
+
     try {
       for (const item of items) {
         await updateDoc(doc(db, 'closures', item.id!), { status: nextStatus });
@@ -1712,8 +1716,8 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="grid grid-cols-4 gap-3 px-6 py-4 border-b border-slate-200 bg-slate-50">
             {[
               { label: 'Gasto', Icon: ArrowUpRight, onClick: () => handleOpenAddMovement('outflow', status) },
-              { label: status === 'bank' ? 'Interno' : 'Banco', Icon: status === 'bank' ? ArrowRightLeft : Building2, onClick: () => handleOpenAddMovement(status === 'bank' ? 'internal_transfer' : 'transfer', status) },
-              { label: 'Traspaso', Icon: ArrowRightLeft, onClick: () => handleOpenAddMovement('internal_transfer', status) },
+              ...(status !== 'bank' ? [{ label: 'Banco', Icon: Building2, onClick: () => handleOpenAddMovement('transfer', status, 'bank') }] : []),
+              ...(status !== 'transit' ? [{ label: 'Transito', Icon: Truck, onClick: () => handleOpenAddMovement('internal_transfer', status, 'transit') }] : []),
               { label: 'Actualizar', Icon: RefreshCw, onClick: () => setViewingCajaMovements(status) },
             ].map(action => (
               <button
@@ -1834,7 +1838,7 @@ Notas: ${closure.notes || 'N/A'}`;
        <div className="min-h-screen flex items-center justify-center bg-[#0F172A] p-4 relative overflow-hidden">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full" />
         <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/10 blur-[120px] rounded-full" />
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           className="max-w-md w-full bg-[#1E293B]/80 backdrop-blur-xl rounded-[2.5rem] shadow-2xl p-10 text-center border border-white/10 relative z-10"
@@ -1910,7 +1914,7 @@ Notas: ${closure.notes || 'N/A'}`;
               <div className="px-4 py-2 border-b border-white/5 mb-2">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Acciones: {contextMenu.caja.toUpperCase()}</p>
               </div>
-              <button 
+              <button
                 onClick={() => handleOpenAddMovement('outflow', contextMenu.caja)}
                 className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-rose-500/20 hover:text-rose-400 transition-colors uppercase tracking-widest"
               >
@@ -1918,17 +1922,26 @@ Notas: ${closure.notes || 'N/A'}`;
                 Registrar Gasto
               </button>
               {contextMenu.caja !== 'bank' && (
-                <button 
-                  onClick={() => handleOpenAddMovement('transfer', contextMenu.caja)}
+                <button
+                  onClick={() => handleOpenAddMovement('transfer', contextMenu.caja, 'bank')}
                   className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors uppercase tracking-widest"
                 >
                   <Building2 className="w-4 h-4" />
                   Enviar a Banco
                 </button>
               )}
-              <button 
+              {contextMenu.caja !== 'transit' && (
+                <button
+                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'transit')}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-amber-500/20 hover:text-amber-400 transition-colors uppercase tracking-widest"
+                >
+                  <Truck className="w-4 h-4" />
+                  Enviar a Transito
+                </button>
+              )}
+              <button
                 onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-amber-500/20 hover:text-amber-400 transition-colors uppercase tracking-widest"
+                className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
               >
                 <ArrowRightLeft className="w-4 h-4" />
                 Transferencia Interna
@@ -1941,8 +1954,8 @@ Notas: ${closure.notes || 'N/A'}`;
             {renderCashBoxStatementModal()}
             {false && viewingCajaMovements && (
               <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
-                <motion.div 
-                  initial={{ opacity:0, y: 20 }} 
+                <motion.div
+                  initial={{ opacity:0, y: 20 }}
                   animate={{ opacity:1, y: 0 }}
                   exit={{ opacity:0, y: 20 }}
                   className="w-full max-w-4xl bg-[#1E293B] rounded-[2.5rem] border border-white/5 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
@@ -1957,18 +1970,18 @@ Notas: ${closure.notes || 'N/A'}`;
                       </h3>
                       <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Historial detallado de transacciones</p>
                     </div>
-                    <button 
+                    <button
                       onClick={() => setViewingCajaMovements(null)}
                       className="w-12 h-12 flex items-center justify-center rounded-full bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white transition-all"
                     >
                       <X className="w-6 h-6" />
                     </button>
                   </div>
-                  
+
                   <div className="flex-1 overflow-y-auto p-8">
                     <div className="space-y-4">
                       {combinedMovements
-                        .filter(m => 
+                        .filter(m =>
                           (m.source === 'movement' && (m.from === viewingCajaMovements || m.to === viewingCajaMovements)) ||
                           (m.source === 'closure' && m.status === viewingCajaMovements && !m.tripId)
                         )
@@ -1987,11 +2000,11 @@ Notas: ${closure.notes || 'N/A'}`;
                                   <p className="text-white font-black text-lg uppercase leading-tight">{m.description}</p>
                                   <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md ${
                                     m.source === 'closure' ? 'bg-blue-500/10 text-blue-500' :
-                                    m.type === 'outflow' ? 'bg-rose-500/10 text-rose-500' : 
+                                    m.type === 'outflow' ? 'bg-rose-500/10 text-rose-500' :
                                     m.to === viewingCajaMovements ? 'bg-emerald-500/10 text-emerald-500' : 'bg-amber-500/10 text-amber-500'
                                   }`}>
                                     {m.source === 'closure' ? 'Cierre de Caja' :
-                                     m.type === 'outflow' ? 'Gasto' : 
+                                     m.type === 'outflow' ? 'Gasto' :
                                      m.to === viewingCajaMovements ? 'Ingreso' : 'Salida'}
                                   </span>
                                 </div>
@@ -2017,7 +2030,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </p>
                               </div>
                               <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button 
+                                <button
                                   onClick={() => {
                                     if (m.source === 'movement') {
                                       setMovementValues({
@@ -2042,7 +2055,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 >
                                   <Edit2 className="w-4 h-4" />
                                 </button>
-                                <button 
+                                <button
                                   onClick={() => {
                                     if (m.source === 'movement') {
                                       handleDeleteMovement(m.id);
@@ -2058,8 +2071,8 @@ Notas: ${closure.notes || 'N/A'}`;
                             </div>
                           </div>
                         ))}
-                      
-                      {combinedMovements.filter(m => 
+
+                      {combinedMovements.filter(m =>
                         (m.source === 'movement' && (m.from === viewingCajaMovements || m.to === viewingCajaMovements)) ||
                         (m.source === 'closure' && m.status === viewingCajaMovements && !m.tripId)
                       ).length === 0 && (
@@ -2127,7 +2140,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBankTotal.toLocaleString('es-CL')}</p>
             </div>
-            <div 
+            <div
               onDoubleClick={() => setHistoryView({ type: 'outflow', title: 'GASTOS TOTALES' })}
               className="bg-[#1E293B] p-8 rounded-[2rem] border border-rose-500/20 relative overflow-hidden group cursor-pointer hover:border-rose-500/50 transition-colors shadow-2xl"
               title="Doble clic para ver historial"
@@ -2146,7 +2159,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <AnimatePresence>
             {historyView && (
               <div className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md text-left">
-                <motion.div 
+                <motion.div
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.95 }}
@@ -2162,12 +2175,12 @@ Notas: ${closure.notes || 'N/A'}`;
                         <p className="text-slate-400 text-xs uppercase font-black tracking-widest">Historial completo detallado</p>
                       </div>
                     </div>
-                    
+
                     <div className="flex items-center gap-4 flex-1 md:max-w-md">
                       <div className="relative flex-1">
                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           placeholder="BUSCAR MOVIMIENTO..."
                           className="w-full pl-11 pr-4 py-3 bg-white/5 border border-white/5 rounded-xl text-xs font-black uppercase tracking-widest outline-none focus:ring-2 focus:ring-rose-500 transition-all"
                           onInput={(e) => {
@@ -2180,7 +2193,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           }}
                         />
                       </div>
-                      <button 
+                      <button
                         onClick={() => setHistoryView(null)}
                         className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl transition-all"
                       >
@@ -2213,7 +2226,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               TOTAL DÍA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
                             </span>
                           </div>
-                          
+
                           <div className="grid gap-3">
                             {dailyMovements
                               .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
@@ -2251,7 +2264,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           </div>
                         </div>
                       ))}
-                      
+
                       {movements.filter(m => m.type === 'outflow').length === 0 && (
                         <div className="text-center py-20 bg-white/5 rounded-[2rem] border border-dashed border-white/10">
                           <TrendingDown className="w-16 h-16 text-slate-800 mx-auto mb-4 opacity-20" />
@@ -2260,7 +2273,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       )}
                     </div>
                   </div>
-                  
+
                   <div className="p-6 border-t border-white/5 bg-white/[0.02] flex justify-between items-center px-10">
                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Monto Consolidado</span>
                     <span className="text-xl font-black font-mono text-rose-500">
@@ -2279,7 +2292,7 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
             <div className="flex flex-wrap items-center gap-4">
               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mr-2">Periodo:</span>
-              <button 
+              <button
                 onClick={() => {
                   setFilterStartDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
                   setFilterEndDate(format(new Date(), 'yyyy-MM-dd'));
@@ -2289,7 +2302,7 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 Semana
               </button>
-              <button 
+              <button
                 onClick={() => {
                   setFilterStartDate(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
                   setFilterEndDate(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
@@ -2299,7 +2312,7 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 Este Mes
               </button>
-              <button 
+              <button
                 onClick={() => {
                   setFilterDateRangeType('siempre');
                 }}
@@ -2309,9 +2322,9 @@ Notas: ${closure.notes || 'N/A'}`;
               </button>
               <div className="h-8 w-[1px] bg-white/10 hidden sm:block" />
               <div className="flex items-center bg-[#1E293B] rounded-2xl border border-white/5 p-1">
-                <input 
-                  type="date" 
-                  value={filterStartDate} 
+                <input
+                  type="date"
+                  value={filterStartDate}
                   onChange={e => {
                     setFilterStartDate(e.target.value);
                     setFilterDateRangeType('custom');
@@ -2319,9 +2332,9 @@ Notas: ${closure.notes || 'N/A'}`;
                   className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
                 />
                 <ArrowRight className="w-3 h-3 text-slate-600" />
-                <input 
-                  type="date" 
-                  value={filterEndDate} 
+                <input
+                  type="date"
+                  value={filterEndDate}
                   onChange={e => {
                     setFilterEndDate(e.target.value);
                     setFilterDateRangeType('custom');
@@ -2329,16 +2342,16 @@ Notas: ${closure.notes || 'N/A'}`;
                   className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
                 />
               </div>
-              <select 
-                value={filterResponsible} 
+              <select
+                value={filterResponsible}
                 onChange={e => setFilterResponsible(e.target.value)}
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
                 <option value="all">Todos los Responsables</option>
                 {uniqueResponsibles.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
-              <select 
-                value={filterStatus} 
+              <select
+                value={filterStatus}
                 onChange={e => setFilterStatus(e.target.value)}
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
@@ -2358,7 +2371,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 <option value="matched">Auditado OK</option>
                 <option value="not_audited">Sin Auditoría</option>
               </select>
-              <button 
+              <button
                 onClick={() => setHideCollected(!hideCollected)}
                 className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${hideCollected ? 'bg-amber-500/10 border-amber-500/50 text-amber-500' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
               >
@@ -2407,14 +2420,14 @@ Notas: ${closure.notes || 'N/A'}`;
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-4">
-              <button 
+              <button
                 onClick={() => {
                   if (!isInlineAdding && !inlineAddValues.date) {
                     // Only set current time if no date is preserved
                     setInlineAddValues(v => ({ ...v, date: new Date().toISOString() }));
                   }
                   setIsInlineAdding(!isInlineAdding);
-                }} 
+                }}
                 className={`px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-lg ${isInlineAdding ? 'bg-slate-700 text-white shadow-slate-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'}`}
               >
                 {isInlineAdding ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
@@ -2463,10 +2476,10 @@ Notas: ${closure.notes || 'N/A'}`;
                     <tr className="bg-blue-950/20 border-y-2 border-blue-500/30">
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-xl px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
-                          <input 
+                          <input
                             ref={dateInputRef}
-                            type="datetime-local" 
-                            value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''} 
+                            type="datetime-local"
+                            value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
                             onChange={e => {
                               if (!e.target.value) return;
                               try {
@@ -2477,22 +2490,22 @@ Notas: ${closure.notes || 'N/A'}`;
                               } catch (e) {}
                             }}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, responsibleInputRef)}
-                            className="w-full bg-transparent outline-none text-white font-sans font-bold text-[10px]" 
+                            className="w-full bg-transparent outline-none text-white font-sans font-bold text-[10px]"
                           />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-blue-500">
-                          <input 
+                          <input
                             ref={responsibleInputRef}
                             list="responsibles-list"
-                            type="text" 
-                            value={inlineAddValues.responsible} 
+                            type="text"
+                            value={inlineAddValues.responsible}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, responsible: e.target.value.toUpperCase()})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, responsible: e.target.value.toUpperCase()})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, physicalAmountRef, dateInputRef)}
-                            className="w-full bg-transparent outline-none text-white placeholder:text-slate-600 font-bold text-xs uppercase" 
-                            placeholder="RESPONSABLE" 
+                            className="w-full bg-transparent outline-none text-white placeholder:text-slate-600 font-bold text-xs uppercase"
+                            placeholder="RESPONSABLE"
                           />
                           <datalist id="responsibles-list">
                             {uniqueResponsibles.map(r => <option key={r} value={r} />)}
@@ -2501,45 +2514,45 @@ Notas: ${closure.notes || 'N/A'}`;
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input 
+                          <input
                             ref={physicalAmountRef}
                             type="number"
                             min="0"
-                            value={inlineAddValues.physicalAmount || ''} 
+                            value={inlineAddValues.physicalAmount || ''}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemAmountRef, responsibleInputRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
+                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
                             placeholder="FÍSICO"
                           />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input 
+                          <input
                             ref={systemAmountRef}
                             type="number"
                             min="0"
-                            value={inlineAddValues.systemAmount || ''} 
+                            value={inlineAddValues.systemAmount || ''}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value)})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemBalanceRef, physicalAmountRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
+                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
                             placeholder="VENTA"
                           />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input 
+                          <input
                             ref={systemBalanceRef}
                             type="number"
                             min="0"
-                            value={inlineAddValues.systemBalance || ''} 
+                            value={inlineAddValues.systemBalance || ''}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value)})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, undefined, systemAmountRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
+                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
                             placeholder="CUADRE"
                           />
                         </div>
@@ -2550,8 +2563,8 @@ Notas: ${closure.notes || 'N/A'}`;
                         </div>
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <button 
-                          onClick={() => setInlineAddValues({...inlineAddValues, status: getNextStatus(inlineAddValues.status!)})} 
+                        <button
+                          onClick={() => setInlineAddValues({...inlineAddValues, status: getNextStatus(inlineAddValues.status!)})}
                           className={`p-2 rounded-xl transition-all shadow-lg border ${inlineAddValues.status === 'safe' ? 'bg-rose-500/20 text-rose-500 border-rose-500/20' : inlineAddValues.status === 'transit' ? 'bg-amber-500/20 text-amber-500 border-amber-500/20' : 'bg-emerald-500/20 text-emerald-500 border-emerald-500/20'}`}
                         >
                           <ShieldCheck className="w-4 h-4" />
@@ -2559,7 +2572,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex justify-end gap-2">
-                           <button 
+                           <button
                             onClick={() => {
                               const note = prompt('Notas / Observaciones:', inlineAddValues.notes || '');
                               if (note !== null) setInlineAddValues({...inlineAddValues, notes: note});
@@ -2568,15 +2581,15 @@ Notas: ${closure.notes || 'N/A'}`;
                           >
                             <MessageSquare className="w-4 h-4" />
                           </button>
-                          <button 
-                            onClick={handleSaveInlineAdd} 
+                          <button
+                            onClick={handleSaveInlineAdd}
                             disabled={isSaving}
                             className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-xl transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50"
                           >
                             <Check className="w-4 h-4" />
                           </button>
-                          <button 
-                            onClick={() => setIsInlineAdding(false)} 
+                          <button
+                            onClick={() => setIsInlineAdding(false)}
                             className="bg-white/5 hover:bg-white/10 text-slate-500 p-2 rounded-xl transition-all"
                           >
                             <X className="w-4 h-4" />
@@ -2644,9 +2657,9 @@ Notas: ${closure.notes || 'N/A'}`;
                             <tr key={closure.id} className="bg-blue-950/30 border-y border-blue-500/20">
                                <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-xl px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
-                                  <input 
-                                    type="datetime-local" 
-                                    value={inlineEditValues.date ? format(parseISO(inlineEditValues.date), "yyyy-MM-dd'T'HH:mm") : ''} 
+                                  <input
+                                    type="datetime-local"
+                                    value={inlineEditValues.date ? format(parseISO(inlineEditValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
                                     onChange={e => setInlineEditValues({...inlineEditValues, date: new Date(e.target.value).toISOString()})}
                                     className="bg-transparent outline-none text-white font-sans font-bold text-[10px] w-full"
                                   />
@@ -2654,9 +2667,9 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-blue-500">
-                                  <input 
-                                    type="text" 
-                                    value={inlineEditValues.responsible} 
+                                  <input
+                                    type="text"
+                                    value={inlineEditValues.responsible}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, responsible: e.target.value.toUpperCase()})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -2666,10 +2679,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input 
+                                  <input
                                     type="number"
                                     min="0"
-                                    value={inlineEditValues.physicalAmount} 
+                                    value={inlineEditValues.physicalAmount}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -2679,10 +2692,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input 
+                                  <input
                                     type="number"
                                     min="0"
-                                    value={inlineEditValues.systemAmount} 
+                                    value={inlineEditValues.systemAmount}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, systemAmount: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -2692,10 +2705,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input 
+                                  <input
                                     type="number"
                                     min="0"
-                                    value={inlineEditValues.systemBalance} 
+                                    value={inlineEditValues.systemBalance}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, systemBalance: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -2709,7 +2722,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </div>
                               </td>
                               <td className="px-6 py-4 text-center">
-                                <button 
+                                <button
                                   onClick={() => setInlineEditValues({...inlineEditValues, status: getNextStatus(inlineEditValues.status!)})}
                                   className={`p-2 rounded-xl transition-all shadow-lg border ${inlineEditValues.status === 'safe' ? 'bg-rose-500/20 text-rose-500 border-rose-500/20' : inlineEditValues.status === 'transit' ? 'bg-amber-500/20 text-amber-500 border-amber-500/20' : 'bg-emerald-500/20 text-emerald-500 border-emerald-500/20'}`}
                                 >
@@ -2835,47 +2848,47 @@ Notas: ${closure.notes || 'N/A'}`;
                   <h3 className="text-2xl font-black text-white flex items-center gap-3"><Truck className="text-blue-400 w-8 h-8" /> Nuevo Registro de Viaje</h3>
                   <button onClick={() => setIsCreatingTrip(false)} className="p-2 hover:bg-white/5 rounded-full"><X className="w-6 h-6 text-slate-500" /></button>
                 </div>
-                
+
                 <div className="space-y-6">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Fecha Inicio</label>
-                      <input 
-                        type="date" 
-                        value={tripFormValues.startDate} 
-                        onChange={e => setTripFormValues({...tripFormValues, startDate: e.target.value})} 
-                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500" 
+                      <input
+                        type="date"
+                        value={tripFormValues.startDate}
+                        onChange={e => setTripFormValues({...tripFormValues, startDate: e.target.value})}
+                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
                     <div>
                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Fecha Fin</label>
-                      <input 
-                        type="date" 
-                        value={tripFormValues.endDate} 
-                        onChange={e => setTripFormValues({...tripFormValues, endDate: e.target.value})} 
-                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500" 
+                      <input
+                        type="date"
+                        value={tripFormValues.endDate}
+                        onChange={e => setTripFormValues({...tripFormValues, endDate: e.target.value})}
+                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
                   </div>
 
                   <div>
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Nombre / Descripción del Viaje</label>
-                    <input 
-                      type="text" 
-                      value={tripFormValues.description} 
-                      onChange={e => setTripFormValues({...tripFormValues, description: e.target.value})} 
-                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500" 
-                      placeholder="Ej: Viaje Santiago - Semana 42" 
+                    <input
+                      type="text"
+                      value={tripFormValues.description}
+                      onChange={e => setTripFormValues({...tripFormValues, description: e.target.value})}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Ej: Viaje Santiago - Semana 42"
                     />
                   </div>
 
                   <div>
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Observaciones y Detalles</label>
-                    <textarea 
-                      value={tripFormValues.notes} 
-                      onChange={e => setTripFormValues({...tripFormValues, notes: e.target.value})} 
-                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] resize-none" 
-                      placeholder="Agrega aquí cualquier observación relevante sobre este retiro de fondos..." 
+                    <textarea
+                      value={tripFormValues.notes}
+                      onChange={e => setTripFormValues({...tripFormValues, notes: e.target.value})}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] resize-none"
+                      placeholder="Agrega aquí cualquier observación relevante sobre este retiro de fondos..."
                     />
                   </div>
 
@@ -2889,9 +2902,9 @@ Notas: ${closure.notes || 'N/A'}`;
                               ? selectedTripClosures.length
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
-                                return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
-                                  start: startOfDay(parseISO(tripFormValues.startDate)), 
-                                  end: endOfDay(parseISO(tripFormValues.endDate)) 
+                                return isClosureAvailableForTrip(c) && isWithinInterval(d, {
+                                  start: startOfDay(parseISO(tripFormValues.startDate)),
+                                  end: endOfDay(parseISO(tripFormValues.endDate))
                                 });
                               }).length
                           } registros
@@ -2904,9 +2917,9 @@ Notas: ${closure.notes || 'N/A'}`;
                             ? selectedTripClosures.reduce((a,b) => a + b.physicalAmount, 0)
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
-                                return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
-                                  start: startOfDay(parseISO(tripFormValues.startDate)), 
-                                  end: endOfDay(parseISO(tripFormValues.endDate)) 
+                                return isClosureAvailableForTrip(c) && isWithinInterval(d, {
+                                  start: startOfDay(parseISO(tripFormValues.startDate)),
+                                  end: endOfDay(parseISO(tripFormValues.endDate))
                                 });
                               }).reduce((a,b) => a + b.physicalAmount, 0)
                           ).toLocaleString('es-CL')}
@@ -2917,9 +2930,9 @@ Notas: ${closure.notes || 'N/A'}`;
 
                   <div className="flex gap-4 pt-4">
                     <button onClick={() => setIsCreatingTrip(false)} className="flex-1 py-4 text-slate-400 font-black hover:text-white transition-colors">Cancelar</button>
-                    <button 
-                      onClick={handleCreateTrip} 
-                      disabled={!tripFormValues.description || isTripLoading} 
+                    <button
+                      onClick={handleCreateTrip}
+                      disabled={!tripFormValues.description || isTripLoading}
                       className="flex-[2] bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-black shadow-xl shadow-blue-500/20 disabled:opacity-50 flex items-center justify-center gap-2 transition-all"
                     >
                       {isTripLoading ? (
@@ -3020,7 +3033,7 @@ Notas: ${closure.notes || 'N/A'}`;
                              </div>
                            </div>
                          </div>
-                         
+
                          <div className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 shadow-xl">
                             <div className="flex justify-between items-center mb-6">
                               <h4 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2">
@@ -3028,7 +3041,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 Observaciones del Viaje
                               </h4>
                               {!isEditingTripNotes ? (
-                                <button 
+                                <button
                                   onClick={() => {
                                     setIsEditingTripNotes(true);
                                     setEditedTripNotes(trip.notes || '');
@@ -3039,13 +3052,13 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </button>
                               ) : (
                                 <div className="flex gap-4">
-                                  <button 
+                                  <button
                                     onClick={() => handleSaveTripNotes(trip.id!)}
                                     className="text-[10px] font-black text-emerald-400 uppercase tracking-widest hover:text-emerald-300 transition-colors"
                                   >
                                     Guardar
                                   </button>
-                                  <button 
+                                  <button
                                     onClick={() => setIsEditingTripNotes(false)}
                                     className="text-[10px] font-black text-rose-400 uppercase tracking-widest hover:text-rose-300 transition-colors"
                                   >
@@ -3139,7 +3152,7 @@ Notas: ${closure.notes || 'N/A'}`;
                </button>
              </div>
            </div>
-           
+
            <div ref={reportRef} className="max-w-[210mm] mx-auto bg-white p-16 shadow-2xl min-h-screen">
               {/* Report Header */}
               <div className="flex justify-between items-start border-b-4 border-slate-950 pb-10 mb-12">
@@ -3192,7 +3205,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         <span className="text-lg font-black text-slate-950 font-sans">${group.totals.physicalAmount.toLocaleString('es-CL')}</span>
                       </div>
                     </div>
-                    
+
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="text-slate-500 font-black text-[10px] uppercase tracking-widest text-left border-b border-slate-100">
@@ -3326,8 +3339,8 @@ Notas: ${closure.notes || 'N/A'}`;
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Origen</label>
-                        <select 
-                          value={movementValues.from || ''} 
+                        <select
+                          value={movementValues.from || ''}
                           onChange={e => setMovementValues({
                             ...movementValues,
                             from: e.target.value,
@@ -3372,8 +3385,8 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Pagar desde</label>
-                          <select 
-                            value={movementValues.from || 'safe'} 
+                          <select
+                            value={movementValues.from || 'safe'}
                             onChange={e => setMovementValues({...movementValues, from: e.target.value})}
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
@@ -3385,7 +3398,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         <div>
                           <div className="flex justify-between mb-2">
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Categoría</label>
-                            <button 
+                            <button
                               onClick={() => setIsAddingNewCategory(!isAddingNewCategory)}
                               className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
                             >
@@ -3394,14 +3407,14 @@ Notas: ${closure.notes || 'N/A'}`;
                           </div>
                           {isAddingNewCategory ? (
                             <div className="flex gap-2">
-                              <input 
-                                type="text" 
+                              <input
+                                type="text"
                                 value={newCategoryName}
                                 onChange={e => setNewCategoryName(e.target.value.toUpperCase())}
                                 placeholder="NOMBRE"
                                 className="flex-1 px-3 py-2 bg-white/10 border border-white/5 rounded-xl text-white text-xs font-black outline-none"
                               />
-                              <button 
+                              <button
                                 onClick={handleAddCategory}
                                 className="bg-purple-600 p-2 rounded-xl text-white"
                               >
@@ -3409,8 +3422,8 @@ Notas: ${closure.notes || 'N/A'}`;
                               </button>
                             </div>
                           ) : (
-                            <select 
-                              value={movementValues.category || 'Sueldos'} 
+                            <select
+                              value={movementValues.category || 'Sueldos'}
                               onChange={e => setMovementValues({...movementValues, category: e.target.value})}
                               className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                             >
@@ -3422,7 +3435,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Subcategoría</label>
-                          <button 
+                          <button
                             onClick={() => setIsAddingNewSubcategory(!isAddingNewSubcategory)}
                             className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
                           >
@@ -3431,14 +3444,14 @@ Notas: ${closure.notes || 'N/A'}`;
                         </div>
                         {isAddingNewSubcategory ? (
                           <div className="flex gap-2">
-                            <input 
-                              type="text" 
+                            <input
+                              type="text"
                               value={newSubcategoryName}
                               onChange={e => setNewSubcategoryName(e.target.value.toUpperCase())}
                               placeholder="SUB NOMBRE"
                               className="flex-1 px-3 py-2 bg-white/10 border border-white/5 rounded-xl text-white text-xs font-black outline-none"
                             />
-                            <button 
+                            <button
                               onClick={handleAddSubcategory}
                               className="bg-purple-600 p-2 rounded-xl text-white"
                             >
@@ -3446,8 +3459,8 @@ Notas: ${closure.notes || 'N/A'}`;
                             </button>
                           </div>
                         ) : (
-                          <select 
-                            value={movementValues.subcategory || ''} 
+                          <select
+                            value={movementValues.subcategory || ''}
                             onChange={e => setMovementValues({...movementValues, subcategory: e.target.value})}
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
@@ -3492,8 +3505,8 @@ Notas: ${closure.notes || 'N/A'}`;
                     </div>
                   )}
                   {formError && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: -10 }} 
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
                       animate={{ opacity: 1, y: 0 }}
                       className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl"
                     >
