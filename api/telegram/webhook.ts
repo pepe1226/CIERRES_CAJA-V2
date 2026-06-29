@@ -53,7 +53,12 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const { telegramSecretToken, telegramAllowedChatId } = getTelegramConfig();
+  const {
+    telegramBotToken,
+    telegramPerseoBotToken,
+    telegramSecretToken,
+    telegramAllowedChatId,
+  } = getTelegramConfig();
 
   const receivedSecret =
     req.headers["x-telegram-bot-api-secret-token"] ||
@@ -122,6 +127,7 @@ export default async function handler(req: any, res: any) {
         chatId,
         message,
         largestPhoto,
+        botToken: telegramPerseoBotToken || telegramBotToken,
       });
 
       return res.status(200).json(result);

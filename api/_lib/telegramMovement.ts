@@ -34,6 +34,7 @@ function env(name: string, fallback = "") {
 export function getTelegramConfig() {
   return {
     telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
+    telegramPerseoBotToken: env("TELEGRAM_PERSEO_BOT_TOKEN"),
     telegramSecretToken: env("TELEGRAM_SECRET_TOKEN"),
     telegramAllowedChatId: env("TELEGRAM_ALLOWED_CHAT_ID"),
     telegramCreatedByUid: env("TELEGRAM_CREATED_BY_UID", "telegram-bot"),
@@ -52,6 +53,7 @@ export function getTelegramStatus() {
         config.geminiApiKey
     ),
     hasTelegramBotToken: Boolean(config.telegramBotToken),
+    hasTelegramPerseoBotToken: Boolean(config.telegramPerseoBotToken),
     hasTelegramSecretToken: Boolean(config.telegramSecretToken),
     hasGeminiApiKey: Boolean(config.geminiApiKey),
     geminiModel: config.geminiModel,
@@ -62,16 +64,15 @@ export function getTelegramStatus() {
 
 async function telegramApi<T>(
   method: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  botToken = getTelegramConfig().telegramBotToken
 ): Promise<T> {
-  const { telegramBotToken } = getTelegramConfig();
-
-  if (!telegramBotToken) {
+  if (!botToken) {
     throw new Error("Falta TELEGRAM_BOT_TOKEN en Vercel.");
   }
 
   const response = await fetch(
-    `https://api.telegram.org/bot${telegramBotToken}/${method}`,
+    `https://api.telegram.org/bot${botToken}/${method}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -100,18 +101,17 @@ export async function sendTelegramMessage(chatId: number | string, text: string)
   }
 }
 
-export async function downloadTelegramPhoto(fileId: string) {
-  const { telegramBotToken } = getTelegramConfig();
-
+export async function downloadTelegramPhoto(fileId: string, botToken?: string) {
   const fileInfo = await telegramApi<{
     ok: true;
     result: { file_path: string };
   }>("getFile", {
     file_id: fileId,
-  });
+  }, botToken);
 
   const telegramFilePath = fileInfo.result.file_path;
-  const fileUrl = `https://api.telegram.org/file/bot${telegramBotToken}/${telegramFilePath}`;
+  const token = botToken || getTelegramConfig().telegramBotToken;
+  const fileUrl = `https://api.telegram.org/file/bot${token}/${telegramFilePath}`;
   const imageResponse = await fetch(fileUrl);
 
   if (!imageResponse.ok) {

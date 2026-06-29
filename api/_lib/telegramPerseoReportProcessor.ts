@@ -368,7 +368,7 @@ ${params.text}
   return parsePerseoReport(parsed, params.fallbackDate);
 }
 
-async function getReportRowsFromMessage(message: any, largestPhoto?: any) {
+async function getReportRowsFromMessage(message: any, largestPhoto?: any, botToken?: string) {
   const directText = getReportText(message);
   const fallbackDate = getEcuadorDateFromTelegramMessage(message);
   const fileId = largestPhoto?.file_id || message.document?.file_id;
@@ -393,7 +393,7 @@ async function getReportRowsFromMessage(message: any, largestPhoto?: any) {
     return [];
   }
 
-  const downloaded = await downloadTelegramPhoto(fileId);
+  const downloaded = await downloadTelegramPhoto(fileId, botToken);
   const mimeType = downloaded.mimeType.toLowerCase();
   const fileName = String(message.document?.file_name || "").toLowerCase();
 
@@ -431,6 +431,7 @@ export async function processTelegramPerseoReportMessage(params: {
   chatId: number | string;
   message: any;
   largestPhoto?: any;
+  botToken?: string;
 }) {
   await saveReportAttempt({
     chatId: params.chatId,
@@ -441,7 +442,7 @@ export async function processTelegramPerseoReportMessage(params: {
   let rows: ReturnType<typeof parsePerseoReport>;
 
   try {
-    rows = await getReportRowsFromMessage(params.message, params.largestPhoto);
+    rows = await getReportRowsFromMessage(params.message, params.largestPhoto, params.botToken);
   } catch (error: any) {
     await saveReportAttempt({
       chatId: params.chatId,
