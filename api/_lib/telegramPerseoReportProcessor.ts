@@ -464,7 +464,8 @@ export async function processTelegramPerseoReportMessage(params: {
 
     await sendTelegramMessage(
       params.chatId,
-      "Recibi un posible reporte de Perseo, pero no pude extraer filas validas para cruzar."
+      "Recibi un posible reporte de Perseo, pero no pude extraer filas validas para cruzar.",
+      params.botToken
     );
 
     return {
@@ -501,7 +502,8 @@ export async function processTelegramPerseoReportMessage(params: {
       `Cierres actualizados: ${audit.updated}`,
       `Sin coincidencia/revision: ${audit.unmatched}`,
       `Reporte: ${reportId}`,
-    ].join("\n")
+    ].join("\n"),
+    params.botToken
   );
 
   return {

@@ -91,13 +91,13 @@ async function telegramApi<T>(
   return data as T;
 }
 
-export async function sendTelegramMessage(chatId: number | string, text: string) {
+export async function sendTelegramMessage(chatId: number | string, text: string, botToken?: string) {
   try {
     await telegramApi("sendMessage", {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
-    });
+    }, botToken);
   } catch (error) {
     console.error("No se pudo responder en Telegram:", error);
   }

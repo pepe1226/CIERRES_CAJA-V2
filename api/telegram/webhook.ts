@@ -145,7 +145,8 @@ export default async function handler(req: any, res: any) {
         [
           "No pude procesar el reporte de Perseo automaticamente.",
           error?.message || String(error),
-        ].join("\n")
+        ].join("\n"),
+        telegramPerseoBotToken || telegramBotToken
       );
 
       return res.status(200).json({

@@ -397,6 +397,7 @@ export async function auditClosuresWithPerseoRows(params: {
   const tolerance = Math.max(0, params.tolerance ?? 0.01);
   const results: AuditResult[] = [];
   const closuresByDate = new Map<string, Awaited<ReturnType<typeof getClosuresForDate>>>();
+  const usedClosureIds = new Set<string>();
 
   for (const row of params.rows) {
     if (!closuresByDate.has(row.businessDate)) {
@@ -406,13 +407,28 @@ export async function auditClosuresWithPerseoRows(params: {
     const closures = closuresByDate
       .get(row.businessDate)!
       .filter((closure) => closureBusinessDate(closure.data) === row.businessDate)
+      .filter((closure) => !usedClosureIds.has(closure.id))
       .map((closure) => ({ ...closure, score: scoreCandidate(row, closure.data) }))
       .filter((closure) => closure.score >= 20)
       .sort((a, b) => b.score - a.score);
 
     if (closures.length === 0) {
-      results.push({ row, ok: false, reason: "closure_not_found", candidates: 0 });
-      continue;
+      const remainingClosures = closuresByDate
+        .get(row.businessDate)!
+        .filter((closure) => closureBusinessDate(closure.data) === row.businessDate)
+        .filter((closure) => !usedClosureIds.has(closure.id));
+
+      if (remainingClosures.length !== 1) {
+        results.push({
+          row,
+          ok: false,
+          reason: remainingClosures.length > 1 ? "ambiguous_remaining_closure" : "closure_not_found",
+          candidates: remainingClosures.length,
+        });
+        continue;
+      }
+
+      closures.push({ ...remainingClosures[0], score: 10 });
     }
 
     const best = closures[0];
@@ -440,6 +456,7 @@ export async function auditClosuresWithPerseoRows(params: {
       },
       { merge: true }
     );
+    usedClosureIds.add(best.id);
 
     results.push({
       row,
