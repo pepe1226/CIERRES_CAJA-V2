@@ -254,7 +254,7 @@ export function isPerseoAuthorized(req: any) {
   return bearerToken === expectedSecret || String(headerSecret || "") === expectedSecret;
 }
 
-export function parsePerseoReport(input: unknown) {
+export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
   const rows = normalizeRows(input);
 
   return rows
@@ -317,7 +317,7 @@ export function parsePerseoReport(input: unknown) {
           ["venta", "ventas", "vendido", "facturado", "diferencia", "diff", "fisico", "funda"]
         );
       const systemBalance = parseMoney(systemBalanceRaw ?? systemAmount);
-      const date = parseBusinessDate(dateValue);
+      const date = parseBusinessDate(dateValue, fallbackDate);
       const responsibleKey = normalizeResponsible(responsible);
 
       return {
