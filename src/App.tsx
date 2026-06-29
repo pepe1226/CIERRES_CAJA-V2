@@ -1510,6 +1510,21 @@ function AppContent() {
     }
   };
 
+  const setDayStatus = async (dayString: string, status: CashBoxStatus) => {
+    const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
+    if (!items.length) return;
+
+    playSound(status);
+
+    try {
+      for (const item of items) {
+        await updateDoc(doc(db, 'closures', item.id!), { status });
+      }
+    } catch (err) {
+      console.error('Day status update error:', err);
+    }
+  };
+
   const getDayStatusInfo = (status: DisplayClosureStatus | undefined) => {
     if (status === 'bank') {
       return {
@@ -2643,26 +2658,26 @@ Notas: ${closure.notes || 'N/A'}`;
                               </div>
                            </td>
                            <td className="px-6 py-4 text-center">
-                              {(() => {
-                                const statusInfo = getDayStatusInfo(group.status);
-                                const StatusIcon = statusInfo.Icon;
-                                const isMixedStatus = group.status === 'mixed';
+                              <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
+                                {cashBoxStatuses.map(status => {
+                                  const statusInfo = getDayStatusInfo(status);
+                                  const StatusIcon = statusInfo.Icon;
+                                  const active = group.status === status;
 
-                                return (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleDayStatus(group.date);
-                                    }}
-                                    disabled={isMixedStatus}
-                                    title={`Estado del resumen del dÃ­a: ${statusInfo.label} | Registros: ${group.items.map(item => item.id ? derivedClosureStatusById[item.id] || normalizeCashBoxStatus(item.status) : normalizeCashBoxStatus(item.status)).join(', ')}`}
-                                    className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className} ${isMixedStatus ? 'opacity-60 cursor-not-allowed' : ''}`}
-                                  >
-                                    <StatusIcon className="w-3 h-3" />
-                                    {statusInfo.label}
-                                  </button>
-                                );
-                              })()}
+                                  return (
+                                    <button
+                                      key={status}
+                                      type="button"
+                                      onClick={() => setDayStatus(group.date, status)}
+                                      title={`Enviar todos los cierres del día a ${statusInfo.label}`}
+                                      className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                                    >
+                                      <StatusIcon className="w-3 h-3" />
+                                      {status === 'safe' ? 'Tienda' : status === 'transit' ? 'Transito' : 'Banco'}
+                                    </button>
+                                  );
+                                })}
+                              </div>
                            </td>
                            <td className="px-6 py-4 text-right">
                               <ChevronDown className={`w-5 h-5 text-slate-700 transition-transform ml-auto ${expandedDays[group.date] ? 'rotate-180' : ''}`} />
