@@ -57,6 +57,7 @@ export default async function handler(req: any, res: any) {
     telegramBotToken,
     telegramPerseoBotToken,
     telegramSecretToken,
+    telegramPerseoSecretToken,
     telegramAllowedChatId,
   } = getTelegramConfig();
 
@@ -64,9 +65,14 @@ export default async function handler(req: any, res: any) {
     req.headers["x-telegram-bot-api-secret-token"] ||
     req.headers["X-Telegram-Bot-Api-Secret-Token"];
 
+  const acceptedSecretTokens = [
+    telegramSecretToken,
+    telegramPerseoSecretToken,
+  ].filter(Boolean).map(String);
+
   if (
-    telegramSecretToken &&
-    String(receivedSecret || "") !== String(telegramSecretToken)
+    acceptedSecretTokens.length > 0 &&
+    !acceptedSecretTokens.includes(String(receivedSecret || ""))
   ) {
     return res.status(401).json({
       ok: false,

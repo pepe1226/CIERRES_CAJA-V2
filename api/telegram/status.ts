@@ -23,6 +23,7 @@ export default function handler(_req: any, res: any) {
       hasTelegramBotToken: Boolean(process.env.TELEGRAM_BOT_TOKEN),
       hasTelegramPerseoBotToken: Boolean(process.env.TELEGRAM_PERSEO_BOT_TOKEN),
       hasTelegramSecretToken: Boolean(process.env.TELEGRAM_SECRET_TOKEN),
+      hasTelegramPerseoSecretToken: Boolean(process.env.TELEGRAM_PERSEO_SECRET_TOKEN),
       hasCronSecret: Boolean(process.env.CRON_SECRET),
       allowedChatId: process.env.TELEGRAM_ALLOWED_CHAT_ID || null,
       telegramCreatedByUid: process.env.TELEGRAM_CREATED_BY_UID || "telegram-bot"
