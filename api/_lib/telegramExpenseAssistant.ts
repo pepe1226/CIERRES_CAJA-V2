@@ -32,6 +32,7 @@ type ExpenseDraft = {
   tags: string[];
   description: string;
   status: "pending" | "confirmed" | "cancelled";
+  movementId?: string | null;
   suggestionSource: string;
   suggestionKeyword?: string | null;
 };
@@ -187,11 +188,58 @@ function categoryKeyboard(draftId: string) {
   };
 }
 
+function registeredMovementKeyboard(movementId: string) {
+  return {
+    inline_keyboard: [
+      [{ text: "Eliminar", callback_data: `exp:deleteAsk:${movementId}` }],
+    ],
+  };
+}
+
+function deleteMovementKeyboard(movementId: string) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Si, eliminar", callback_data: `exp:deleteConfirm:${movementId}` },
+        { text: "No", callback_data: `exp:deleteCancel:${movementId}` },
+      ],
+    ],
+  };
+}
+
 function cajaLabel(value: CajaId | null) {
   if (value === "bank") return "Banco";
   if (value === "transit") return "Transito";
   if (value === "safe") return "Tienda";
   return "Falta caja";
+}
+
+function isDeleteRequest(text: string) {
+  return /^\/?(eliminar|borrar|anular)\b/i.test(normalizeText(text));
+}
+
+function parseDeleteMovementId(text: string) {
+  const normalized = String(text || "").trim();
+  const match = normalized.match(/^\/?(?:eliminar|borrar|anular)\s+([A-Za-z0-9_-]{8,})/i);
+  if (!match) return null;
+  const candidate = match[1].toLowerCase();
+  return ["ultimo", "ultima"].includes(candidate) ? null : match[1];
+}
+
+function movementDeleteText(movementId: string, movement: any) {
+  const amount = Number(movement.amount || 0);
+  const description = String(movement.description || "SIN DESCRIPCION").replace(/^\[TELEGRAM\]\s*/i, "");
+
+  return [
+    "Confirmar eliminacion de salida.",
+    `Monto: USD ${amount.toFixed(2)}`,
+    `Caja: ${cajaLabel((movement.from || null) as CajaId | null)}`,
+    `Categoria: ${movement.category || "Otros"}`,
+    `Descripcion: ${description}`,
+    `Movimiento: ${movementId}`,
+    "",
+    "Toca eliminar solo si este registro fue un error.",
+  ].join("\n");
 }
 
 function draftText(draft: ExpenseDraft) {
@@ -260,6 +308,66 @@ async function learnFromDraft(draft: ExpenseDraft) {
   );
 }
 
+async function getExpenseMovementForChat(movementId: string, chatId?: number | string | null) {
+  const doc = await getFirebaseAdminDb().collection("movements").doc(movementId).get();
+  if (!doc.exists) return null;
+
+  const data = doc.data() || {};
+  const isExpenseAssistantMovement =
+    data.type === "outflow" &&
+    data.source === "telegram" &&
+    data.telegramProvider === "expense-assistant";
+
+  if (!isExpenseAssistantMovement) return null;
+  if (chatId && String(data.telegramChatId || "") !== String(chatId)) return null;
+
+  return { id: doc.id, ref: doc.ref, data };
+}
+
+async function findLastExpenseMovementForChat(chatId: number | string) {
+  const snapshot = await getFirebaseAdminDb()
+    .collection("movements")
+    .orderBy("createdAt", "desc")
+    .limit(50)
+    .get();
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    if (
+      data.type === "outflow" &&
+      data.source === "telegram" &&
+      data.telegramProvider === "expense-assistant" &&
+      String(data.telegramChatId || "") === String(chatId)
+    ) {
+      return { id: doc.id, ref: doc.ref, data };
+    }
+  }
+
+  return null;
+}
+
+async function deleteExpenseMovement(params: {
+  movementId: string;
+  chatId?: number | string | null;
+  deletedBy?: string | null;
+}) {
+  const movement = await getExpenseMovementForChat(params.movementId, params.chatId);
+  if (!movement) {
+    throw new Error("No encontre una salida de este bot para eliminar.");
+  }
+
+  const db = getFirebaseAdminDb();
+  await db.collection("telegram_expense_deleted_movements").doc(params.movementId).set({
+    ...movement.data,
+    originalMovementId: params.movementId,
+    deletedAt: FieldValue.serverTimestamp(),
+    deletedBy: params.deletedBy || "telegram-bot",
+  });
+  await movement.ref.delete();
+
+  return movement;
+}
+
 async function createMovementFromDraft(draft: ExpenseDraft) {
   if (!draft.from) throw new Error("Falta caja origen.");
   if (!Number.isFinite(draft.amount) || draft.amount <= 0) throw new Error("Monto invalido.");
@@ -297,7 +405,7 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
   });
 
   await learnFromDraft(draft);
-  await updateDraft(draft.id!, { status: "confirmed" });
+  await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id });
 
   return ref.id;
 }
@@ -308,6 +416,31 @@ export async function processExpenseAssistantMessage(params: {
   botToken?: string;
 }) {
   const text = String(params.message.text || params.message.caption || "").trim();
+  if (isDeleteRequest(text)) {
+    const movementId = parseDeleteMovementId(text);
+    const movement = movementId
+      ? await getExpenseMovementForChat(movementId, params.chatId)
+      : await findLastExpenseMovementForChat(params.chatId);
+
+    if (!movement) {
+      await sendTelegramMessage(
+        params.chatId,
+        "No encontre una salida reciente de este bot para eliminar.",
+        params.botToken
+      );
+      return { handled: true, deleteRequest: true, found: false };
+    }
+
+    await sendTelegramMessage(
+      params.chatId,
+      movementDeleteText(movement.id, movement.data),
+      params.botToken,
+      { reply_markup: deleteMovementKeyboard(movement.id) }
+    );
+
+    return { handled: true, deleteRequest: true, movementId: movement.id };
+  }
+
   if (!isLikelyExpenseText(text)) {
     return { handled: false };
   }
@@ -359,6 +492,70 @@ export async function processExpenseAssistantCallback(params: {
     callbackQueryId: params.callbackQuery.id,
     botToken: params.botToken,
   });
+
+  if (action === "deleteAsk") {
+    const movement = await getExpenseMovementForChat(draftId, chatId);
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: movement
+          ? movementDeleteText(movement.id, movement.data)
+          : "No encontre esta salida para eliminar.",
+        botToken: params.botToken,
+        extraPayload: movement ? { reply_markup: deleteMovementKeyboard(movement.id) } : {},
+      });
+    }
+    return { handled: true, deleteRequest: true, movementId: draftId, found: Boolean(movement) };
+  }
+
+  if (action === "deleteCancel") {
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: "Eliminacion cancelada. La salida se mantiene.",
+        botToken: params.botToken,
+      });
+    }
+    return { handled: true, deleteCancelled: true, movementId: draftId };
+  }
+
+  if (action === "deleteConfirm") {
+    try {
+      const deleted = await deleteExpenseMovement({
+        movementId: draftId,
+        chatId,
+        deletedBy: params.callbackQuery.from?.id ? String(params.callbackQuery.from.id) : null,
+      });
+
+      if (chatId && messageId) {
+        await editTelegramMessageText({
+          chatId,
+          messageId,
+          text: [
+            "Salida eliminada.",
+            `Monto: USD ${Number(deleted.data.amount || 0).toFixed(2)}`,
+            `Caja: ${cajaLabel((deleted.data.from || null) as CajaId | null)}`,
+            `Movimiento: ${deleted.id}`,
+          ].join("\n"),
+          botToken: params.botToken,
+        });
+      }
+
+      return { handled: true, deleted: true, movementId: draftId };
+    } catch (error: any) {
+      if (chatId && messageId) {
+        await editTelegramMessageText({
+          chatId,
+          messageId,
+          text: `No pude eliminar la salida: ${error?.message || String(error)}`,
+          botToken: params.botToken,
+        });
+      }
+      return { handled: true, deleted: false, error: error?.message || String(error) };
+    }
+  }
 
   const draft = await getDraft(draftId);
   if (!draft || draft.status !== "pending") {
@@ -451,6 +648,7 @@ export async function processExpenseAssistantCallback(params: {
             `Movimiento: ${movementId}`,
           ].join("\n"),
           botToken: params.botToken,
+          extraPayload: { reply_markup: registeredMovementKeyboard(movementId) },
         });
       }
       return { handled: true, movementId };
