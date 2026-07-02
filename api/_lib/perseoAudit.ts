@@ -7,6 +7,8 @@ type PerseoReportRow = {
   businessDate: string;
   responsible: string;
   responsibleKey: string;
+  cashBox: string;
+  cashBoxKey: string;
   systemAmount: number;
   systemBalance: number;
   raw: Record<string, unknown>;
@@ -278,6 +280,16 @@ export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
           "vendedor",
         ]) ?? ""
       ).trim();
+      const cashBox = String(
+        getFirst(raw, [
+          "caja",
+          "caja_pdv",
+          "caja_perseo",
+          "nombre_caja",
+          "punto_venta",
+          "pdv",
+        ]) ?? ""
+      ).trim();
 
       const systemAmount = parseMoney(
         getFirst(raw, [
@@ -319,18 +331,21 @@ export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
       const systemBalance = parseMoney(systemBalanceRaw ?? systemAmount);
       const date = parseBusinessDate(dateValue, fallbackDate);
       const responsibleKey = normalizeResponsible(responsible);
+      const cashBoxKey = normalizeResponsible(cashBox);
 
       return {
         date,
         businessDate: businessDateKey(date),
         responsible,
         responsibleKey,
+        cashBox,
+        cashBoxKey,
         systemAmount,
         systemBalance,
         raw,
       };
     })
-    .filter((row) => row.responsibleKey && (row.systemAmount > 0 || row.systemBalance > 0));
+    .filter((row) => (row.responsibleKey || row.cashBoxKey) && (row.systemAmount > 0 || row.systemBalance > 0));
 }
 
 function closureBusinessDate(data: any) {
@@ -339,11 +354,15 @@ function closureBusinessDate(data: any) {
 
 function scoreCandidate(row: PerseoReportRow, closure: any) {
   const closureKey = normalizeResponsible(closure.responsible);
+  const keys = [row.responsibleKey, row.cashBoxKey].filter(Boolean);
 
-  if (closureKey === row.responsibleKey) return 100;
-  if (closureKey.includes(row.responsibleKey) || row.responsibleKey.includes(closureKey)) return 80;
+  if (row.responsibleKey && closureKey === row.responsibleKey) return 100;
+  if (row.cashBoxKey && closureKey === row.cashBoxKey) return 95;
 
-  const rowParts = new Set(row.responsibleKey.split(/\s+/).filter((part) => part.length >= 3));
+  const containedKey = keys.find((key) => closureKey.includes(key) || key.includes(closureKey));
+  if (containedKey) return containedKey === row.responsibleKey ? 80 : 75;
+
+  const rowParts = new Set(keys.flatMap((key) => key.split(/\s+/).filter((part) => part.length >= 3)));
   const closureParts = closureKey.split(/\s+/).filter((part) => part.length >= 3);
   const hits = closureParts.filter((part) => rowParts.has(part)).length;
 
@@ -380,6 +399,8 @@ export async function savePerseoReport(params: {
       businessDate: row.businessDate,
       responsible: row.responsible,
       responsibleKey: row.responsibleKey,
+      cashBox: row.cashBox,
+      cashBoxKey: row.cashBoxKey,
       systemAmount: row.systemAmount,
       systemBalance: row.systemBalance,
       raw: row.raw,
@@ -495,6 +516,7 @@ export async function auditClosuresWithPerseoRows(params: {
       candidates: result.candidates,
       businessDate: result.row.businessDate,
       responsible: result.row.responsible,
+      cashBox: result.row.cashBox,
       systemAmount: result.row.systemAmount,
       systemBalance: result.row.systemBalance,
       physicalAmount: result.physicalAmount,
