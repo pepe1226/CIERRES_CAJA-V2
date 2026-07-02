@@ -14,6 +14,10 @@ import {
   isLikelyPerseoReportMessage,
   processTelegramPerseoReportMessage,
 } from "../_lib/telegramPerseoReportProcessor.js";
+import {
+  processExpenseAssistantCallback,
+  processExpenseAssistantMessage,
+} from "../_lib/telegramExpenseAssistant.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -56,8 +60,10 @@ export default async function handler(req: any, res: any) {
   const {
     telegramBotToken,
     telegramPerseoBotToken,
+    telegramExpenseBotToken,
     telegramSecretToken,
     telegramPerseoSecretToken,
+    telegramExpenseSecretToken,
     telegramAllowedChatId,
   } = getTelegramConfig();
 
@@ -68,6 +74,7 @@ export default async function handler(req: any, res: any) {
   const acceptedSecretTokens = [
     telegramSecretToken,
     telegramPerseoSecretToken,
+    telegramExpenseSecretToken,
   ].filter(Boolean).map(String);
 
   if (
@@ -90,6 +97,32 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json({
       ok: false,
       error: "Invalid body",
+    });
+  }
+
+  const isPerseoBotRequest =
+    Boolean(telegramPerseoSecretToken) &&
+    String(receivedSecret || "") === String(telegramPerseoSecretToken);
+  const isExpenseBotRequest =
+    Boolean(telegramExpenseSecretToken) &&
+    String(receivedSecret || "") === String(telegramExpenseSecretToken);
+
+  const callbackQuery = body.callback_query;
+
+  if (callbackQuery) {
+    if (isExpenseBotRequest) {
+      const result = await processExpenseAssistantCallback({
+        callbackQuery,
+        botToken: telegramExpenseBotToken || telegramBotToken,
+      });
+
+      return res.status(200).json(result);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "Callback ignored",
     });
   }
 
@@ -127,7 +160,7 @@ export default async function handler(req: any, res: any) {
   const photos = Array.isArray(message.photo) ? message.photo : [];
   const largestPhoto = photos.length > 0 ? getLargestTelegramPhoto(photos) : null;
 
-  if (isLikelyPerseoReportMessage(message)) {
+  if (isPerseoBotRequest || isLikelyPerseoReportMessage(message)) {
     try {
       const result = await processTelegramPerseoReportMessage({
         chatId,
@@ -155,6 +188,36 @@ export default async function handler(req: any, res: any) {
         error: error?.message || String(error),
       });
     }
+  }
+
+  if (isExpenseBotRequest) {
+    const assistantResult = await processExpenseAssistantMessage({
+      chatId,
+      message,
+      botToken: telegramExpenseBotToken || telegramBotToken,
+    });
+
+    if (assistantResult.handled) {
+      return res.status(200).json(assistantResult);
+    }
+
+    await sendTelegramMessage(
+      chatId,
+      [
+        "No identifique una salida.",
+        "Ejemplos:",
+        "combustible 20 tienda",
+        "taxi 8 banco",
+        "salida proveedor 50 transito",
+      ].join("\n"),
+      telegramExpenseBotToken || telegramBotToken
+    );
+
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "Expense assistant did not understand message",
+    });
   }
 
   if (photos.length === 0) {

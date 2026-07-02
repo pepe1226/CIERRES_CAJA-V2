@@ -35,8 +35,10 @@ export function getTelegramConfig() {
   return {
     telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
     telegramPerseoBotToken: env("TELEGRAM_PERSEO_BOT_TOKEN"),
+    telegramExpenseBotToken: env("TELEGRAM_EXPENSE_BOT_TOKEN"),
     telegramSecretToken: env("TELEGRAM_SECRET_TOKEN"),
     telegramPerseoSecretToken: env("TELEGRAM_PERSEO_SECRET_TOKEN"),
+    telegramExpenseSecretToken: env("TELEGRAM_EXPENSE_SECRET_TOKEN"),
     telegramAllowedChatId: env("TELEGRAM_ALLOWED_CHAT_ID"),
     telegramCreatedByUid: env("TELEGRAM_CREATED_BY_UID", "telegram-bot"),
     geminiApiKey: env("GEMINI_API_KEY"),
@@ -55,8 +57,10 @@ export function getTelegramStatus() {
     ),
     hasTelegramBotToken: Boolean(config.telegramBotToken),
     hasTelegramPerseoBotToken: Boolean(config.telegramPerseoBotToken),
+    hasTelegramExpenseBotToken: Boolean(config.telegramExpenseBotToken),
     hasTelegramSecretToken: Boolean(config.telegramSecretToken),
     hasTelegramPerseoSecretToken: Boolean(config.telegramPerseoSecretToken),
+    hasTelegramExpenseSecretToken: Boolean(config.telegramExpenseSecretToken),
     hasGeminiApiKey: Boolean(config.geminiApiKey),
     geminiModel: config.geminiModel,
     allowedChatId: config.telegramAllowedChatId || null,
@@ -91,15 +95,58 @@ async function telegramApi<T>(
   return data as T;
 }
 
-export async function sendTelegramMessage(chatId: number | string, text: string, botToken?: string) {
+export async function sendTelegramMessage(
+  chatId: number | string,
+  text: string,
+  botToken?: string,
+  extraPayload: Record<string, unknown> = {}
+) {
   try {
     await telegramApi("sendMessage", {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
+      ...extraPayload,
     }, botToken);
   } catch (error) {
     console.error("No se pudo responder en Telegram:", error);
+  }
+}
+
+export async function editTelegramMessageText(params: {
+  chatId: number | string;
+  messageId: number;
+  text: string;
+  botToken?: string;
+  extraPayload?: Record<string, unknown>;
+}) {
+  try {
+    await telegramApi("editMessageText", {
+      chat_id: params.chatId,
+      message_id: params.messageId,
+      text: params.text,
+      parse_mode: "HTML",
+      ...(params.extraPayload || {}),
+    }, params.botToken);
+  } catch (error) {
+    console.error("No se pudo editar mensaje en Telegram:", error);
+  }
+}
+
+export async function answerTelegramCallbackQuery(params: {
+  callbackQueryId: string;
+  text?: string;
+  showAlert?: boolean;
+  botToken?: string;
+}) {
+  try {
+    await telegramApi("answerCallbackQuery", {
+      callback_query_id: params.callbackQueryId,
+      text: params.text || "",
+      show_alert: Boolean(params.showAlert),
+    }, params.botToken);
+  } catch (error) {
+    console.error("No se pudo responder callback de Telegram:", error);
   }
 }
 
