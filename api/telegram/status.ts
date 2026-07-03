@@ -1,5 +1,4 @@
 import { getFirebaseAdminStatus } from "../_lib/firebaseAdmin";
-import { getGmailExpenseStatus } from "../_lib/gmailExpenseScanner";
 import { getTelegramStatus } from "../_lib/telegramMovement";
 
 export default function handler(_req: any, res: any) {
@@ -35,7 +34,14 @@ export default function handler(_req: any, res: any) {
       hasPerseoImportSecret: Boolean(process.env.PERSEO_IMPORT_SECRET),
       acceptsCronSecretFallback: Boolean(process.env.CRON_SECRET)
     },
-    gmailExpenses: getGmailExpenseStatus(),
+    gmailExpenses: {
+      hasGmailClientId: Boolean(process.env.GMAIL_CLIENT_ID),
+      hasGmailClientSecret: Boolean(process.env.GMAIL_CLIENT_SECRET),
+      hasGmailRefreshToken: Boolean(process.env.GMAIL_REFRESH_TOKEN),
+      hasGmailExpenseTelegramChatId: Boolean(process.env.GMAIL_EXPENSE_TELEGRAM_CHAT_ID),
+      gmailExpenseQuery: process.env.GMAIL_EXPENSE_QUERY ||
+        'newer_than:7d (pichincha OR "Banco Pichincha" OR "transaccion" OR "transferencia" OR "compra")'
+    },
     gemini: {
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
       geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash"
