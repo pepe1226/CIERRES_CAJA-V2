@@ -3,8 +3,13 @@ import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   answerTelegramCallbackQuery,
   editTelegramMessageText,
+  getTelegramConfig,
   sendTelegramMessage,
 } from "./telegramMovement.js";
+import {
+  processGmailExpenseCallback,
+  scanGmailForExpenses,
+} from "./gmailExpenseScanner.js";
 
 type CajaId = "safe" | "transit" | "bank";
 
@@ -218,6 +223,10 @@ function isDeleteRequest(text: string) {
   return /^\/?(eliminar|borrar|anular)\b/i.test(normalizeText(text));
 }
 
+function isGmailScanRequest(text: string) {
+  return /^\/?(revisar|buscar|scan)\s+(correo|correos|gmail)\b/i.test(normalizeText(text));
+}
+
 function parseDeleteMovementId(text: string) {
   const normalized = String(text || "").trim();
   const match = normalized.match(/^\/?(?:eliminar|borrar|anular)\s+([A-Za-z0-9_-]{8,})/i);
@@ -416,6 +425,36 @@ export async function processExpenseAssistantMessage(params: {
   botToken?: string;
 }) {
   const text = String(params.message.text || params.message.caption || "").trim();
+  if (isGmailScanRequest(text)) {
+    try {
+      const config = getTelegramConfig();
+      const result = await scanGmailForExpenses({
+        maxResults: 10,
+        botToken: params.botToken || config.telegramExpenseBotToken || config.telegramBotToken,
+      });
+
+      await sendTelegramMessage(
+        params.chatId,
+        [
+          "Revision Gmail completada.",
+          `Correos revisados: ${result.checked}`,
+          `Candidatos nuevos: ${result.created}`,
+          `Avisos enviados: ${result.notified}`,
+        ].join("\n"),
+        params.botToken
+      );
+
+      return { handled: true, gmailScan: true, result };
+    } catch (error: any) {
+      await sendTelegramMessage(
+        params.chatId,
+        `No pude revisar Gmail: ${error?.message || String(error)}`,
+        params.botToken
+      );
+      return { handled: true, gmailScan: true, error: error?.message || String(error) };
+    }
+  }
+
   if (isDeleteRequest(text)) {
     const movementId = parseDeleteMovementId(text);
     const movement = movementId
@@ -482,6 +521,10 @@ export async function processExpenseAssistantCallback(params: {
   botToken?: string;
 }) {
   const data = String(params.callbackQuery.data || "");
+  if (data.startsWith("gmail:")) {
+    return processGmailExpenseCallback(params);
+  }
+
   if (!data.startsWith("exp:")) return { handled: false };
 
   const [, action, draftId, value] = data.split(":");

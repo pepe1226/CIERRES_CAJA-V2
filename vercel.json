@@ -11,6 +11,10 @@
     {
       "path": "/api/telegram/retry-pending",
       "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/gmail/scan",
+      "schedule": "*/30 * * * *"
     }
   ],
   "rewrites": [
@@ -25,6 +29,10 @@
     {
       "source": "/telegram/retry-pending",
       "destination": "/api/telegram/retry-pending"
+    },
+    {
+      "source": "/gmail/scan",
+      "destination": "/api/gmail/scan"
     },
     {
       "source": "/perseo/import-report",
