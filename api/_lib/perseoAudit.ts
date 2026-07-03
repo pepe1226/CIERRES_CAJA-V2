@@ -369,6 +369,10 @@ function scoreCandidate(row: PerseoReportRow, closure: any) {
   return hits * 20;
 }
 
+function isSameMoney(left: unknown, right: unknown, tolerance: number) {
+  return Math.abs(Number(left || 0) - Number(right || 0)) <= tolerance;
+}
+
 async function getClosuresForDate(businessDate: string) {
   const db = getFirebaseAdminDb();
   const { start, end } = getEcuadorBusinessDateRange(businessDate);
@@ -439,7 +443,23 @@ export async function auditClosuresWithPerseoRows(params: {
         .filter((closure) => closureBusinessDate(closure.data) === row.businessDate)
         .filter((closure) => !usedClosureIds.has(closure.id));
 
-      if (remainingClosures.length !== 1) {
+      const amountMatchedClosures = remainingClosures.filter((closure) =>
+        isSameMoney(closure.data.physicalAmount, row.systemBalance, tolerance)
+      );
+
+      if (amountMatchedClosures.length === 1) {
+        closures.push({ ...amountMatchedClosures[0], score: 15 });
+      } else if (amountMatchedClosures.length > 1) {
+        results.push({
+          row,
+          ok: false,
+          reason: "ambiguous_amount_match",
+          candidates: amountMatchedClosures.length,
+        });
+        continue;
+      }
+
+      if (closures.length === 0 && remainingClosures.length !== 1) {
         results.push({
           row,
           ok: false,
@@ -449,7 +469,9 @@ export async function auditClosuresWithPerseoRows(params: {
         continue;
       }
 
-      closures.push({ ...remainingClosures[0], score: 10 });
+      if (closures.length === 0) {
+        closures.push({ ...remainingClosures[0], score: 10 });
+      }
     }
 
     const best = closures[0];
