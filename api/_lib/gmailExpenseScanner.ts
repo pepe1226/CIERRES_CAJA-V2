@@ -32,6 +32,18 @@ type ParsedBankExpense = {
   rawText: string;
 };
 
+type GmailScanResult = {
+  ok: true;
+  query: string;
+  checked: number;
+  created: number;
+  notified: number;
+  resent: number;
+  pendingNotified: number;
+  skippedByReason: Record<string, number>;
+  results: any[];
+};
+
 function env(name: string, fallback = "") {
   return (process.env[name] || fallback).trim();
 }
@@ -299,6 +311,17 @@ function candidateKeyboard(candidateId: string) {
   };
 }
 
+export function gmailScanKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Revisar mas correos", callback_data: "gmail:scanMore" },
+        { text: "Ver pendientes", callback_data: "gmail:pending" },
+      ],
+    ],
+  };
+}
+
 async function saveCandidate(expense: ParsedBankExpense) {
   const db = getFirebaseAdminDb();
   const candidateId = candidateIdForMessage(expense.messageId);
@@ -380,6 +403,32 @@ async function notifyCandidate(
   return true;
 }
 
+async function notifyPendingCandidates(params: {
+  botToken?: string;
+  notificationChatId?: number | string;
+  excludeIds?: Set<string>;
+  limit?: number;
+}) {
+  const db = getFirebaseAdminDb();
+  const chatId = await getNotificationChatId(params.notificationChatId);
+  if (!chatId) return 0;
+
+  const snapshot = await db
+    .collection("gmail_expense_candidates")
+    .where("status", "==", "pending")
+    .limit(Math.min(Math.max(params.limit || 5, 1), 10))
+    .get();
+
+  let count = 0;
+  for (const doc of snapshot.docs) {
+    if (params.excludeIds?.has(doc.id)) continue;
+    await notifyCandidate(doc.id, doc.data(), params.botToken, chatId);
+    count += 1;
+  }
+
+  return count;
+}
+
 async function createMovementFromCandidate(candidateId: string, from: CajaId) {
   const db = getFirebaseAdminDb();
   const ref = db.collection("gmail_expense_candidates").doc(candidateId);
@@ -438,7 +487,7 @@ export async function scanGmailForExpenses(params: {
   maxResults?: number;
   botToken?: string;
   notificationChatId?: number | string;
-} = {}) {
+} = {}): Promise<GmailScanResult> {
   const accessToken = await getGmailAccessToken();
   const maxResults = Math.min(Math.max(params.maxResults || 10, 1), 25);
   const query = getGmailQuery();
@@ -448,6 +497,14 @@ export async function scanGmailForExpenses(params: {
   );
 
   const results: any[] = [];
+  const notifiedIds = new Set<string>();
+  const skippedByReason: Record<string, number> = {};
+  let createdCount = 0;
+  let resent = 0;
+
+  const addSkipped = (reason: string) => {
+    skippedByReason[reason] = (skippedByReason[reason] || 0) + 1;
+  };
 
   for (const item of list.messages || []) {
     const message = await gmailApi<GmailMessage>(
@@ -457,20 +514,39 @@ export async function scanGmailForExpenses(params: {
     const parsed = parsePichinchaExpense(message);
 
     if (!parsed) {
+      addSkipped("not-expense");
       results.push({ messageId: item.id, ok: true, skipped: true, reason: "not-expense" });
       continue;
     }
 
     const saved = await saveCandidate(parsed);
     if (!saved.created) {
+      const savedData = saved.data as any;
+      if (savedData.status === "pending" && (params.notificationChatId || savedData.notificationStatus !== "sent")) {
+        const notified = await notifyCandidate(
+          saved.candidateId,
+          savedData,
+          params.botToken,
+          params.notificationChatId
+        );
+        if (notified) {
+          notifiedIds.add(saved.candidateId);
+          resent += 1;
+        }
+        results.push({ messageId: item.id, candidateId: saved.candidateId, ok: true, resent: notified });
+        continue;
+      }
+
+      addSkipped("already-seen");
       results.push({ messageId: item.id, candidateId: saved.candidateId, ok: true, skipped: true, reason: "already-seen" });
       continue;
     }
-
     if (saved.data.status === "matched_existing") {
+      addSkipped("already-registered");
       results.push({ messageId: item.id, candidateId: saved.candidateId, ok: true, skipped: true, reason: "already-registered" });
       continue;
     }
+    createdCount += 1;
 
     const notified = await notifyCandidate(
       saved.candidateId,
@@ -478,15 +554,28 @@ export async function scanGmailForExpenses(params: {
       params.botToken,
       params.notificationChatId
     );
+    if (notified) notifiedIds.add(saved.candidateId);
     results.push({ messageId: item.id, candidateId: saved.candidateId, ok: true, notified });
   }
+
+  const pendingNotified = params.notificationChatId
+    ? await notifyPendingCandidates({
+        botToken: params.botToken,
+        notificationChatId: params.notificationChatId,
+        excludeIds: notifiedIds,
+        limit: 5,
+      })
+    : 0;
 
   return {
     ok: true,
     query,
     checked: list.messages?.length || 0,
-    created: results.filter((result) => result.candidateId && !result.skipped).length,
+    created: createdCount,
     notified: results.filter((result) => result.notified).length,
+    resent,
+    pendingNotified,
+    skippedByReason,
     results,
   };
 }
@@ -506,6 +595,55 @@ export async function processGmailExpenseCallback(params: {
     callbackQueryId: params.callbackQuery.id,
     botToken: params.botToken,
   });
+
+  if (action === "scanMore") {
+    const config = getTelegramConfig();
+    const result = await scanGmailForExpenses({
+      maxResults: 25,
+      botToken: params.botToken || config.telegramExpenseBotToken || config.telegramBotToken,
+      notificationChatId: chatId,
+    });
+
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: [
+          "Revision amplia Gmail completada.",
+          `Correos revisados: ${result.checked}`,
+          `Nuevos: ${result.created}`,
+          `Reenviados: ${result.resent + result.pendingNotified}`,
+          `Avisos enviados: ${result.notified}`,
+        ].join("\n"),
+        botToken: params.botToken,
+        extraPayload: { reply_markup: gmailScanKeyboard() },
+      });
+    }
+
+    return { handled: true, gmailScan: true, result };
+  }
+
+  if (action === "pending") {
+    const pendingNotified = await notifyPendingCandidates({
+      botToken: params.botToken,
+      notificationChatId: chatId,
+      limit: 10,
+    });
+
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: pendingNotified > 0
+          ? `Te reenvie ${pendingNotified} gasto(s) pendiente(s) con botones.`
+          : "No hay gastos pendientes de Gmail para confirmar.",
+        botToken: params.botToken,
+        extraPayload: { reply_markup: gmailScanKeyboard() },
+      });
+    }
+
+    return { handled: true, pendingNotified };
+  }
 
   if (action === "ignore") {
     await getFirebaseAdminDb().collection("gmail_expense_candidates").doc(candidateId).set(

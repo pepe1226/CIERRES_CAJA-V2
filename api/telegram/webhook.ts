@@ -18,6 +18,7 @@ import {
   processExpenseAssistantCallback,
   processExpenseAssistantMessage,
 } from "../_lib/telegramExpenseAssistant.js";
+import { gmailScanKeyboard } from "../_lib/gmailExpenseScanner.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -205,12 +206,14 @@ export default async function handler(req: any, res: any) {
       chatId,
       [
         "No identifique una salida.",
+        "No voy a registrar nada sin una accion clara de gasto.",
         "Ejemplos:",
         "combustible 20 tienda",
         "taxi 8 banco",
         "salida proveedor 50 transito",
       ].join("\n"),
-      telegramExpenseBotToken || telegramBotToken
+      telegramExpenseBotToken || telegramBotToken,
+      { reply_markup: gmailScanKeyboard() }
     );
 
     return res.status(200).json({

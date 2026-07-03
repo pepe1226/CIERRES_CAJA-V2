@@ -1,4 +1,4 @@
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+﻿import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   answerTelegramCallbackQuery,
@@ -7,6 +7,7 @@ import {
   sendTelegramMessage,
 } from "./telegramMovement.js";
 import {
+  gmailScanKeyboard,
   processGmailExpenseCallback,
   scanGmailForExpenses,
 } from "./gmailExpenseScanner.js";
@@ -84,7 +85,7 @@ function parseAmount(text: string) {
   const match = text.match(/(?:\$|usd)?\s*(\d+(?:[.,]\d{1,2})?)/i);
   if (!match) return 0;
   const amount = Number(match[1].replace(",", "."));
-  return Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : 0;
+  return Number.isFinite(amount) && amount > 0 && amount <= 10000 ? Number(amount.toFixed(2)) : 0;
 }
 
 function parseCaja(text: string): CajaId | null {
@@ -99,7 +100,15 @@ function isLikelyExpenseText(text: string) {
   const normalized = normalizeText(text);
   if (!normalized || normalized.startsWith("/")) return false;
   if (parseAmount(normalized) <= 0) return false;
-  return /\b(salida|gasto|pago|pague|compr[eé]|combustible|gasolina|taxi|proveedor|fundas|anticipo|sueldo)\b/.test(normalized);
+
+  const hasExplicitExpenseAction =
+    /\b(salida|gasto|egreso|pago|pague|compre|retire|retiro|saque|sacar)\b/.test(normalized);
+  const hasKnownExpenseConcept =
+    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|agua|internet|arriendo)\b/.test(normalized);
+  const hasIncomeLanguage =
+    /\b(ingreso|deposite|deposito|recibi|recibido|cobre|cobro|venta|vendi|abono|acreditacion)\b/.test(normalized);
+
+  return !hasIncomeLanguage && (hasExplicitExpenseAction || hasKnownExpenseConcept);
 }
 
 function makeTags(values: Array<string | undefined | null>) {
@@ -440,9 +449,14 @@ export async function processExpenseAssistantMessage(params: {
           "Revision Gmail completada.",
           `Correos revisados: ${result.checked}`,
           `Candidatos nuevos: ${result.created}`,
+          `Pendientes reenviados: ${result.resent + result.pendingNotified}`,
           `Avisos enviados: ${result.notified}`,
+          result.created + result.resent + result.pendingNotified === 0
+            ? "No encontre movimientos nuevos para confirmar con la busqueda actual."
+            : "Te envie los movimientos detectados con botones.",
         ].join("\n"),
-        params.botToken
+        params.botToken,
+        { reply_markup: gmailScanKeyboard() }
       );
 
       return { handled: true, gmailScan: true, result };
@@ -712,3 +726,4 @@ export async function processExpenseAssistantCallback(params: {
 
   return { handled: true, ignored: true };
 }
+
