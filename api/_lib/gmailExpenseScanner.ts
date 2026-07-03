@@ -257,7 +257,12 @@ async function getNotificationChatId(preferredChatId?: number | string) {
   const configured = env("GMAIL_EXPENSE_TELEGRAM_CHAT_ID");
   if (configured) return configured;
 
-  const snapshot = await getFirebaseAdminDb()
+  const db = getFirebaseAdminDb();
+  const settings = await db.collection("gmail_expense_settings").doc("default").get();
+  const savedChatId = settings.data()?.telegramChatId;
+  if (savedChatId) return String(savedChatId);
+
+  const snapshot = await db
     .collection("telegram_expense_drafts")
     .orderBy("updatedAt", "desc")
     .limit(1)
@@ -346,6 +351,16 @@ async function notifyCandidate(
       { merge: true }
     );
     return false;
+  }
+
+  if (notificationChatId) {
+    await getFirebaseAdminDb().collection("gmail_expense_settings").doc("default").set(
+      {
+        telegramChatId: String(notificationChatId),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
   }
 
   await sendTelegramMessage(chatId, candidateTelegramText(candidateId, candidate), botToken, {
