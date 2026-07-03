@@ -431,6 +431,7 @@ export async function processExpenseAssistantMessage(params: {
       const result = await scanGmailForExpenses({
         maxResults: 10,
         botToken: params.botToken || config.telegramExpenseBotToken || config.telegramBotToken,
+        notificationChatId: params.chatId,
       });
 
       await sendTelegramMessage(

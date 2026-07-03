@@ -251,7 +251,9 @@ async function movementAlreadyExists(expense: ParsedBankExpense) {
   });
 }
 
-async function getNotificationChatId() {
+async function getNotificationChatId(preferredChatId?: number | string) {
+  if (preferredChatId) return String(preferredChatId);
+
   const configured = env("GMAIL_EXPENSE_TELEGRAM_CHAT_ID");
   if (configured) return configured;
 
@@ -328,8 +330,13 @@ async function saveCandidate(expense: ParsedBankExpense) {
   return { candidateId, created: true, data };
 }
 
-async function notifyCandidate(candidateId: string, candidate: any, botToken?: string) {
-  const chatId = await getNotificationChatId();
+async function notifyCandidate(
+  candidateId: string,
+  candidate: any,
+  botToken?: string,
+  notificationChatId?: number | string
+) {
+  const chatId = await getNotificationChatId(notificationChatId);
   if (!chatId) {
     await getFirebaseAdminDb().collection("gmail_expense_candidates").doc(candidateId).set(
       {
@@ -415,6 +422,7 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
 export async function scanGmailForExpenses(params: {
   maxResults?: number;
   botToken?: string;
+  notificationChatId?: number | string;
 } = {}) {
   const accessToken = await getGmailAccessToken();
   const maxResults = Math.min(Math.max(params.maxResults || 10, 1), 25);
@@ -449,7 +457,12 @@ export async function scanGmailForExpenses(params: {
       continue;
     }
 
-    const notified = await notifyCandidate(saved.candidateId, saved.data, params.botToken);
+    const notified = await notifyCandidate(
+      saved.candidateId,
+      saved.data,
+      params.botToken,
+      params.notificationChatId
+    );
     results.push({ messageId: item.id, candidateId: saved.candidateId, ok: true, notified });
   }
 
