@@ -61,7 +61,7 @@ export function getGmailExpenseStatus() {
 function getGmailQuery() {
   return env(
     "GMAIL_EXPENSE_QUERY",
-    'newer_than:7d (pichincha OR "Banco Pichincha" OR "transaccion" OR "transferencia" OR "compra")'
+    'newer_than:30d (pichincha OR "Banco Pichincha" OR "notificaciones pichincha" OR "transaccion" OR "transacción" OR "transferencia" OR "compra" OR "consumo")'
   );
 }
 
@@ -171,13 +171,14 @@ function parseMoney(value: unknown) {
 
 function findAmounts(text: string) {
   const currencyMatches = Array.from(text.matchAll(/(?:usd|\$)\s*(\d{1,6}(?:[.,]\d{1,2})?)/gi));
+  const trailingCurrencyMatches = Array.from(text.matchAll(/\b(\d{1,6}(?:[.,]\d{1,2})?)\s*(?:usd|\$)\b/gi));
   const labelMatches = Array.from(
-    text.matchAll(/\b(?:valor|monto|importe|total)\b\s*:?\s*(?:usd|\$)?\s*(\d{1,6}(?:[.,]\d{1,2})?)/gi)
+    text.matchAll(/\b(?:valor|monto|importe|total|por|de|compra|consumo|debito|débito|retiro|transferencia|pago)\b\s*:?\s*(?:usd|\$)?\s*(\d{1,6}(?:[.,]\d{1,2})?)/gi)
   );
-  const matches = [...currencyMatches, ...labelMatches];
+  const matches = [...currencyMatches, ...trailingCurrencyMatches, ...labelMatches];
   return matches
     .map((match) => parseMoney(match[1]))
-    .filter((amount) => amount > 0)
+    .filter((amount) => amount > 0 && amount <= 10000)
     .sort((a, b) => b - a);
 }
 
@@ -209,15 +210,16 @@ function parsePichinchaExpense(message: GmailMessage): ParsedBankExpense | null 
 
   if (!/\b(pichincha|banco pichincha)\b/.test(normalized)) return null;
 
-  const looksLikeExpense =
-    /\b(compra|consumo|debito|transferencia|pago|retiro|transaccion|tarjeta)\b/.test(normalized) &&
-    !/\b(deposito|acreditacion|recibiste|ingreso)\b/.test(normalized);
-
-  if (!looksLikeExpense) return null;
-
   const amounts = findAmounts(rawText);
   const amount = amounts[0] || 0;
   if (amount <= 0) return null;
+
+  const hasExpenseSignal =
+    /\b(compra|consumo|debito|transferencia|pago|retiro|transaccion|tarjeta|pagaste|realizaste|enviaste)\b/.test(normalized);
+  const hasIncomeSignal =
+    /\b(deposito|acreditacion|recibiste|recibido|ingreso|abono|te transfirieron)\b/.test(normalized);
+
+  if (hasIncomeSignal && !hasExpenseSignal) return null;
 
   const category = suggestCategory(rawText);
   const emailDate = message.internalDate
@@ -228,6 +230,7 @@ function parsePichinchaExpense(message: GmailMessage): ParsedBankExpense | null 
     "Pichincha",
     subject || "transaccion bancaria",
     (message.snippet || "").replace(/\s+/g, " ").slice(0, 140),
+    hasExpenseSignal ? "" : "REVISAR: detectado por monto en correo Pichincha",
   ].filter(Boolean).join(" - ").slice(0, 240);
 
   return {

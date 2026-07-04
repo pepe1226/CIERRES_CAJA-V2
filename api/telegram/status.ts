@@ -40,7 +40,7 @@ export default function handler(_req: any, res: any) {
       hasGmailRefreshToken: Boolean(process.env.GMAIL_REFRESH_TOKEN),
       hasGmailExpenseTelegramChatId: Boolean(process.env.GMAIL_EXPENSE_TELEGRAM_CHAT_ID),
       gmailExpenseQuery: process.env.GMAIL_EXPENSE_QUERY ||
-        'newer_than:7d (pichincha OR "Banco Pichincha" OR "transaccion" OR "transferencia" OR "compra")'
+        'newer_than:30d (pichincha OR "Banco Pichincha" OR "notificaciones pichincha" OR "transaccion" OR "transacción" OR "transferencia" OR "compra" OR "consumo")'
     },
     gemini: {
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
