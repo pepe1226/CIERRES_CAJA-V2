@@ -31,6 +31,9 @@ import {
   startOfDay,
   endOfDay,
   subDays,
+  subMonths,
+  startOfYear,
+  endOfYear,
   startOfWeek
 } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -408,6 +411,9 @@ function AppContent() {
   const [filterResponsible, setFilterResponsible] = useState('all');
   const [filterAudit, setFilterAudit] = useState<ClosureAuditStatus>('all');
   const [filterDateRangeType, setFilterDateRangeType] = useState('mes');
+  const [outflowPeriodType, setOutflowPeriodType] = useState<'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom'>('este_mes');
+  const [outflowStartDate, setOutflowStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
+  const [outflowEndDate, setOutflowEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
   const [hideCollected, setHideCollected] = useState(false);
   const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
 
@@ -878,9 +884,60 @@ function AppContent() {
   const accumulatedTransitTotal = useMemo(() => getAccumulatedBoxTotal('transit'), [getAccumulatedBoxTotal]);
   const accumulatedBankTotal = useMemo(() => getAccumulatedBoxTotal('bank'), [getAccumulatedBoxTotal]);
 
+  const applyOutflowPeriod = useCallback((period: 'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom') => {
+    const today = new Date();
+    const previousMonth = subMonths(today, 1);
+
+    if (period === 'este_mes') {
+      setOutflowStartDate(format(startOfMonth(today), 'yyyy-MM-dd'));
+      setOutflowEndDate(format(endOfMonth(today), 'yyyy-MM-dd'));
+    }
+
+    if (period === 'mes_pasado') {
+      setOutflowStartDate(format(startOfMonth(previousMonth), 'yyyy-MM-dd'));
+      setOutflowEndDate(format(endOfMonth(previousMonth), 'yyyy-MM-dd'));
+    }
+
+    if (period === 'anio_actual') {
+      setOutflowStartDate(format(startOfYear(today), 'yyyy-MM-dd'));
+      setOutflowEndDate(format(endOfYear(today), 'yyyy-MM-dd'));
+    }
+
+    setOutflowPeriodType(period);
+  }, []);
+
+  const filteredOutflowMovements = useMemo(() => {
+    return movements.filter(m => {
+      if (m.type !== 'outflow') return false;
+      if (outflowPeriodType === 'siempre') return true;
+
+      const movementDate = parseISO(m.date);
+      const start = startOfDay(parseISO(outflowStartDate));
+      const end = endOfDay(parseISO(outflowEndDate));
+
+      if (Number.isNaN(movementDate.getTime()) || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        return true;
+      }
+
+      return isWithinInterval(movementDate, { start, end });
+    });
+  }, [movements, outflowPeriodType, outflowStartDate, outflowEndDate]);
+
   const accumulatedOutflowTotal = useMemo(() => {
-    return movements.filter(m => m.type === 'outflow').reduce((acc, curr) => acc + curr.amount, 0);
-  }, [movements]);
+    return filteredOutflowMovements.reduce((acc, curr) => acc + curr.amount, 0);
+  }, [filteredOutflowMovements]);
+
+  const outflowPeriodLabel = useMemo(() => {
+    if (outflowPeriodType === 'este_mes') return 'Este mes';
+    if (outflowPeriodType === 'mes_pasado') return 'Mes pasado';
+    if (outflowPeriodType === 'anio_actual') return 'Anio actual';
+    if (outflowPeriodType === 'siempre') return 'Todo el historial';
+
+    const start = parseISO(outflowStartDate);
+    const end = parseISO(outflowEndDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 'Periodo especifico';
+    return `${format(start, 'dd/MM/yyyy')} - ${format(end, 'dd/MM/yyyy')}`;
+  }, [outflowPeriodType, outflowStartDate, outflowEndDate]);
 
   const getBoxBalance = useCallback((box?: string | null) => {
     const normalizedBox = normalizeCashBoxStatus(box);
@@ -2182,6 +2239,45 @@ Notas: ${closure.notes || 'N/A'}`;
                 GASTOS TOTALES
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedOutflowTotal.toLocaleString('es-CL')}</p>
+              <p className="text-[10px] font-black text-rose-300/70 uppercase tracking-widest mt-2">Periodo: ${outflowPeriodLabel}</p>
+              <div className="grid grid-cols-2 gap-2 mt-4 relative z-10">
+                {[
+                  { label: 'Este mes', value: 'este_mes' as const },
+                  { label: 'Mes pasado', value: 'mes_pasado' as const },
+                  { label: 'Anio actual', value: 'anio_actual' as const },
+                  { label: 'Periodo', value: 'custom' as const },
+                ].map(option => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      option.value === 'custom' ? setOutflowPeriodType('custom') : applyOutflowPeriod(option.value);
+                    }}
+                    className={`min-h-[30px] rounded-lg border px-2 text-[9px] font-black uppercase tracking-widest transition-colors ${outflowPeriodType === option.value ? 'border-rose-500 bg-rose-500/15 text-rose-200' : 'border-white/10 bg-white/5 text-slate-500 hover:border-rose-500/40'}`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              {outflowPeriodType === 'custom' && (
+                <div className="grid grid-cols-2 gap-2 mt-3 relative z-10">
+                  <input
+                    type="date"
+                    value={outflowStartDate}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={e => setOutflowStartDate(e.target.value)}
+                    className="min-w-0 rounded-lg border border-white/10 bg-slate-950/50 px-2 py-2 text-[11px] font-bold text-slate-200 outline-none focus:border-rose-500"
+                  />
+                  <input
+                    type="date"
+                    value={outflowEndDate}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={e => setOutflowEndDate(e.target.value)}
+                    className="min-w-0 rounded-lg border border-white/10 bg-slate-950/50 px-2 py-2 text-[11px] font-bold text-slate-200 outline-none focus:border-rose-500"
+                  />
+                </div>
+              )}
             </div>
           </div>
 
@@ -2234,9 +2330,8 @@ Notas: ${closure.notes || 'N/A'}`;
                   <div className="flex-1 overflow-auto p-8 pt-4">
                     <div className="grid gap-8">
                       {Object.entries(
-                        movements
-                          .filter(m => m.type === 'outflow')
-                          .reduce((groups: Record<string, typeof movements>, m) => {
+                        filteredOutflowMovements
+                          .reduce((groups: Record<string, typeof filteredOutflowMovements>, m) => {
                             const date = format(parseISO(m.date), 'yyyy-MM-dd');
                             if (!groups[date]) groups[date] = [];
                             groups[date].push(m);
@@ -2294,7 +2389,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         </div>
                       ))}
 
-                      {movements.filter(m => m.type === 'outflow').length === 0 && (
+                      {filteredOutflowMovements.length === 0 && (
                         <div className="text-center py-20 bg-white/5 rounded-[2rem] border border-dashed border-white/10">
                           <TrendingDown className="w-16 h-16 text-slate-800 mx-auto mb-4 opacity-20" />
                           <p className="text-slate-500 font-black uppercase tracking-widest text-xs">No hay movimientos registrados</p>
@@ -2306,7 +2401,7 @@ Notas: ${closure.notes || 'N/A'}`;
                   <div className="p-6 border-t border-white/5 bg-white/[0.02] flex justify-between items-center px-10">
                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Monto Consolidado</span>
                     <span className="text-xl font-black font-mono text-rose-500">
-                      -${movements.filter(m => m.type === 'outflow').reduce((s, m) => s + m.amount, 0).toLocaleString('es-CL')}
+                      -${filteredOutflowMovements.reduce((s, m) => s + m.amount, 0).toLocaleString('es-CL')}
                     </span>
                   </div>
                 </motion.div>
