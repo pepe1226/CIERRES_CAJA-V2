@@ -239,6 +239,29 @@ function isGmailScanRequest(text: string) {
   return /\b(revisar|buscar|scan|ver|mostrar|relacionar|vincular|cruzar|gastos|movimientos)\b/.test(normalized);
 }
 
+function gmailScanDetails(result: Awaited<ReturnType<typeof scanGmailForExpenses>>) {
+  if (result.created + result.resent + result.pendingNotified > 0) {
+    return ["Te envie los movimientos detectados con botones."];
+  }
+
+  const reasonText = Object.entries(result.skippedByReason || {})
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(", ");
+  const examples = (result.diagnostics || [])
+    .slice(0, 3)
+    .map((item) => {
+      const amountText = item.amounts?.length ? ` | montos: ${item.amounts.join(", ")}` : "";
+      return `- ${item.reason}: ${item.subject || item.from || "correo sin asunto"}${amountText}`;
+    });
+
+  return [
+    "No encontre movimientos nuevos para confirmar con la busqueda actual.",
+    reasonText ? `Motivos: ${reasonText}` : "",
+    examples.length ? "Ejemplos revisados:" : "",
+    ...examples,
+  ].filter(Boolean);
+}
+
 function parseDeleteMovementId(text: string) {
   const normalized = String(text || "").trim();
   const match = normalized.match(/^\/?(?:eliminar|borrar|anular)\s+([A-Za-z0-9_-]{8,})/i);
@@ -454,9 +477,7 @@ export async function processExpenseAssistantMessage(params: {
           `Candidatos nuevos: ${result.created}`,
           `Pendientes reenviados: ${result.resent + result.pendingNotified}`,
           `Avisos enviados: ${result.notified}`,
-          result.created + result.resent + result.pendingNotified === 0
-            ? "No encontre movimientos nuevos para confirmar con la busqueda actual."
-            : "Te envie los movimientos detectados con botones.",
+          ...gmailScanDetails(result),
         ].join("\n"),
         params.botToken,
         { reply_markup: gmailScanKeyboard() }

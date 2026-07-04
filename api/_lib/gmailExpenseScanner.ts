@@ -32,6 +32,14 @@ type ParsedBankExpense = {
   rawText: string;
 };
 
+type GmailDiagnostic = {
+  reason: string;
+  subject: string;
+  from: string;
+  snippet: string;
+  amounts: number[];
+};
+
 type GmailScanResult = {
   ok: true;
   query: string;
@@ -41,6 +49,7 @@ type GmailScanResult = {
   resent: number;
   pendingNotified: number;
   skippedByReason: Record<string, number>;
+  diagnostics: GmailDiagnostic[];
   results: any[];
 };
 
@@ -201,25 +210,43 @@ function suggestCategory(text: string) {
   return { category: "Otros", subcategory: "GENERAL", tags: ["BANCO", "PICHINCHA"] };
 }
 
-function parsePichinchaExpense(message: GmailMessage): ParsedBankExpense | null {
+function analyzePichinchaExpense(message: GmailMessage): { expense: ParsedBankExpense | null; diagnostic: GmailDiagnostic } {
   const subject = getHeader(message, "Subject");
   const from = getHeader(message, "From");
   const body = collectBodyParts(message.payload).join("\n");
   const rawText = [subject, from, message.snippet || "", body].join("\n").slice(0, 8000);
   const normalized = normalizeText(rawText);
-
-  if (!/\b(pichincha|banco pichincha)\b/.test(normalized)) return null;
-
   const amounts = findAmounts(rawText);
+  const diagnostic: GmailDiagnostic = {
+    reason: "parsed",
+    subject: subject.slice(0, 90),
+    from: from.slice(0, 70),
+    snippet: String(message.snippet || "").replace(/\s+/g, " ").slice(0, 120),
+    amounts: amounts.slice(0, 5),
+  };
+
+  const hasPichinchaSignal =
+    /\b(pichincha|banco pichincha)\b/.test(normalized) ||
+    /pichincha/i.test(from) ||
+    /pichincha/i.test(subject);
+
+  if (!hasPichinchaSignal) {
+    return { expense: null, diagnostic: { ...diagnostic, reason: "no_pichincha" } };
+  }
+
   const amount = amounts[0] || 0;
-  if (amount <= 0) return null;
+  if (amount <= 0) {
+    return { expense: null, diagnostic: { ...diagnostic, reason: "sin_monto" } };
+  }
 
   const hasExpenseSignal =
     /\b(compra|consumo|debito|transferencia|pago|retiro|transaccion|tarjeta|pagaste|realizaste|enviaste)\b/.test(normalized);
   const hasIncomeSignal =
     /\b(deposito|acreditacion|recibiste|recibido|ingreso|abono|te transfirieron)\b/.test(normalized);
 
-  if (hasIncomeSignal && !hasExpenseSignal) return null;
+  if (hasIncomeSignal && !hasExpenseSignal) {
+    return { expense: null, diagnostic: { ...diagnostic, reason: "parece_ingreso" } };
+  }
 
   const category = suggestCategory(rawText);
   const emailDate = message.internalDate
@@ -234,18 +261,25 @@ function parsePichinchaExpense(message: GmailMessage): ParsedBankExpense | null 
   ].filter(Boolean).join(" - ").slice(0, 240);
 
   return {
-    messageId: message.id,
-    threadId: message.threadId || null,
-    emailDate,
-    subject,
-    from,
-    amount,
-    description,
-    category: category.category,
-    subcategory: category.subcategory,
-    tags: category.tags,
-    rawText: rawText.slice(0, 3000),
+    expense: {
+      messageId: message.id,
+      threadId: message.threadId || null,
+      emailDate,
+      subject,
+      from,
+      amount,
+      description,
+      category: category.category,
+      subcategory: category.subcategory,
+      tags: category.tags,
+      rawText: rawText.slice(0, 3000),
+    },
+    diagnostic,
   };
+}
+
+function parsePichinchaExpense(message: GmailMessage): ParsedBankExpense | null {
+  return analyzePichinchaExpense(message).expense;
 }
 
 async function movementAlreadyExists(expense: ParsedBankExpense) {
@@ -500,6 +534,7 @@ export async function scanGmailForExpenses(params: {
   );
 
   const results: any[] = [];
+  const diagnostics: GmailDiagnostic[] = [];
   const notifiedIds = new Set<string>();
   const skippedByReason: Record<string, number> = {};
   let createdCount = 0;
@@ -514,11 +549,13 @@ export async function scanGmailForExpenses(params: {
       `messages/${item.id}?${new URLSearchParams({ format: "full" })}`,
       accessToken
     );
-    const parsed = parsePichinchaExpense(message);
+    const analysis = analyzePichinchaExpense(message);
+    const parsed = analysis.expense;
 
     if (!parsed) {
-      addSkipped("not-expense");
-      results.push({ messageId: item.id, ok: true, skipped: true, reason: "not-expense" });
+      addSkipped(analysis.diagnostic.reason);
+      if (diagnostics.length < 5) diagnostics.push(analysis.diagnostic);
+      results.push({ messageId: item.id, ok: true, skipped: true, reason: analysis.diagnostic.reason });
       continue;
     }
 
@@ -579,6 +616,7 @@ export async function scanGmailForExpenses(params: {
     resent,
     pendingNotified,
     skippedByReason,
+    diagnostics,
     results,
   };
 }
@@ -617,6 +655,9 @@ export async function processGmailExpenseCallback(params: {
           `Nuevos: ${result.created}`,
           `Reenviados: ${result.resent + result.pendingNotified}`,
           `Avisos enviados: ${result.notified}`,
+          result.created + result.resent + result.pendingNotified === 0
+            ? `Motivos: ${Object.entries(result.skippedByReason || {}).map(([reason, count]) => `${reason}: ${count}`).join(", ") || "sin detalle"}`
+            : "Te envie los movimientos detectados con botones.",
         ].join("\n"),
         botToken: params.botToken,
         extraPayload: { reply_markup: gmailScanKeyboard() },
