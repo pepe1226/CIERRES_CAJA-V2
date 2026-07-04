@@ -235,6 +235,9 @@ function suggestCategory(text: string) {
   if (/\b(supermaxi|tia|mi comisariato|compra|proveedor|ferreteria)\b/.test(normalized)) {
     return { category: "Proveedor", subcategory: "COMPRAS", tags: ["PROVEEDOR", "COMPRAS"] };
   }
+  if (/\b(encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|cafe|bolon|tigrillo|chaulafan|seco|guatita|empanada|cola|gaseosa|jugo|snack)\b/.test(normalized)) {
+    return { category: "Alimentacion", subcategory: "COMIDAS", tags: ["ALIMENTACION", "COMIDAS"] };
+  }
 
   return { category: "Otros", subcategory: "GENERAL", tags: ["BANCO", "PICHINCHA"] };
 }
@@ -472,6 +475,7 @@ function candidateTelegramText(candidateId: string, candidate: any) {
     candidate.merchant ? `Beneficiario: ${candidate.merchant}` : "",
     `Categoria sugerida: ${candidate.category || "Otros"}`,
     `Descripcion: ${candidate.description}`,
+    candidate.duplicateMovement ? "Aviso: existe un movimiento parecido. Revisa antes de registrar." : "",
     candidate.memoryKeyword ? `Memoria: asociada con "${candidate.memoryKeyword}"` : "",
     `Origen: Gmail / Banco Pichincha`,
     "",
@@ -501,8 +505,51 @@ export function gmailScanKeyboard() {
         { text: "Revisar mas correos", callback_data: "gmail:scanMore" },
         { text: "Ver pendientes", callback_data: "gmail:pending" },
       ],
+      [
+        { text: "Revision amplia Gmail", callback_data: "gmail:scanDeep" },
+        { text: "Ayuda Gmail", callback_data: "gmail:help" },
+      ],
     ],
   };
+}
+
+function gmailResultText(title: string, result: GmailScanResult) {
+  const reasonText = Object.entries(result.skippedByReason || {})
+    .map(([reason, count]) => `${reason}: ${count}`)
+    .join(", ");
+  const examples = (result.diagnostics || [])
+    .slice(0, 5)
+    .map((item) => {
+      const amountText = item.amounts?.length ? ` | montos: ${item.amounts.join(", ")}` : "";
+      const imageText = item.imageParts ? ` | imagenes OCR: ${item.imageParts}` : "";
+      return `- ${item.reason}: ${item.subject || item.from || "correo sin asunto"}${amountText}${imageText}`;
+    });
+
+  return [
+    title,
+    `Correos revisados: ${result.checked}`,
+    `Candidatos nuevos: ${result.created}`,
+    `Pendientes reenviados: ${result.resent + result.pendingNotified}`,
+    `Avisos enviados: ${result.notified}`,
+    result.created + result.resent + result.pendingNotified > 0
+      ? "Te envie los movimientos detectados con botones."
+      : "No encontre movimientos nuevos para confirmar.",
+    reasonText ? `Motivos: ${reasonText}` : "",
+    examples.length ? "Ejemplos revisados:" : "",
+    ...examples,
+  ].filter(Boolean).join("\n");
+}
+
+function gmailHelpText() {
+  return [
+    "Botones Gmail disponibles.",
+    "",
+    "Revisar mas correos: revisa los correos recientes de Pichincha.",
+    "Revision amplia Gmail: revisa hasta 100 correos por si el movimiento no estaba entre los ultimos.",
+    "Ver pendientes: reenvia movimientos detectados que aun no confirmaste.",
+    "",
+    "Si un correo de Pichincha viene solo como imagen remota y Gmail no entrega esa imagen al API, reenvia o captura ese comprobante al bot para leerlo por OCR.",
+  ].join("\n");
 }
 
 async function saveCandidate(expense: ParsedBankExpense) {
@@ -512,12 +559,25 @@ async function saveCandidate(expense: ParsedBankExpense) {
   const existing = await ref.get();
 
   if (existing.exists) {
-    return { candidateId, created: false, data: existing.data() || {} };
+    const existingData = existing.data() || {};
+    if (existingData.status === "matched_existing") {
+      const updatedData = {
+        ...existingData,
+        status: "pending",
+        previousStatus: "matched_existing",
+        duplicateMovement: true,
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+      await ref.set(updatedData, { merge: true });
+      return { candidateId, created: false, data: updatedData };
+    }
+
+    return { candidateId, created: false, data: existingData };
   }
 
   const duplicateMovement = await movementAlreadyExists(expense);
   const data = {
-    status: duplicateMovement ? "matched_existing" : "pending",
+    status: "pending",
     source: "gmail",
     provider: "banco-pichincha",
     gmailMessageId: expense.messageId,
@@ -688,7 +748,7 @@ export async function scanGmailForExpenses(params: {
   notificationChatId?: number | string;
 } = {}): Promise<GmailScanResult> {
   const accessToken = await getGmailAccessToken();
-  const maxResults = Math.min(Math.max(params.maxResults || 10, 1), 25);
+  const maxResults = Math.min(Math.max(params.maxResults || 10, 1), 100);
   const query = getGmailQuery();
   const list = await gmailApi<{ messages?: Array<{ id: string; threadId: string }> }>(
     `messages?${new URLSearchParams({ q: query, maxResults: String(maxResults) })}`,
@@ -809,10 +869,24 @@ export async function processGmailExpenseCallback(params: {
     botToken: params.botToken,
   });
 
-  if (action === "scanMore") {
+  if (action === "help") {
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: gmailHelpText(),
+        botToken: params.botToken,
+        extraPayload: { reply_markup: gmailScanKeyboard() },
+      });
+    }
+
+    return { handled: true, gmailHelp: true };
+  }
+
+  if (action === "scanMore" || action === "scanDeep") {
     const config = getTelegramConfig();
     const result = await scanGmailForExpenses({
-      maxResults: 25,
+      maxResults: action === "scanDeep" ? 100 : 25,
       botToken: params.botToken || config.telegramExpenseBotToken || config.telegramBotToken,
       notificationChatId: chatId,
     });
@@ -821,16 +895,10 @@ export async function processGmailExpenseCallback(params: {
       await editTelegramMessageText({
         chatId,
         messageId,
-        text: [
-          "Revision amplia Gmail completada.",
-          `Correos revisados: ${result.checked}`,
-          `Nuevos: ${result.created}`,
-          `Reenviados: ${result.resent + result.pendingNotified}`,
-          `Avisos enviados: ${result.notified}`,
-          result.created + result.resent + result.pendingNotified === 0
-            ? `Motivos: ${Object.entries(result.skippedByReason || {}).map(([reason, count]) => `${reason}: ${count}`).join(", ") || "sin detalle"}`
-            : "Te envie los movimientos detectados con botones.",
-        ].join("\n"),
+        text: gmailResultText(
+          action === "scanDeep" ? "Revision amplia Gmail completada." : "Revision Gmail completada.",
+          result
+        ),
         botToken: params.botToken,
         extraPayload: { reply_markup: gmailScanKeyboard() },
       });

@@ -15,11 +15,11 @@ import {
   processTelegramPerseoReportMessage,
 } from "../_lib/telegramPerseoReportProcessor.js";
 import {
+  expenseAssistantMenuKeyboard,
   processExpenseAssistantCallback,
   processExpenseAssistantMessage,
   processExpenseAssistantPhoto,
 } from "../_lib/telegramExpenseAssistant.js";
-import { gmailScanKeyboard } from "../_lib/gmailExpenseScanner.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -228,7 +228,7 @@ export default async function handler(req: any, res: any) {
         "revisar correos",
       ].join("\n"),
       telegramExpenseBotToken || telegramBotToken,
-      { reply_markup: gmailScanKeyboard() }
+      { reply_markup: expenseAssistantMenuKeyboard() }
     );
 
     return res.status(200).json({

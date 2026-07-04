@@ -9,7 +9,6 @@ import {
 } from "./telegramMovement.js";
 import { extractExpenseFromImage } from "./expenseImageOcr.js";
 import {
-  gmailScanKeyboard,
   processGmailExpenseCallback,
   scanGmailForExpenses,
 } from "./gmailExpenseScanner.js";
@@ -53,6 +52,7 @@ const CATEGORY_BUTTONS = [
   { label: "Combustible", category: "Combustible", subcategory: "MOVILIZACION", tags: ["COMBUSTIBLE", "MOVILIZACION"] },
   { label: "Transporte", category: "Transporte", subcategory: "MOVILIZACION", tags: ["TRANSPORTE", "MOVILIZACION"] },
   { label: "Proveedor", category: "Proveedor", subcategory: "COMPRAS", tags: ["PROVEEDOR", "COMPRAS"] },
+  { label: "Alimentacion", category: "Alimentacion", subcategory: "COMIDAS", tags: ["ALIMENTACION", "COMIDAS"] },
   { label: "Insumos", category: "Insumos", subcategory: "OPERACION", tags: ["INSUMOS", "OPERACION"] },
   { label: "Personal", category: "Personal", subcategory: "ANTICIPO", tags: ["PERSONAL", "ANTICIPO"] },
   { label: "Servicios", category: "Servicios", subcategory: "FIJOS", tags: ["SERVICIOS", "FIJO"] },
@@ -63,9 +63,10 @@ const RULES = [
   { terms: ["combustible", "gasolina", "diesel", "nafta", "moto"], suggestion: CATEGORY_BUTTONS[0] },
   { terms: ["taxi", "uber", "flete", "envio", "transporte", "bus", "peaje", "parqueo"], suggestion: CATEGORY_BUTTONS[1] },
   { terms: ["proveedor", "compra proveedor", "mercaderia"], suggestion: CATEGORY_BUTTONS[2] },
-  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[3] },
-  { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[4] },
-  { terms: ["luz", "agua", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[5] },
+  { terms: ["encebollado", "cebiche", "ceviche", "almuerzo", "merienda", "desayuno", "comida", "comidas", "colacion", "colada", "cafe", "pan", "bolon", "tigrillo", "chaulafan", "seco", "guatita", "corviche", "empanada", "cola", "gaseosa", "jugo", "agua", "snack", "picada"], suggestion: CATEGORY_BUTTONS[3] },
+  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[4] },
+  { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[5] },
+  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[6] },
 ];
 
 function normalizeText(value: unknown) {
@@ -110,11 +111,14 @@ function isLikelyExpenseText(text: string) {
   const hasExplicitExpenseAction =
     /\b(salida|gasto|egreso|pago|pague|compre|retire|retiro|saque|sacar)\b/.test(normalized);
   const hasKnownExpenseConcept =
-    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|agua|internet|arriendo)\b/.test(normalized);
+    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada)\b/.test(normalized);
+  const hasLocalExpensePhrase =
+    /\b\d+(?:[.,]\d{1,2})?\s+(?:en|de|para|por)\s+[a-z]{3,}/.test(normalized) &&
+    hasKnownExpenseConcept;
   const hasIncomeLanguage =
     /\b(ingreso|deposite|deposito|recibi|recibido|cobre|cobro|venta|vendi|abono|acreditacion)\b/.test(normalized);
 
-  return !hasIncomeLanguage && (hasExplicitExpenseAction || hasKnownExpenseConcept);
+  return !hasIncomeLanguage && (hasExplicitExpenseAction || hasKnownExpenseConcept || hasLocalExpensePhrase);
 }
 
 function makeTags(values: Array<string | undefined | null>) {
@@ -174,12 +178,18 @@ function draftKeyboard(draft: ExpenseDraft) {
 }
 
 function categoryKeyboard(draftId: string) {
+  const rows: any[] = [];
+  for (let index = 0; index < CATEGORY_BUTTONS.length; index += 3) {
+    rows.push(
+      CATEGORY_BUTTONS.slice(index, index + 3).map((item) => ({
+        text: item.label,
+        callback_data: `exp:cat:${draftId}:${item.category}`,
+      }))
+    );
+  }
+
   return {
-    inline_keyboard: [
-      CATEGORY_BUTTONS.slice(0, 3).map((item) => ({ text: item.label, callback_data: `exp:cat:${draftId}:${item.category}` })),
-      CATEGORY_BUTTONS.slice(3, 6).map((item) => ({ text: item.label, callback_data: `exp:cat:${draftId}:${item.category}` })),
-      [{ text: "Otros", callback_data: `exp:cat:${draftId}:Otros` }],
-    ],
+    inline_keyboard: rows,
   };
 }
 
@@ -213,6 +223,11 @@ function isDeleteRequest(text: string) {
   return /^\/?(eliminar|borrar|anular)\b/i.test(normalizeText(text));
 }
 
+function isMenuRequest(text: string) {
+  const normalized = normalizeText(text);
+  return /^\/?(start|menu|ayuda|help|botones|opciones)\b/.test(normalized);
+}
+
 function isGmailScanRequest(text: string) {
   const normalized = normalizeText(text);
   if (!/\b(correo|correos|gmail|mail)\b/.test(normalized)) return false;
@@ -232,7 +247,8 @@ function gmailScanDetails(result: Awaited<ReturnType<typeof scanGmailForExpenses
     .slice(0, 3)
     .map((item) => {
       const amountText = item.amounts?.length ? ` | montos: ${item.amounts.join(", ")}` : "";
-      return `- ${item.reason}: ${item.subject || item.from || "correo sin asunto"}${amountText}`;
+      const imageText = item.imageParts ? ` | imagenes OCR: ${item.imageParts}` : "";
+      return `- ${item.reason}: ${item.subject || item.from || "correo sin asunto"}${amountText}${imageText}`;
     });
 
   return [
@@ -241,6 +257,43 @@ function gmailScanDetails(result: Awaited<ReturnType<typeof scanGmailForExpenses
     examples.length ? "Ejemplos revisados:" : "",
     ...examples,
   ].filter(Boolean);
+}
+
+function assistantMenuText() {
+  return [
+    "Botones disponibles.",
+    "",
+    "Gmail:",
+    "- Revisar Gmail: busca movimientos recientes.",
+    "- Revision amplia Gmail: revisa mas correos si no salio nada.",
+    "- Ver pendientes: reenvia gastos detectados sin confirmar.",
+    "",
+    "Gastos:",
+    "- Envia una captura/comprobante y te propongo el gasto.",
+    "- Escribe: 5 en encebollado",
+    "- Escribe: combustible 20 tienda",
+    "- Escribe: taxi 8 banco",
+    "- Escribe: salida proveedor 50 transito",
+    "- Eliminar ultimo: borra la ultima salida creada por este bot.",
+  ].join("\n");
+}
+
+export function expenseAssistantMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "Revisar Gmail", callback_data: "gmail:scanMore" },
+        { text: "Ver pendientes", callback_data: "gmail:pending" },
+      ],
+      [
+        { text: "Revision amplia Gmail", callback_data: "gmail:scanDeep" },
+      ],
+      [
+        { text: "Eliminar ultimo", callback_data: "exp:deleteLast" },
+        { text: "Ayuda", callback_data: "exp:help" },
+      ],
+    ],
+  };
 }
 
 function parseDeleteMovementId(text: string) {
@@ -452,11 +505,21 @@ export async function processExpenseAssistantMessage(params: {
   botToken?: string;
 }) {
   const text = String(params.message.text || params.message.caption || "").trim();
+  if (isMenuRequest(text)) {
+    await sendTelegramMessage(
+      params.chatId,
+      assistantMenuText(),
+      params.botToken,
+      { reply_markup: expenseAssistantMenuKeyboard() }
+    );
+    return { handled: true, menu: true };
+  }
+
   if (isGmailScanRequest(text)) {
     try {
       const config = getTelegramConfig();
       const result = await scanGmailForExpenses({
-        maxResults: 25,
+        maxResults: /\b(amplia|profunda|mas|más|todos|todo)\b/i.test(normalizeText(text)) ? 100 : 25,
         botToken: params.botToken || config.telegramExpenseBotToken || config.telegramBotToken,
         notificationChatId: params.chatId,
       });
@@ -472,7 +535,7 @@ export async function processExpenseAssistantMessage(params: {
           ...gmailScanDetails(result),
         ].join("\n"),
         params.botToken,
-        { reply_markup: gmailScanKeyboard() }
+        { reply_markup: expenseAssistantMenuKeyboard() }
       );
 
       return { handled: true, gmailScan: true, result };
@@ -574,7 +637,7 @@ export async function processExpenseAssistantPhoto(params: {
         params.chatId,
         imageRejectedText(extraction),
         params.botToken,
-        { reply_markup: gmailScanKeyboard() }
+        { reply_markup: expenseAssistantMenuKeyboard() }
       );
       return { handled: true, imageExpense: false, extraction };
     }
@@ -660,6 +723,35 @@ export async function processExpenseAssistantCallback(params: {
     callbackQueryId: params.callbackQuery.id,
     botToken: params.botToken,
   });
+
+  if (action === "help" || action === "menu") {
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: assistantMenuText(),
+        botToken: params.botToken,
+        extraPayload: { reply_markup: expenseAssistantMenuKeyboard() },
+      });
+    }
+    return { handled: true, menu: true };
+  }
+
+  if (action === "deleteLast") {
+    const movement = chatId ? await findLastExpenseMovementForChat(chatId) : null;
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: movement
+          ? movementDeleteText(movement.id, movement.data)
+          : "No encontre una salida reciente de este bot para eliminar.",
+        botToken: params.botToken,
+        extraPayload: movement ? { reply_markup: deleteMovementKeyboard(movement.id) } : { reply_markup: expenseAssistantMenuKeyboard() },
+      });
+    }
+    return { handled: true, deleteRequest: true, movementId: movement?.id || null, found: Boolean(movement) };
+  }
 
   if (action === "deleteAsk") {
     const movement = await getExpenseMovementForChat(draftId, chatId);

@@ -81,8 +81,9 @@ Objetivo:
 - El anio operativo actual es 2026. Si una fecha trae 03/07/2026, devuelve 2026-07-03. Si trae 03/07/26, tambien es 2026-07-03.
 - Devuelve amount como numero decimal positivo, sin simbolos.
 - La descripcion debe ser util para revisar: banco/proveedor/beneficiario/documento/cuenta si aparecen.
-- Categoria sugerida debe ser una de: Combustible, Transporte, Proveedor, Insumos, Personal, Servicios, Otros.
+- Categoria sugerida debe ser una de: Combustible, Transporte, Proveedor, Alimentacion, Insumos, Personal, Servicios, Otros.
 - Para pagos o transferencias a empresas/proveedores, usa Proveedor / COMPRAS.
+- Para comidas locales como encebollado, ceviche/cebiche, almuerzo, merienda, desayuno, cafe, bolon, tigrillo, seco, guatita, cola, jugo o snacks, usa Alimentacion / COMIDAS.
 - Incluye extractedText con el texto que pudiste leer.
 - Devuelve solo JSON valido.
 
