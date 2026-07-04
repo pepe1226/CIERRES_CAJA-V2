@@ -211,6 +211,7 @@ export default async function handler(req: any, res: any) {
         "combustible 20 tienda",
         "taxi 8 banco",
         "salida proveedor 50 transito",
+        "revisar correos",
       ].join("\n"),
       telegramExpenseBotToken || telegramBotToken,
       { reply_markup: gmailScanKeyboard() }

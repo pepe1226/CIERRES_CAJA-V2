@@ -233,7 +233,10 @@ function isDeleteRequest(text: string) {
 }
 
 function isGmailScanRequest(text: string) {
-  return /^\/?(revisar|buscar|scan)\s+(correo|correos|gmail)\b/i.test(normalizeText(text));
+  const normalized = normalizeText(text);
+  if (!/\b(correo|correos|gmail|mail)\b/.test(normalized)) return false;
+
+  return /\b(revisar|buscar|scan|ver|mostrar|relacionar|vincular|cruzar|gastos|movimientos)\b/.test(normalized);
 }
 
 function parseDeleteMovementId(text: string) {
