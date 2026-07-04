@@ -2,10 +2,12 @@
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   answerTelegramCallbackQuery,
+  downloadTelegramPhoto,
   editTelegramMessageText,
   getTelegramConfig,
   sendTelegramMessage,
 } from "./telegramMovement.js";
+import { extractExpenseFromImage } from "./expenseImageOcr.js";
 import {
   gmailScanKeyboard,
   processGmailExpenseCallback,
@@ -19,7 +21,7 @@ type ExpenseSuggestion = {
   subcategory: string;
   tags: string[];
   keyword?: string;
-  source: "memory" | "rules" | "default" | "manual";
+  source: "memory" | "rules" | "default" | "manual" | "ocr";
 };
 
 type ExpenseDraft = {
@@ -300,6 +302,23 @@ function draftText(draft: ExpenseDraft) {
   ].join("\n");
 }
 
+function imageRejectedText(extraction: Awaited<ReturnType<typeof extractExpenseFromImage>>) {
+  const reasons = extraction.reasons?.length
+    ? extraction.reasons.map((reason) => `- ${reason}`).join("\n")
+    : "- No encontre una salida clara.";
+
+  return [
+    "Revise la captura, pero no voy a registrar nada sin una salida clara.",
+    extraction.amount ? `Monto leido: USD ${extraction.amount.toFixed(2)}` : "Monto leido: no detectado",
+    `Tipo detectado: ${extraction.movementType}`,
+    "",
+    "Motivos:",
+    reasons,
+    "",
+    "Si es un gasto, escribe algo como: salida proveedor 186.37 banco",
+  ].join("\n");
+}
+
 async function saveDraft(draft: ExpenseDraft) {
   const db = getFirebaseAdminDb();
   const ref = db.collection("telegram_expense_drafts").doc();
@@ -553,6 +572,96 @@ export async function processExpenseAssistantMessage(params: {
   });
 
   return { handled: true, draftId: draft.id };
+}
+
+export async function processExpenseAssistantPhoto(params: {
+  chatId: number | string;
+  message: any;
+  largestPhoto: any;
+  botToken?: string;
+}) {
+  if (!params.largestPhoto?.file_id) return { handled: false };
+
+  try {
+    const downloaded = await downloadTelegramPhoto(params.largestPhoto.file_id, params.botToken);
+    const caption = String(params.message.caption || "").trim();
+    const extraction = await extractExpenseFromImage({
+      imageBuffer: downloaded.imageBuffer,
+      mimeType: downloaded.mimeType,
+      contextText: caption,
+    });
+
+    const isExpense =
+      extraction.isFinancialMovement &&
+      ["outflow", "transfer"].includes(extraction.movementType) &&
+      Number(extraction.amount || 0) > 0;
+
+    if (!isExpense) {
+      await sendTelegramMessage(
+        params.chatId,
+        imageRejectedText(extraction),
+        params.botToken,
+        { reply_markup: gmailScanKeyboard() }
+      );
+      return { handled: true, imageExpense: false, extraction };
+    }
+
+    const normalizedText = normalizeText([
+      caption,
+      extraction.description,
+      extraction.extractedText,
+    ].filter(Boolean).join(" "));
+    const suggestion = await suggestExpense(normalizedText);
+    const category = extraction.category || suggestion.category;
+    const subcategory = extraction.subcategory || suggestion.subcategory || "GENERAL";
+    const description = (
+      extraction.description ||
+      caption ||
+      "Gasto detectado desde captura"
+    ).replace(/\s+/g, " ").slice(0, 180);
+
+    const draft = await saveDraft({
+      chatId: String(params.chatId),
+      messageId: params.message.message_id || null,
+      telegramUserId: params.message.from?.id ? String(params.message.from.id) : null,
+      telegramUserName: params.message.from?.username || null,
+      telegramFirstName: params.message.from?.first_name || null,
+      text: caption || extraction.extractedText || extraction.description,
+      normalizedText,
+      amount: Number(extraction.amount),
+      from: extraction.suggestedFrom || parseCaja(normalizedText),
+      category,
+      subcategory,
+      tags: makeTags([
+        ...(extraction.tags || []),
+        category,
+        subcategory,
+        "OCR",
+      ]),
+      description,
+      status: "pending",
+      suggestionSource: "ocr",
+      suggestionKeyword: extraction.merchant || null,
+    });
+
+    await sendTelegramMessage(params.chatId, draftText(draft), params.botToken, {
+      reply_markup: draftKeyboard(draft),
+    });
+
+    return { handled: true, imageExpense: true, draftId: draft.id, extraction };
+  } catch (error: any) {
+    await sendTelegramMessage(
+      params.chatId,
+      [
+        "No pude leer la captura automaticamente.",
+        error?.message || String(error),
+        "",
+        "Puedes escribir el gasto manualmente, por ejemplo: salida proveedor 186.37 banco",
+      ].join("\n"),
+      params.botToken
+    );
+    return { handled: true, imageExpense: false, error: error?.message || String(error) };
+  }
 }
 
 export async function processExpenseAssistantCallback(params: {

@@ -7,6 +7,7 @@ import {
   getTelegramConfig,
   sendTelegramMessage,
 } from "./telegramMovement.js";
+import { extractExpenseFromImage } from "./expenseImageOcr.js";
 
 type CajaId = "safe" | "transit" | "bank";
 
@@ -38,6 +39,7 @@ type GmailDiagnostic = {
   from: string;
   snippet: string;
   amounts: number[];
+  imageParts?: number;
 };
 
 type GmailScanResult = {
@@ -139,6 +141,11 @@ function decodeBase64Url(value: string) {
   return Buffer.from(normalized, "base64").toString("utf8");
 }
 
+function decodeBase64UrlBuffer(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized, "base64");
+}
+
 function getHeader(message: GmailMessage, name: string) {
   const headers = Array.isArray(message.payload?.headers) ? message.payload.headers : [];
   const found = headers.find((header: any) => String(header.name || "").toLowerCase() === name.toLowerCase());
@@ -154,6 +161,22 @@ function collectBodyParts(part: any, output: string[] = []) {
 
   if (Array.isArray(part.parts)) {
     part.parts.forEach((child: any) => collectBodyParts(child, output));
+  }
+
+  return output;
+}
+
+function collectImageParts(part: any, output: any[] = []) {
+  if (!part) return output;
+
+  const mimeType = String(part.mimeType || "").toLowerCase();
+  const size = Number(part.body?.size || 0);
+  if (mimeType.startsWith("image/") && size >= 4000) {
+    output.push(part);
+  }
+
+  if (Array.isArray(part.parts)) {
+    part.parts.forEach((child: any) => collectImageParts(child, output));
   }
 
   return output;
@@ -280,6 +303,111 @@ function analyzePichinchaExpense(message: GmailMessage): { expense: ParsedBankEx
 
 function parsePichinchaExpense(message: GmailMessage): ParsedBankExpense | null {
   return analyzePichinchaExpense(message).expense;
+}
+
+async function readGmailImagePart(params: {
+  messageId: string;
+  part: any;
+  accessToken: string;
+}) {
+  const mimeType = String(params.part.mimeType || "image/jpeg").split(";")[0].trim().toLowerCase();
+  const inlineData = params.part.body?.data ? String(params.part.body.data) : "";
+  if (inlineData) {
+    return { imageBuffer: decodeBase64UrlBuffer(inlineData), mimeType };
+  }
+
+  const attachmentId = params.part.body?.attachmentId ? String(params.part.body.attachmentId) : "";
+  if (!attachmentId) return null;
+
+  const attachment = await gmailApi<{ data?: string }>(
+    `messages/${params.messageId}/attachments/${attachmentId}`,
+    params.accessToken
+  );
+  if (!attachment.data) return null;
+
+  return { imageBuffer: decodeBase64UrlBuffer(attachment.data), mimeType };
+}
+
+async function parsePichinchaExpenseFromImages(
+  message: GmailMessage,
+  accessToken: string
+): Promise<{ expense: ParsedBankExpense | null; diagnostic: GmailDiagnostic }> {
+  const subject = getHeader(message, "Subject");
+  const from = getHeader(message, "From");
+  const body = collectBodyParts(message.payload).join("\n");
+  const contextText = [subject, from, message.snippet || "", body].join("\n").slice(0, 3000);
+  const imageParts = collectImageParts(message.payload).slice(0, 6);
+  const diagnostic: GmailDiagnostic = {
+    reason: imageParts.length ? "ocr_sin_gasto" : "sin_monto_sin_imagen_ocr",
+    subject: subject.slice(0, 90),
+    from: from.slice(0, 70),
+    snippet: String(message.snippet || "").replace(/\s+/g, " ").slice(0, 120),
+    amounts: [],
+    imageParts: imageParts.length,
+  };
+
+  for (const part of imageParts) {
+    try {
+      const image = await readGmailImagePart({ messageId: message.id, part, accessToken });
+      if (!image) continue;
+
+      const extraction = await extractExpenseFromImage({
+        imageBuffer: image.imageBuffer,
+        mimeType: image.mimeType,
+        contextText,
+      });
+
+      const amount = Number(extraction.amount || 0);
+      if (
+        extraction.isFinancialMovement &&
+        ["outflow", "transfer"].includes(extraction.movementType) &&
+        amount > 0
+      ) {
+        const category = suggestCategory([contextText, extraction.extractedText, extraction.description].join("\n"));
+        const emailDate = extraction.date
+          ? new Date(`${extraction.date}T12:00:00-05:00`)
+          : message.internalDate
+            ? new Date(Number(message.internalDate))
+            : new Date(getHeader(message, "Date") || Date.now());
+        const merchant = extraction.merchant || "Banco Pichincha";
+        const description = [
+          "Pichincha OCR",
+          merchant,
+          extraction.description,
+        ].filter(Boolean).join(" - ").slice(0, 240);
+
+        return {
+          expense: {
+            messageId: message.id,
+            threadId: message.threadId || null,
+            emailDate: Number.isNaN(emailDate.getTime()) ? new Date() : emailDate,
+            subject,
+            from,
+            amount: Number(amount.toFixed(2)),
+            description,
+            category: extraction.category || category.category,
+            subcategory: extraction.subcategory || category.subcategory,
+            tags: Array.from(new Set([...(extraction.tags || []), ...category.tags, "OCR"])).slice(0, 8),
+            rawText: [
+              contextText,
+              "OCR:",
+              extraction.extractedText,
+              extraction.reasons?.join("; ") || "",
+            ].join("\n").slice(0, 3000),
+          },
+          diagnostic: {
+            ...diagnostic,
+            reason: "ocr_detectado",
+            amounts: [Number(amount.toFixed(2))],
+          },
+        };
+      }
+    } catch (error) {
+      console.error("No pude leer imagen Gmail con OCR:", error);
+    }
+  }
+
+  return { expense: null, diagnostic };
 }
 
 async function movementAlreadyExists(expense: ParsedBankExpense) {
@@ -549,8 +677,18 @@ export async function scanGmailForExpenses(params: {
       `messages/${item.id}?${new URLSearchParams({ format: "full" })}`,
       accessToken
     );
-    const analysis = analyzePichinchaExpense(message);
-    const parsed = analysis.expense;
+    let analysis = analyzePichinchaExpense(message);
+    let parsed = analysis.expense;
+
+    if (!parsed && analysis.diagnostic.reason === "sin_monto") {
+      const ocrAnalysis = await parsePichinchaExpenseFromImages(message, accessToken);
+      if (ocrAnalysis.expense) {
+        analysis = ocrAnalysis;
+        parsed = ocrAnalysis.expense;
+      } else if (ocrAnalysis.diagnostic.imageParts || ocrAnalysis.diagnostic.reason === "sin_monto_sin_imagen_ocr") {
+        analysis = ocrAnalysis;
+      }
+    }
 
     if (!parsed) {
       addSkipped(analysis.diagnostic.reason);

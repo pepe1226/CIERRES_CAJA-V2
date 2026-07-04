@@ -17,6 +17,7 @@ import {
 import {
   processExpenseAssistantCallback,
   processExpenseAssistantMessage,
+  processExpenseAssistantPhoto,
 } from "../_lib/telegramExpenseAssistant.js";
 import { gmailScanKeyboard } from "../_lib/gmailExpenseScanner.js";
 
@@ -192,6 +193,19 @@ export default async function handler(req: any, res: any) {
   }
 
   if (isExpenseBotRequest) {
+    if (largestPhoto?.file_id) {
+      const photoResult = await processExpenseAssistantPhoto({
+        chatId,
+        message,
+        largestPhoto,
+        botToken: telegramExpenseBotToken || telegramBotToken,
+      });
+
+      if (photoResult.handled) {
+        return res.status(200).json(photoResult);
+      }
+    }
+
     const assistantResult = await processExpenseAssistantMessage({
       chatId,
       message,
