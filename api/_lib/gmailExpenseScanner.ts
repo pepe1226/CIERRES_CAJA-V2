@@ -226,6 +226,9 @@ function suggestCategory(text: string) {
   if (/\b(primax|terpel|gasolina|combustible|diesel|estacion de servicio)\b/.test(normalized)) {
     return { category: "Combustible", subcategory: "MOVILIZACION", tags: ["COMBUSTIBLE", "MOVILIZACION"] };
   }
+  if (/\b(gasto personal|gastos personales|retiro personal|para mi|mio|personal mio|uso personal)\b/.test(normalized)) {
+    return { category: "Gastos personales", subcategory: "GENERAL PERSONAL", tags: ["PERSONAL"] };
+  }
   if (/\b(taxi|uber|transporte|peaje|parqueo)\b/.test(normalized)) {
     return { category: "Transporte", subcategory: "MOVILIZACION", tags: ["TRANSPORTE", "MOVILIZACION"] };
   }

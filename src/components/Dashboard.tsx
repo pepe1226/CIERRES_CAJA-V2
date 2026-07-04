@@ -14,7 +14,7 @@ import {
   LineChart,
   Line
 } from 'recharts';
-import { format, parseISO, startOfMonth, endOfMonth, isWithinInterval, startOfDay, endOfDay, subDays } from 'date-fns';
+import { format, parseISO, startOfMonth, endOfMonth, isWithinInterval, startOfDay, endOfDay, subDays, subMonths, startOfYear, endOfYear } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { ShiftClosure, Movement } from '../types';
 import { 
@@ -47,12 +47,80 @@ interface DashboardProps {
 }
 
 const COLORS = ['#3B82F6', '#8B5CF6', '#EC4899', '#F59E0B', '#10B981', '#6366F1', '#F43F5E', '#84CC16'];
+type DateRangeType = 'semana' | 'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom';
+
+const normalizeLabel = (value?: string | null) =>
+  String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const categoryAliases: Array<{ name: string; match: string[] }> = [
+  { name: 'Gastos personales', match: ['gasto personal', 'gastos personales', 'personal propietario', 'retiro personal', 'retiros personales'] },
+  { name: 'Sueldos y personal', match: ['sueldos', 'sueldo', 'nomina', 'anticipo empleado', 'empleado'] },
+  { name: 'Alimentacion', match: ['alimentacion', 'comida', 'comidas', 'almuerzo', 'merienda', 'desayuno'] },
+  { name: 'Combustible', match: ['combustible', 'gasolina', 'diesel'] },
+  { name: 'Transporte', match: ['transporte', 'movilizacion', 'taxi', 'flete', 'uber'] },
+  { name: 'Proveedores', match: ['proveedor', 'proveedores', 'compras', 'mercaderia'] },
+  { name: 'Servicios basicos', match: ['servicios', 'servicios basicos', 'luz', 'agua', 'internet', 'conectividad'] },
+  { name: 'Insumos operativos', match: ['insumos', 'insumo', 'operacion', 'materiales', 'papeleria', 'limpieza'] },
+  { name: 'Mantenimiento', match: ['mantenimiento', 'reparacion', 'arreglo'] },
+  { name: 'Banco y comisiones', match: ['banco', 'comisiones', 'comision bancaria'] },
+  { name: 'Impuestos', match: ['impuestos', 'sri', 'iva', 'municipio'] },
+];
+
+const canonicalCategory = (movement: Movement) => {
+  const source = [
+    movement.category,
+    movement.subcategory,
+    ...(movement.tags || []),
+    movement.description,
+  ].map(normalizeLabel).join(' ');
+  const matched = categoryAliases.find(group => group.match.some(term => source.includes(normalizeLabel(term))));
+  return matched?.name || movement.category || 'Sin clasificar';
+};
+
+const canonicalSubcategory = (movement: Movement) => {
+  if (movement.subcategory) return movement.subcategory;
+  if (canonicalCategory(movement) === 'Gastos personales') return 'GENERAL PERSONAL';
+  return 'GENERAL';
+};
 
 export function Dashboard({ closures, movements, onBack }: DashboardProps) {
   const [showHistory, setShowHistory] = useState(false);
-  const [dateRangeType, setDateRangeType] = useState<'semana' | 'mes' | 'siempre' | 'custom'>('mes');
+  const [dateRangeType, setDateRangeType] = useState<DateRangeType>('este_mes');
   const [startDate, setStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
+
+  const applyRange = (range: DateRangeType) => {
+    const today = new Date();
+    const previousMonth = subMonths(today, 1);
+
+    if (range === 'semana') {
+      setStartDate(format(subDays(today, 7), 'yyyy-MM-dd'));
+      setEndDate(format(today, 'yyyy-MM-dd'));
+    }
+
+    if (range === 'este_mes') {
+      setStartDate(format(startOfMonth(today), 'yyyy-MM-dd'));
+      setEndDate(format(endOfMonth(today), 'yyyy-MM-dd'));
+    }
+
+    if (range === 'mes_pasado') {
+      setStartDate(format(startOfMonth(previousMonth), 'yyyy-MM-dd'));
+      setEndDate(format(endOfMonth(previousMonth), 'yyyy-MM-dd'));
+    }
+
+    if (range === 'anio_actual') {
+      setStartDate(format(startOfYear(today), 'yyyy-MM-dd'));
+      setEndDate(format(endOfYear(today), 'yyyy-MM-dd'));
+    }
+
+    setDateRangeType(range);
+  };
 
   const isWithinDashboardRange = (dateString: string) => {
     if (dateRangeType === 'siempre') return true;
@@ -89,13 +157,22 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return `${format(parsedStart, 'dd/MM/yyyy')} — ${format(parsedEnd, 'dd/MM/yyyy')}`;
   }, [startDate, endDate, dateRangeType]);
 
+  const periodTitle = useMemo(() => {
+    if (dateRangeType === 'semana') return 'Ultimos 7 dias';
+    if (dateRangeType === 'este_mes') return 'Este mes';
+    if (dateRangeType === 'mes_pasado') return 'Mes pasado';
+    if (dateRangeType === 'anio_actual') return 'Anio actual';
+    if (dateRangeType === 'siempre') return 'Todo el historial';
+    return 'Periodo especifico';
+  }, [dateRangeType]);
+
   // 1. Gastos por Categoría (Outflows)
   const expensesByCategory = useMemo(() => {
     const data: Record<string, number> = {};
     filteredMovements
       .filter(m => m.type === 'outflow')
       .forEach(m => {
-        const cat = m.category || 'GENERAL';
+        const cat = canonicalCategory(m);
         data[cat] = (data[cat] || 0) + m.amount;
       });
     
@@ -258,10 +335,12 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-xs font-bold text-slate-500 uppercase">Gastos totales <span className="text-amber-400">★</span></p>
+                  <p className="text-[11px] font-black text-blue-600 uppercase tracking-widest">{periodTitle}</p>
                   <div className="flex items-center gap-2 mt-1">
                     <p className="text-3xl font-black tracking-tight">${totalExpenses.toLocaleString('es-CL')}</p>
                     <Eye className="w-5 h-5 text-blue-600" />
                   </div>
+                  <p className="text-[11px] font-bold text-slate-400 mt-1">{dateRangeLabel}</p>
                   <p className="text-[11px] font-bold text-slate-400 mt-1">Balance periodo: ${netBalance.toLocaleString('es-CL')}</p>
                 </div>
                 <button
@@ -273,6 +352,42 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                   Compartir cuenta
                 </button>
               </div>
+            </div>
+
+            <div className="px-4 py-3 bg-white border-t border-slate-200">
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { label: 'Este mes', value: 'este_mes' as DateRangeType },
+                  { label: 'Mes pasado', value: 'mes_pasado' as DateRangeType },
+                  { label: 'Anio actual', value: 'anio_actual' as DateRangeType },
+                  { label: 'Periodo', value: 'custom' as DateRangeType },
+                ].map(option => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => option.value === 'custom' ? setDateRangeType('custom') : applyRange(option.value)}
+                    className={`min-h-[34px] rounded-lg border px-2 text-[10px] font-black uppercase tracking-widest transition-colors ${dateRangeType === option.value ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 bg-slate-50 text-slate-500 hover:border-blue-200'}`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              {dateRangeType === 'custom' && (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={e => setStartDate(e.target.value)}
+                    className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-[11px] font-bold text-slate-700 outline-none focus:border-blue-500"
+                  />
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={e => setEndDate(e.target.value)}
+                    className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-2 py-2 text-[11px] font-bold text-slate-700 outline-none focus:border-blue-500"
+                  />
+                </div>
+              )}
             </div>
 
             <div className="grid grid-cols-4 gap-4 px-7 py-4 border-y border-slate-200 bg-slate-50">
@@ -362,25 +477,31 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
-              onClick={() => {
-                setStartDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
-                setEndDate(format(new Date(), 'yyyy-MM-dd'));
-                setDateRangeType('semana');
-              }}
+              onClick={() => applyRange('semana')}
               className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'semana' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
             >
               Semana
             </button>
             <button
               type="button"
-              onClick={() => {
-                setStartDate(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
-                setEndDate(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
-                setDateRangeType('mes');
-              }}
-              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'mes' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
+              onClick={() => applyRange('este_mes')}
+              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'este_mes' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
             >
               Este Mes
+            </button>
+            <button
+              type="button"
+              onClick={() => applyRange('mes_pasado')}
+              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'mes_pasado' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
+            >
+              Mes Pasado
+            </button>
+            <button
+              type="button"
+              onClick={() => applyRange('anio_actual')}
+              className={`px-4 py-2 rounded-xl text-xs font-black uppercase transition-all ${dateRangeType === 'anio_actual' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}
+            >
+              Anio Actual
             </button>
             <button
               type="button"
@@ -514,9 +635,9 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                   <BarChart data={(() => {
                     const data: Record<string, number> = {};
                     filteredMovements
-                      .filter(m => m.type === 'outflow' && m.subcategory)
+                      .filter(m => m.type === 'outflow')
                       .forEach(m => {
-                        const sub = m.subcategory!;
+                        const sub = canonicalSubcategory(m);
                         data[sub] = (data[sub] || 0) + m.amount;
                       });
                     return Object.entries(data)

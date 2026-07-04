@@ -205,6 +205,7 @@ type ExpenseClassificationRule = {
   terms: string[];
 };
 const EXPENSE_CLASSIFICATION_RULES: ExpenseClassificationRule[] = [
+  { category: 'Gastos personales', subcategory: 'GENERAL PERSONAL', tags: ['PERSONAL'], terms: ['gasto personal', 'gastos personales', 'retiro personal', 'para mi', 'mio', 'personal mio', 'personal jose', 'uso personal'] },
   { category: 'Sueldos', subcategory: 'NOMINA', tags: ['PERSONAL', 'SUELDOS'], terms: ['sueldo', 'salario', 'nomina', 'pago empleado', 'anticipo', 'decimo', 'beneficio'] },
   { category: 'Arriendo', subcategory: 'LOCAL', tags: ['LOCAL', 'FIJO'], terms: ['arriendo', 'alquiler', 'renta', 'local'] },
   { category: 'Luz', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['luz', 'energia', 'electrica', 'empresa electrica'] },
@@ -390,7 +391,7 @@ function AppContent() {
   const [viewingCajaMovements, setViewingCajaMovements] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, caja: string } | null>(null);
 
-  const [categories, setCategories] = useState<string[]>(['Sueldos', 'Arriendo', 'Luz', 'Agua', 'Internet', 'Insumos', 'Otros']);
+  const [categories, setCategories] = useState<string[]>(['Gastos personales', 'Sueldos', 'Arriendo', 'Luz', 'Agua', 'Internet', 'Insumos', 'Otros']);
   const [subcategories, setSubcategories] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);

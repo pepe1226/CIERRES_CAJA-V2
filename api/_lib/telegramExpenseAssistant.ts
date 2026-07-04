@@ -49,24 +49,26 @@ type ExpenseDraft = {
 };
 
 const CATEGORY_BUTTONS = [
+  { label: "Personal", category: "Gastos personales", subcategory: "GENERAL PERSONAL", tags: ["PERSONAL"] },
   { label: "Combustible", category: "Combustible", subcategory: "MOVILIZACION", tags: ["COMBUSTIBLE", "MOVILIZACION"] },
   { label: "Transporte", category: "Transporte", subcategory: "MOVILIZACION", tags: ["TRANSPORTE", "MOVILIZACION"] },
   { label: "Proveedor", category: "Proveedor", subcategory: "COMPRAS", tags: ["PROVEEDOR", "COMPRAS"] },
   { label: "Alimentacion", category: "Alimentacion", subcategory: "COMIDAS", tags: ["ALIMENTACION", "COMIDAS"] },
   { label: "Insumos", category: "Insumos", subcategory: "OPERACION", tags: ["INSUMOS", "OPERACION"] },
-  { label: "Personal", category: "Personal", subcategory: "ANTICIPO", tags: ["PERSONAL", "ANTICIPO"] },
+  { label: "Empleados", category: "Personal", subcategory: "ANTICIPO", tags: ["EMPLEADOS", "ANTICIPO"] },
   { label: "Servicios", category: "Servicios", subcategory: "FIJOS", tags: ["SERVICIOS", "FIJO"] },
   { label: "Otros", category: "Otros", subcategory: "GENERAL", tags: ["SIN CLASIFICAR"] },
 ];
 
 const RULES = [
-  { terms: ["combustible", "gasolina", "diesel", "nafta", "moto"], suggestion: CATEGORY_BUTTONS[0] },
-  { terms: ["taxi", "uber", "flete", "envio", "transporte", "bus", "peaje", "parqueo"], suggestion: CATEGORY_BUTTONS[1] },
-  { terms: ["proveedor", "compra proveedor", "mercaderia"], suggestion: CATEGORY_BUTTONS[2] },
-  { terms: ["encebollado", "cebiche", "ceviche", "almuerzo", "merienda", "desayuno", "comida", "comidas", "colacion", "colada", "cafe", "pan", "bolon", "tigrillo", "chaulafan", "seco", "guatita", "corviche", "empanada", "cola", "gaseosa", "jugo", "agua", "snack", "picada"], suggestion: CATEGORY_BUTTONS[3] },
-  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[4] },
-  { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[5] },
-  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[6] },
+  { terms: ["gasto personal", "gastos personales", "retiro personal", "para mi", "mio", "personal mio", "uso personal"], suggestion: CATEGORY_BUTTONS[0] },
+  { terms: ["combustible", "gasolina", "diesel", "nafta", "moto"], suggestion: CATEGORY_BUTTONS[1] },
+  { terms: ["taxi", "uber", "flete", "envio", "transporte", "bus", "peaje", "parqueo"], suggestion: CATEGORY_BUTTONS[2] },
+  { terms: ["proveedor", "compra proveedor", "mercaderia"], suggestion: CATEGORY_BUTTONS[3] },
+  { terms: ["encebollado", "cebiche", "ceviche", "almuerzo", "merienda", "desayuno", "comida", "comidas", "colacion", "colada", "cafe", "pan", "bolon", "tigrillo", "chaulafan", "seco", "guatita", "corviche", "empanada", "cola", "gaseosa", "jugo", "agua", "snack", "picada"], suggestion: CATEGORY_BUTTONS[4] },
+  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[5] },
+  { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[6] },
+  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[7] },
 ];
 
 function normalizeText(value: unknown) {
@@ -111,7 +113,7 @@ function isLikelyExpenseText(text: string) {
   const hasExplicitExpenseAction =
     /\b(salida|gasto|egreso|pago|pague|compre|retire|retiro|saque|sacar)\b/.test(normalized);
   const hasKnownExpenseConcept =
-    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada)\b/.test(normalized);
+    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada|gasto personal|gastos personales|retiro personal|para mi|mio|uso personal)\b/.test(normalized);
   const hasLocalExpensePhrase =
     /\b\d+(?:[.,]\d{1,2})?\s+(?:en|de|para|por)\s+[a-z]{3,}/.test(normalized) &&
     hasKnownExpenseConcept;
