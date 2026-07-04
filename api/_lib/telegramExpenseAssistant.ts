@@ -13,6 +13,10 @@ import {
   processGmailExpenseCallback,
   scanGmailForExpenses,
 } from "./gmailExpenseScanner.js";
+import {
+  findExpenseMemorySuggestion,
+  learnExpenseMemory,
+} from "./expenseMemory.js";
 
 type CajaId = "safe" | "transit" | "bank";
 
@@ -123,33 +127,6 @@ function makeTags(values: Array<string | undefined | null>) {
   ).slice(0, 8);
 }
 
-async function findMemorySuggestion(normalizedText: string): Promise<ExpenseSuggestion | null> {
-  const db = getFirebaseAdminDb();
-  const snapshot = await db
-    .collection("expense_category_memory")
-    .orderBy("uses", "desc")
-    .limit(100)
-    .get();
-
-  for (const doc of snapshot.docs) {
-    const data = doc.data();
-    const keyword = normalizeText(data.keyword);
-    if (!keyword) continue;
-
-    if (normalizedText.includes(keyword)) {
-      return {
-        category: String(data.category || "Otros"),
-        subcategory: String(data.subcategory || "GENERAL"),
-        tags: Array.isArray(data.tags) ? data.tags.map(String) : ["SIN CLASIFICAR"],
-        keyword,
-        source: "memory",
-      };
-    }
-  }
-
-  return null;
-}
-
 function ruleSuggestion(normalizedText: string): ExpenseSuggestion {
   const rule = RULES.find((item) => item.terms.some((term) => normalizedText.includes(term)));
   if (!rule) {
@@ -170,8 +147,10 @@ function ruleSuggestion(normalizedText: string): ExpenseSuggestion {
   };
 }
 
-async function suggestExpense(normalizedText: string) {
-  return (await findMemorySuggestion(normalizedText)) || ruleSuggestion(normalizedText);
+async function suggestExpense(normalizedText: string, extraValues: Array<unknown> = []) {
+  const memorySuggestion = await findExpenseMemorySuggestion([normalizedText, ...extraValues]);
+  if (memorySuggestion) return { ...memorySuggestion, source: "memory" as const };
+  return ruleSuggestion(normalizedText);
 }
 
 function draftKeyboard(draft: ExpenseDraft) {
@@ -349,26 +328,20 @@ async function getDraft(draftId: string): Promise<ExpenseDraft | null> {
   return doc.exists ? ({ id: doc.id, ...doc.data() } as ExpenseDraft) : null;
 }
 
-async function learnFromDraft(draft: ExpenseDraft) {
-  const keyword = normalizeKeyword(draft.text);
-  if (!keyword || draft.category === "Otros") return;
-
-  const db = getFirebaseAdminDb();
-  const key = keyword.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
-  if (!key) return;
-
-  await db.collection("expense_category_memory").doc(key).set(
-    {
-      keyword,
-      category: draft.category,
-      subcategory: draft.subcategory || "GENERAL",
-      tags: draft.tags || [],
-      uses: FieldValue.increment(1),
-      lastUsedAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
+async function learnFromDraft(draft: ExpenseDraft, movementId?: string) {
+  await learnExpenseMemory({
+    keywords: [
+      draft.suggestionKeyword,
+      draft.description,
+      draft.text,
+      normalizeKeyword(draft.text),
+    ],
+    category: draft.category,
+    subcategory: draft.subcategory || "GENERAL",
+    tags: draft.tags || [],
+    movementId: movementId || draft.movementId || null,
+    source: draft.suggestionSource || "telegram",
+  });
 }
 
 async function getExpenseMovementForChat(movementId: string, chatId?: number | string | null) {
@@ -467,7 +440,7 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
     createdAt: FieldValue.serverTimestamp(),
   });
 
-  await learnFromDraft(draft);
+  await learnFromDraft(draft, ref.id);
   await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id });
 
   return ref.id;
@@ -611,9 +584,13 @@ export async function processExpenseAssistantPhoto(params: {
       extraction.description,
       extraction.extractedText,
     ].filter(Boolean).join(" "));
-    const suggestion = await suggestExpense(normalizedText);
-    const category = extraction.category || suggestion.category;
-    const subcategory = extraction.subcategory || suggestion.subcategory || "GENERAL";
+    const suggestion = await suggestExpense(normalizedText, [
+      extraction.merchant,
+      extraction.destinationAccount,
+      extraction.description,
+    ]);
+    const category = suggestion.source === "memory" ? suggestion.category : extraction.category || suggestion.category;
+    const subcategory = suggestion.source === "memory" ? suggestion.subcategory : extraction.subcategory || suggestion.subcategory || "GENERAL";
     const description = (
       extraction.description ||
       caption ||
@@ -640,8 +617,8 @@ export async function processExpenseAssistantPhoto(params: {
       ]),
       description,
       status: "pending",
-      suggestionSource: "ocr",
-      suggestionKeyword: extraction.merchant || null,
+      suggestionSource: suggestion.source === "memory" ? "memory" : "ocr",
+      suggestionKeyword: extraction.merchant || suggestion.keyword || null,
     });
 
     await sendTelegramMessage(params.chatId, draftText(draft), params.botToken, {

@@ -8,6 +8,10 @@ import {
   sendTelegramMessage,
 } from "./telegramMovement.js";
 import { extractExpenseFromImage } from "./expenseImageOcr.js";
+import {
+  findExpenseMemorySuggestion,
+  learnExpenseMemory,
+} from "./expenseMemory.js";
 
 type CajaId = "safe" | "transit" | "bank";
 
@@ -31,6 +35,8 @@ type ParsedBankExpense = {
   subcategory: string;
   tags: string[];
   rawText: string;
+  merchant?: string | null;
+  memoryKeyword?: string | null;
 };
 
 type GmailDiagnostic = {
@@ -363,7 +369,15 @@ async function parsePichinchaExpenseFromImages(
         ["outflow", "transfer"].includes(extraction.movementType) &&
         amount > 0
       ) {
-        const category = suggestCategory([contextText, extraction.extractedText, extraction.description].join("\n"));
+        const memorySuggestion = await findExpenseMemorySuggestion([
+          extraction.merchant,
+          extraction.destinationAccount,
+          extraction.description,
+          extraction.extractedText,
+          contextText,
+        ]);
+        const ruleCategory = suggestCategory([contextText, extraction.extractedText, extraction.description].join("\n"));
+        const category = memorySuggestion || ruleCategory;
         const emailDate = extraction.date
           ? new Date(`${extraction.date}T12:00:00-05:00`)
           : message.internalDate
@@ -385,8 +399,8 @@ async function parsePichinchaExpenseFromImages(
             from,
             amount: Number(amount.toFixed(2)),
             description,
-            category: extraction.category || category.category,
-            subcategory: extraction.subcategory || category.subcategory,
+            category: memorySuggestion ? memorySuggestion.category : extraction.category || category.category,
+            subcategory: memorySuggestion ? memorySuggestion.subcategory : extraction.subcategory || category.subcategory,
             tags: Array.from(new Set([...(extraction.tags || []), ...category.tags, "OCR"])).slice(0, 8),
             rawText: [
               contextText,
@@ -394,6 +408,8 @@ async function parsePichinchaExpenseFromImages(
               extraction.extractedText,
               extraction.reasons?.join("; ") || "",
             ].join("\n").slice(0, 3000),
+            merchant,
+            memoryKeyword: memorySuggestion?.keyword || null,
           },
           diagnostic: {
             ...diagnostic,
@@ -453,12 +469,14 @@ function candidateTelegramText(candidateId: string, candidate: any) {
     "Posible gasto no registrado.",
     `Fecha: ${candidate.emailDateText}`,
     `Valor: USD ${Number(candidate.amount || 0).toFixed(2)}`,
+    candidate.merchant ? `Beneficiario: ${candidate.merchant}` : "",
     `Categoria sugerida: ${candidate.category || "Otros"}`,
     `Descripcion: ${candidate.description}`,
+    candidate.memoryKeyword ? `Memoria: asociada con "${candidate.memoryKeyword}"` : "",
     `Origen: Gmail / Banco Pichincha`,
     "",
     `Candidato: ${candidateId}`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function candidateKeyboard(candidateId: string) {
@@ -514,6 +532,8 @@ async function saveCandidate(expense: ParsedBankExpense) {
     subcategory: expense.subcategory,
     tags: expense.tags,
     rawText: expense.rawText,
+    merchant: expense.merchant || null,
+    memoryKeyword: expense.memoryKeyword || null,
     duplicateMovement,
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
@@ -644,6 +664,20 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
     },
     { merge: true }
   );
+
+  await learnExpenseMemory({
+    keywords: [
+      candidate.merchant,
+      candidate.description,
+      candidate.rawText,
+      candidate.subject,
+    ],
+    category: candidate.category || "Otros",
+    subcategory: candidate.subcategory || "GENERAL",
+    tags: Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"],
+    movementId: movementRef.id,
+    source: "gmail",
+  });
 
   return { movementId: movementRef.id, candidate };
 }
