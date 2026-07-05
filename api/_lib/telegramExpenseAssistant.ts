@@ -97,6 +97,15 @@ function parseAmount(text: string) {
   return Number.isFinite(amount) && amount > 0 && amount <= 10000 ? Number(amount.toFixed(2)) : 0;
 }
 
+function parseLastAmount(text: string) {
+  const matches = Array.from(String(text || "").matchAll(/(?:\$|usd)?\s*(\d+(?:[.,]\d{1,2})?)/gi));
+  const amounts = matches
+    .map((match) => Number(match[1].replace(",", ".")))
+    .filter((amount) => Number.isFinite(amount) && amount > 0 && amount <= 10000);
+  const amount = amounts[amounts.length - 1] || 0;
+  return amount > 0 ? Number(amount.toFixed(2)) : 0;
+}
+
 function parseCaja(text: string): CajaId | null {
   const normalized = normalizeText(text);
   if (/\b(banco|cuenta|transferencia bancaria)\b/.test(normalized)) return "bank";
@@ -230,6 +239,13 @@ function isMenuRequest(text: string) {
   return /^\/?(start|menu|ayuda|help|botones|opciones)\b/.test(normalized);
 }
 
+function isConversationalCorrectionText(text: string) {
+  const normalized = normalizeText(text);
+  if (!normalized || normalized.startsWith("/")) return false;
+
+  return /\b(no|corrige|corregir|correccion|cambiar|cambia|pon|poner|ajusta|arregla|edita|editar|era|es|son|valor|monto|caja|desde|categoria|subcategoria|descripcion|concepto|detalle|personal|banco|tienda|transito|cancelar|confirma|confirmar|registrar|listo|ok)\b/.test(normalized);
+}
+
 function isGmailScanRequest(text: string) {
   const normalized = normalizeText(text);
   if (!/\b(correo|correos|gmail|mail)\b/.test(normalized)) return false;
@@ -276,6 +292,8 @@ function assistantMenuText() {
     "- Escribe: combustible 20 tienda",
     "- Escribe: taxi 8 banco",
     "- Escribe: salida proveedor 50 transito",
+    "- Si hay una salida pendiente puedes corregir: no, era banco",
+    "- Tambien: el monto era 8.50 / categoria personal / descripcion almuerzo",
     "- Eliminar ultimo: borra la ultima salida creada por este bot.",
   ].join("\n");
 }
@@ -381,6 +399,204 @@ async function updateDraft(draftId: string, values: Partial<ExpenseDraft>) {
 async function getDraft(draftId: string): Promise<ExpenseDraft | null> {
   const doc = await getFirebaseAdminDb().collection("telegram_expense_drafts").doc(draftId).get();
   return doc.exists ? ({ id: doc.id, ...doc.data() } as ExpenseDraft) : null;
+}
+
+async function findLatestPendingDraftForChat(chatId: number | string): Promise<ExpenseDraft | null> {
+  const snapshot = await getFirebaseAdminDb()
+    .collection("telegram_expense_drafts")
+    .orderBy("updatedAt", "desc")
+    .limit(50)
+    .get();
+
+  for (const doc of snapshot.docs) {
+    const data = doc.data();
+    if (String(data.chatId || "") === String(chatId) && data.status === "pending") {
+      return { id: doc.id, ...data } as ExpenseDraft;
+    }
+  }
+
+  return null;
+}
+
+function findCategoryFromText(normalizedText: string) {
+  const byCategory = CATEGORY_BUTTONS.find((item) =>
+    normalizeText(item.category) === normalizedText ||
+    normalizeText(item.label) === normalizedText ||
+    normalizedText.includes(normalizeText(item.category)) ||
+    normalizedText.includes(normalizeText(item.label))
+  );
+  if (byCategory) return byCategory;
+
+  const suggestion = ruleSuggestion(normalizedText);
+  if (suggestion.source === "rules") {
+    return {
+      label: suggestion.category,
+      category: suggestion.category,
+      subcategory: suggestion.subcategory,
+      tags: suggestion.tags,
+    };
+  }
+
+  return null;
+}
+
+function descriptionCorrection(text: string) {
+  const raw = String(text || "").trim();
+  const match = raw.match(/\b(?:descripcion|descripci[oó]n|concepto|detalle)\s*:?\s*(.+)$/i);
+  if (!match) return "";
+  return match[1].replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+function subcategoryCorrection(text: string) {
+  const raw = String(text || "").trim();
+  const match = raw.match(/\b(?:subcategoria|subcategor[ií]a|sub)\s*:?\s*(.+)$/i);
+  if (!match) return "";
+  return normalizeText(match[1]).replace(/\s+/g, " ").toUpperCase().slice(0, 80);
+}
+
+function tagsCorrection(text: string) {
+  const raw = String(text || "").trim();
+  const match = raw.match(/\b(?:etiqueta|etiquetas|tag|tags)\s*:?\s*(.+)$/i);
+  if (!match) return [];
+  return makeTags(match[1].split(/[,/]+/).map((item) => item.trim()));
+}
+
+function correctionHelpText(draft: ExpenseDraft) {
+  return [
+    "Tengo esta salida pendiente y no entendi que cambiar.",
+    "",
+    draftText(draft),
+    "",
+    "Puedes responder asi:",
+    "- no, era banco",
+    "- el monto era 8.50",
+    "- ponlo como personal",
+    "- categoria alimentacion",
+    "- descripcion almuerzo proveedor",
+    "- confirmar",
+    "- cancelar",
+  ].join("\n");
+}
+
+async function processDraftCorrection(params: {
+  chatId: number | string;
+  message: any;
+  botToken?: string;
+  draft: ExpenseDraft;
+  text: string;
+}) {
+  const normalized = normalizeText(params.text);
+
+  if (/\b(cancelar|cancela|anular|olvida)\b/.test(normalized)) {
+    await updateDraft(params.draft.id!, { status: "cancelled" });
+    await sendTelegramMessage(
+      params.chatId,
+      "Salida cancelada. No se guardo ningun movimiento.",
+      params.botToken,
+      { reply_markup: expenseAssistantMenuKeyboard() }
+    );
+    return { handled: true, corrected: true, cancelled: true, draftId: params.draft.id };
+  }
+
+  if (/^(confirmar|confirma|registrar|registra|listo|ok|dale|guardar|guarda)$/.test(normalized)) {
+    try {
+      const movementId = await createMovementFromDraft(params.draft);
+      await sendTelegramMessage(
+        params.chatId,
+        [
+          "Salida registrada.",
+          `Monto: USD ${params.draft.amount.toFixed(2)}`,
+          `Caja: ${cajaLabel(params.draft.from)}`,
+          `Categoria: ${params.draft.category}`,
+          `Movimiento: ${movementId}`,
+        ].join("\n"),
+        params.botToken,
+        { reply_markup: registeredMovementKeyboard(movementId) }
+      );
+      return { handled: true, corrected: true, confirmed: true, movementId };
+    } catch (error: any) {
+      await sendTelegramMessage(
+        params.chatId,
+        `No pude registrar la salida: ${error?.message || String(error)}`,
+        params.botToken,
+        { reply_markup: draftKeyboard(params.draft) }
+      );
+      return { handled: true, corrected: true, error: error?.message || String(error) };
+    }
+  }
+
+  const updates: Partial<ExpenseDraft> = {};
+  const changed: string[] = [];
+  const amount = /\b(monto|valor|total|era|son|es|corrige|cambia)\b/.test(normalized)
+    ? parseLastAmount(normalized)
+    : 0;
+
+  if (amount > 0 && Math.abs(amount - params.draft.amount) > 0.001) {
+    updates.amount = amount;
+    changed.push(`Monto: USD ${amount.toFixed(2)}`);
+  }
+
+  const from = parseCaja(normalized);
+  if (from && from !== params.draft.from) {
+    updates.from = from;
+    changed.push(`Caja: ${cajaLabel(from)}`);
+  }
+
+  const category = findCategoryFromText(normalized);
+  if (category && category.category !== params.draft.category) {
+    updates.category = category.category;
+    updates.subcategory = category.subcategory;
+    updates.tags = makeTags(category.tags);
+    updates.suggestionSource = "manual";
+    updates.suggestionKeyword = category.label;
+    changed.push(`Categoria: ${category.category}`);
+  }
+
+  const newDescription = descriptionCorrection(params.text);
+  if (newDescription && newDescription !== params.draft.description) {
+    updates.description = newDescription;
+    updates.text = `${params.draft.text}\nCorreccion: ${params.text}`.slice(0, 800);
+    updates.normalizedText = normalizeText([params.draft.normalizedText, params.text].join(" "));
+    changed.push(`Descripcion: ${newDescription}`);
+  }
+
+  const subcategory = subcategoryCorrection(params.text);
+  if (subcategory && subcategory !== params.draft.subcategory) {
+    updates.subcategory = subcategory;
+    changed.push(`Subcategoria: ${subcategory}`);
+  }
+
+  const tags = tagsCorrection(params.text);
+  if (tags.length > 0) {
+    updates.tags = makeTags([...(params.draft.tags || []), ...tags]);
+    changed.push(`Etiquetas: ${updates.tags.join(", ")}`);
+  }
+
+  if (changed.length === 0) {
+    await sendTelegramMessage(
+      params.chatId,
+      correctionHelpText(params.draft),
+      params.botToken,
+      { reply_markup: draftKeyboard(params.draft) }
+    );
+    return { handled: true, corrected: false, draftId: params.draft.id };
+  }
+
+  const updatedDraft = { ...params.draft, ...updates };
+  await updateDraft(params.draft.id!, updates);
+  await sendTelegramMessage(
+    params.chatId,
+    [
+      "Correccion aplicada.",
+      ...changed.map((item) => `- ${item}`),
+      "",
+      draftText(updatedDraft),
+    ].join("\n"),
+    params.botToken,
+    { reply_markup: draftKeyboard(updatedDraft) }
+  );
+
+  return { handled: true, corrected: true, draftId: params.draft.id, updates };
 }
 
 async function learnFromDraft(draft: ExpenseDraft, movementId?: string) {
@@ -574,6 +790,19 @@ export async function processExpenseAssistantMessage(params: {
     );
 
     return { handled: true, deleteRequest: true, movementId: movement.id };
+  }
+
+  if (isConversationalCorrectionText(text)) {
+    const pendingDraft = await findLatestPendingDraftForChat(params.chatId);
+    if (pendingDraft) {
+      return processDraftCorrection({
+        chatId: params.chatId,
+        message: params.message,
+        botToken: params.botToken,
+        draft: pendingDraft,
+        text,
+      });
+    }
   }
 
   if (!isLikelyExpenseText(text)) {
