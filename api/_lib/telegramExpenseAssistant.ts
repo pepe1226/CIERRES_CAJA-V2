@@ -371,6 +371,20 @@ function imageRejectedText(extraction: Awaited<ReturnType<typeof extractExpenseF
   ].join("\n");
 }
 
+async function setActiveDraftForChat(chatId: number | string, draftId: string | null) {
+  const db = getFirebaseAdminDb();
+  const ref = db.collection("telegram_expense_active_chats").doc(String(chatId));
+
+  await ref.set(
+    {
+      chatId: String(chatId),
+      draftId,
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
 async function saveDraft(draft: ExpenseDraft) {
   const db = getFirebaseAdminDb();
   const ref = db.collection("telegram_expense_drafts").doc();
@@ -381,6 +395,8 @@ async function saveDraft(draft: ExpenseDraft) {
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   });
+
+  await setActiveDraftForChat(saved.chatId, ref.id);
 
   return saved;
 }
@@ -402,15 +418,27 @@ async function getDraft(draftId: string): Promise<ExpenseDraft | null> {
 }
 
 async function findLatestPendingDraftForChat(chatId: number | string): Promise<ExpenseDraft | null> {
+  const db = getFirebaseAdminDb();
+  const active = await db.collection("telegram_expense_active_chats").doc(String(chatId)).get();
+  const activeDraftId = active.data()?.draftId ? String(active.data()?.draftId) : "";
+
+  if (activeDraftId) {
+    const activeDraft = await getDraft(activeDraftId);
+    if (activeDraft && activeDraft.status === "pending" && String(activeDraft.chatId) === String(chatId)) {
+      return activeDraft;
+    }
+  }
+
   const snapshot = await getFirebaseAdminDb()
     .collection("telegram_expense_drafts")
     .orderBy("updatedAt", "desc")
-    .limit(50)
+    .limit(200)
     .get();
 
   for (const doc of snapshot.docs) {
     const data = doc.data();
     if (String(data.chatId || "") === String(chatId) && data.status === "pending") {
+      await setActiveDraftForChat(chatId, doc.id);
       return { id: doc.id, ...data } as ExpenseDraft;
     }
   }
@@ -489,6 +517,7 @@ async function processDraftCorrection(params: {
 
   if (/\b(cancelar|cancela|anular|olvida)\b/.test(normalized)) {
     await updateDraft(params.draft.id!, { status: "cancelled" });
+    await setActiveDraftForChat(params.chatId, null);
     await sendTelegramMessage(
       params.chatId,
       "Salida cancelada. No se guardo ningun movimiento.",
@@ -501,6 +530,7 @@ async function processDraftCorrection(params: {
   if (/^(confirmar|confirma|registrar|registra|listo|ok|dale|guardar|guarda)$/.test(normalized)) {
     try {
       const movementId = await createMovementFromDraft(params.draft);
+      await setActiveDraftForChat(params.chatId, null);
       await sendTelegramMessage(
         params.chatId,
         [
@@ -713,6 +743,7 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
 
   await learnFromDraft(draft, ref.id);
   await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id });
+  await setActiveDraftForChat(draft.chatId, null);
 
   return ref.id;
 }
@@ -803,6 +834,20 @@ export async function processExpenseAssistantMessage(params: {
         text,
       });
     }
+
+    await sendTelegramMessage(
+      params.chatId,
+      [
+        "Entendi que quieres corregir algo, pero no tengo una salida pendiente en este chat.",
+        "Envia primero el gasto o la captura, y luego puedes responder cosas como:",
+        "no, era banco",
+        "el monto era 8.50",
+        "es un gasto personal",
+      ].join("\n"),
+      params.botToken,
+      { reply_markup: expenseAssistantMenuKeyboard() }
+    );
+    return { handled: true, correction: true, foundDraft: false };
   }
 
   if (!isLikelyExpenseText(text)) {
@@ -1063,6 +1108,7 @@ export async function processExpenseAssistantCallback(params: {
 
   if (action === "cancel") {
     await updateDraft(draftId, { status: "cancelled" });
+    if (chatId) await setActiveDraftForChat(chatId, null);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1075,6 +1121,7 @@ export async function processExpenseAssistantCallback(params: {
   }
 
   if (action === "categories") {
+    if (chatId) await setActiveDraftForChat(chatId, draftId);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1097,6 +1144,7 @@ export async function processExpenseAssistantCallback(params: {
       suggestionSource: "manual",
     };
     await updateDraft(draftId, updated);
+    if (chatId) await setActiveDraftForChat(chatId, draftId);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1112,6 +1160,7 @@ export async function processExpenseAssistantCallback(params: {
   if (action === "from" && ["safe", "transit", "bank"].includes(value)) {
     const updated = { ...draft, from: value as CajaId };
     await updateDraft(draftId, { from: value as CajaId });
+    if (chatId) await setActiveDraftForChat(chatId, draftId);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
