@@ -68,7 +68,7 @@ export async function extractExpenseFromImage(params: {
 
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
   const prompt = `
-Eres un asistente para leer comprobantes, capturas de banco, correos visuales y recibos de gastos de un negocio en Ecuador.
+Eres un asistente para leer comprobantes, capturas de banco, correos visuales, facturas/RIDE y recibos de gastos en Ecuador.
 
 Objetivo:
 - Extrae datos para proponer un gasto pendiente de confirmacion.
@@ -81,11 +81,16 @@ Objetivo:
 - Si la imagen es una funda/cierre de caja de cajero y no un gasto, movementType = "unknown" y requiresReview = true.
 - El anio operativo actual es 2026. Si una fecha trae 03/07/2026, devuelve 2026-07-03. Si trae 03/07/26, tambien es 2026-07-03.
 - Devuelve amount como numero decimal positivo, sin simbolos.
-- La descripcion debe ser util para revisar: banco/proveedor/beneficiario/documento/cuenta si aparecen.
-- Categoria sugerida debe ser una de: Gastos personales, Combustible, Transporte, Proveedor, Alimentacion, Insumos, Personal, Servicios, Otros.
+- Para facturas/RIDE, usa el TOTAL final, no subtotal ni IVA por separado. Si hay varios valores, amount debe ser el total a pagar.
+- merchant debe ser el comercio, beneficiario, proveedor o persona que recibio el dinero. Si hay razon social y nombre comercial, prioriza el nombre mas reconocible.
+- La descripcion debe ser util para revisar: comercio/proveedor/beneficiario/documento/RUC/cuenta/fecha si aparecen.
+- Categoria sugerida debe ser una de: Gastos personales, Combustible, Transporte, Proveedor, Alimentacion, Salud, Insumos, Personal, Servicios, Otros.
 - Para pagos o transferencias a empresas/proveedores, usa Proveedor / COMPRAS.
-- Para comidas locales como encebollado, ceviche/cebiche, almuerzo, merienda, desayuno, cafe, bolon, tigrillo, seco, guatita, cola, jugo o snacks, usa Alimentacion / COMIDAS.
+- Para comidas locales como encebollado, encebollado mixto, ceviche/cebiche, almuerzo, merienda, desayuno, cafe, bolon, tigrillo, seco, guatita, corviche, tortilla, cola, jugo o snacks, usa Alimentacion / COMIDAS.
+- Para farmacia, medicina, clinica, doctor, laboratorio, salud o veterinaria, usa Gastos personales / SALUD si el contexto es personal; si parece negocio usa Otros / SALUD.
+- Para gasolina, super, extra, diesel, lubricadora, aceite o lavadora de auto, usa Combustible / MOVILIZACION.
 - Si el texto indica que el dinero es para uso personal del propietario, retiro personal, "para mi" o gasto personal, usa Gastos personales / GENERAL PERSONAL y etiqueta PERSONAL.
+- Si la imagen no permite distinguir si es personal o negocio, requiere requiresReview = true pero igual extrae monto/comercio/categoria probable.
 - Incluye extractedText con el texto que pudiste leer.
 - Devuelve solo JSON valido.
 

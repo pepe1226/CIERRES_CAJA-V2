@@ -36,12 +36,20 @@ type ExpenseDraft = {
   telegramFirstName?: string | null;
   text: string;
   normalizedText: string;
+  date?: string | null;
   amount: number;
   from: CajaId | null;
   category: string;
   subcategory: string | null;
   tags: string[];
   description: string;
+  merchant?: string | null;
+  sourceAccount?: string | null;
+  destinationAccount?: string | null;
+  extractedText?: string | null;
+  confidence?: number | null;
+  requiresReview?: boolean;
+  reviewReasons?: string[];
   status: "pending" | "confirmed" | "cancelled";
   movementId?: string | null;
   suggestionSource: string;
@@ -54,6 +62,7 @@ const CATEGORY_BUTTONS = [
   { label: "Transporte", category: "Transporte", subcategory: "MOVILIZACION", tags: ["TRANSPORTE", "MOVILIZACION"] },
   { label: "Proveedor", category: "Proveedor", subcategory: "COMPRAS", tags: ["PROVEEDOR", "COMPRAS"] },
   { label: "Alimentacion", category: "Alimentacion", subcategory: "COMIDAS", tags: ["ALIMENTACION", "COMIDAS"] },
+  { label: "Salud", category: "Salud", subcategory: "SALUD", tags: ["SALUD", "PERSONAL"] },
   { label: "Insumos", category: "Insumos", subcategory: "OPERACION", tags: ["INSUMOS", "OPERACION"] },
   { label: "Empleados", category: "Personal", subcategory: "ANTICIPO", tags: ["EMPLEADOS", "ANTICIPO"] },
   { label: "Servicios", category: "Servicios", subcategory: "FIJOS", tags: ["SERVICIOS", "FIJO"] },
@@ -66,9 +75,10 @@ const RULES = [
   { terms: ["taxi", "uber", "flete", "envio", "transporte", "bus", "peaje", "parqueo"], suggestion: CATEGORY_BUTTONS[2] },
   { terms: ["proveedor", "compra proveedor", "mercaderia"], suggestion: CATEGORY_BUTTONS[3] },
   { terms: ["encebollado", "cebiche", "ceviche", "almuerzo", "merienda", "desayuno", "comida", "comidas", "colacion", "colada", "cafe", "pan", "bolon", "tigrillo", "chaulafan", "seco", "guatita", "corviche", "empanada", "cola", "gaseosa", "jugo", "agua", "snack", "picada"], suggestion: CATEGORY_BUTTONS[4] },
-  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[5] },
-  { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[6] },
-  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[7] },
+  { terms: ["farmacia", "medicina", "medicamento", "clinica", "doctor", "laboratorio", "consulta", "salud"], suggestion: CATEGORY_BUTTONS[5] },
+  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[6] },
+  { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[7] },
+  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[8] },
 ];
 
 function normalizeText(value: unknown) {
@@ -106,6 +116,27 @@ function parseLastAmount(text: string) {
   return amount > 0 ? Number(amount.toFixed(2)) : 0;
 }
 
+function parseDraftDate(value: unknown) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) {
+    const date = new Date(`${iso[1]}-${iso[2]}-${iso[3]}T12:00:00-05:00`);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  const short = raw.match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?$/);
+  if (!short) return null;
+
+  const day = Number(short[1]);
+  const month = Number(short[2]);
+  const yearRaw = short[3] ? Number(short[3]) : 2026;
+  const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+  const date = new Date(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T12:00:00-05:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function parseCaja(text: string): CajaId | null {
   const normalized = normalizeText(text);
   if (/\b(personal|caja personal|mi caja|caja mia|gasto personal|gastos personales|para mi|mio|uso personal)\b/.test(normalized)) return "personal";
@@ -123,7 +154,7 @@ function isLikelyExpenseText(text: string) {
   const hasExplicitExpenseAction =
     /\b(salida|gasto|egreso|pago|pague|compre|retire|retiro|saque|sacar)\b/.test(normalized);
   const hasKnownExpenseConcept =
-    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada|gasto personal|gastos personales|retiro personal|para mi|mio|uso personal)\b/.test(normalized);
+    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|farmacia|medicina|medicamento|clinica|doctor|laboratorio|salud|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada|gasto personal|gastos personales|retiro personal|para mi|mio|uso personal)\b/.test(normalized);
   const hasLocalExpensePhrase =
     /\b\d+(?:[.,]\d{1,2})?\s+(?:en|de|para|por)\s+[a-z]{3,}/.test(normalized) &&
     hasKnownExpenseConcept;
@@ -372,6 +403,20 @@ function movementDeleteText(movementId: string, movement: any) {
 }
 
 function draftText(draft: ExpenseDraft) {
+  const details = [
+    draft.date ? `Fecha: ${draft.date}` : "",
+    draft.merchant ? `Comercio/beneficiario: ${draft.merchant}` : "",
+    draft.destinationAccount ? `Destino: ${draft.destinationAccount}` : "",
+    draft.confidence ? `Confianza lectura: ${Math.round(Number(draft.confidence) * 100)}%` : "",
+  ].filter(Boolean);
+  const review = draft.requiresReview
+    ? [
+      "",
+      "Necesita revision:",
+      ...(draft.reviewReasons?.length ? draft.reviewReasons.map((reason) => `- ${reason}`) : ["- Revisa los datos antes de confirmar."]),
+    ]
+    : [];
+
   return [
     "Salida detectada.",
     `Monto: USD ${draft.amount.toFixed(2)}`,
@@ -379,9 +424,11 @@ function draftText(draft: ExpenseDraft) {
     `Categoria: ${draft.category}`,
     `Subcategoria: ${draft.subcategory || "GENERAL"}`,
     `Descripcion: ${draft.description}`,
+    ...details,
     draft.suggestionSource === "memory" ? "Memoria: usada" : "Memoria: nueva regla",
+    ...review,
     "",
-    draft.from ? "Confirma o cambia la categoria." : "Elige primero de donde salio el dinero.",
+    draft.from ? "Confirma o corrige conversando: monto, caja, categoria, subcategoria o descripcion." : "Elige primero de donde salio el dinero.",
   ].join("\n");
 }
 
@@ -506,6 +553,24 @@ function descriptionCorrection(text: string) {
   return match[1].replace(/\s+/g, " ").trim().slice(0, 180);
 }
 
+function merchantCorrection(text: string) {
+  const raw = String(text || "").trim();
+  const match = raw.match(/\b(?:comercio|proveedor|beneficiario|local|empresa|persona)\s*:?\s*(.+)$/i);
+  if (!match) return "";
+  return match[1].replace(/\s+/g, " ").trim().slice(0, 140);
+}
+
+function dateCorrection(text: string) {
+  const raw = String(text || "").trim();
+  const explicit = raw.match(/\b(?:fecha|dia|d[ií]a)\s*:?\s*(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{4}-\d{2}-\d{2})/i);
+  const loose = raw.match(/\b(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|\d{4}-\d{2}-\d{2})\b/);
+  const value = explicit?.[1] || loose?.[1] || "";
+  if (!value) return "";
+  const date = parseDraftDate(value);
+  if (!date) return "";
+  return date.toISOString().slice(0, 10);
+}
+
 function subcategoryCorrection(text: string) {
   const raw = String(text || "").trim();
   const match = raw.match(/\b(?:subcategoria|subcategor[ií]a|sub)\s*:?\s*(.+)$/i);
@@ -529,6 +594,8 @@ function correctionHelpText(draft: ExpenseDraft) {
     "Puedes responder asi:",
     "- no, era banco",
     "- el monto era 8.50",
+    "- fecha 03/07/2026",
+    "- comercio Farmacia Cruz Azul",
     "- ponlo como personal",
     "- categoria alimentacion",
     "- descripcion almuerzo proveedor",
@@ -628,6 +695,20 @@ async function processDraftCorrection(params: {
     changed.push(`Descripcion: ${newDescription}`);
   }
 
+  const newMerchant = merchantCorrection(params.text);
+  if (newMerchant && newMerchant !== params.draft.merchant) {
+    updates.merchant = newMerchant;
+    updates.text = `${updates.text || params.draft.text}\nCorreccion: ${params.text}`.slice(0, 800);
+    updates.normalizedText = normalizeText([updates.normalizedText || params.draft.normalizedText, params.text].join(" "));
+    changed.push(`Comercio/beneficiario: ${newMerchant}`);
+  }
+
+  const newDate = dateCorrection(params.text);
+  if (newDate && newDate !== params.draft.date) {
+    updates.date = newDate;
+    changed.push(`Fecha: ${newDate}`);
+  }
+
   const subcategory = subcategoryCorrection(params.text);
   if (subcategory && subcategory !== params.draft.subcategory) {
     updates.subcategory = subcategory;
@@ -671,8 +752,12 @@ async function learnFromDraft(draft: ExpenseDraft, movementId?: string) {
   await learnExpenseMemory({
     keywords: [
       draft.suggestionKeyword,
+      draft.merchant,
+      draft.destinationAccount,
+      draft.sourceAccount,
       draft.description,
       draft.text,
+      draft.extractedText,
       normalizeKeyword(draft.text),
     ],
     category: draft.category,
@@ -786,30 +871,43 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
   if (!Number.isFinite(draft.amount) || draft.amount <= 0) throw new Error("Monto invalido.");
 
   const db = getFirebaseAdminDb();
+  const movementDate = parseDraftDate(draft.date) || new Date();
   if (draft.from === "personal") {
     const boxId = await ensureDefaultPersonalTelegramBox(draft.chatId);
     const ref = db.collection("personalMovements").doc();
 
     await ref.set({
-      date: Timestamp.fromDate(new Date()),
+      date: Timestamp.fromDate(movementDate),
       type: "expense",
       amount: draft.amount,
       description: `[TELEGRAM] ${draft.description}`.toUpperCase().slice(0, 500),
       category: draft.category || "Otros",
+      subcategory: draft.subcategory || null,
       tags: draft.tags || [],
       fromBoxId: boxId,
       toBoxId: null,
+      merchant: draft.merchant || null,
+      sourceAccount: draft.sourceAccount || null,
+      destinationAccount: draft.destinationAccount || null,
       createdBy: "telegram-personal-bot",
       createdByName: draft.telegramFirstName || draft.telegramUserName || "Telegram",
       source: "telegram",
       telegramProvider: "expense-assistant",
-      telegramRequiresReview: false,
-      telegramConfidence: draft.suggestionSource === "memory" ? 0.95 : 0.75,
+      telegramRequiresReview: Boolean(draft.requiresReview),
+      telegramConfidence: draft.confidence || (draft.suggestionSource === "memory" ? 0.95 : 0.75),
       telegramChatId: draft.chatId,
       telegramMessageId: draft.messageId || null,
       telegramUserId: draft.telegramUserId || null,
       telegramUserName: draft.telegramUserName || null,
       telegramFirstName: draft.telegramFirstName || null,
+      telegramRawExtraction: {
+        text: draft.text,
+        normalizedText: draft.normalizedText,
+        extractedText: draft.extractedText || null,
+        suggestionSource: draft.suggestionSource,
+        suggestionKeyword: draft.suggestionKeyword || null,
+        reviewReasons: draft.reviewReasons || [],
+      },
       createdAt: FieldValue.serverTimestamp(),
     });
 
@@ -823,7 +921,7 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
   const ref = db.collection("movements").doc();
 
   await ref.set({
-    date: Timestamp.fromDate(new Date()),
+    date: Timestamp.fromDate(movementDate),
     type: "outflow",
     amount: draft.amount,
     description: `[TELEGRAM] ${draft.description}`.toUpperCase().slice(0, 500),
@@ -833,10 +931,13 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
     category: draft.category,
     subcategory: draft.subcategory || null,
     tags: draft.tags || [],
+    merchant: draft.merchant || null,
+    sourceAccount: draft.sourceAccount || null,
+    destinationAccount: draft.destinationAccount || null,
     source: "telegram",
     telegramProvider: "expense-assistant",
-    telegramRequiresReview: false,
-    telegramConfidence: draft.suggestionSource === "memory" ? 0.95 : 0.75,
+    telegramRequiresReview: Boolean(draft.requiresReview),
+    telegramConfidence: draft.confidence || (draft.suggestionSource === "memory" ? 0.95 : 0.75),
     telegramChatId: draft.chatId,
     telegramMessageId: draft.messageId || null,
     telegramUserId: draft.telegramUserId || null,
@@ -845,8 +946,10 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
     telegramRawExtraction: {
       text: draft.text,
       normalizedText: draft.normalizedText,
+      extractedText: draft.extractedText || null,
       suggestionSource: draft.suggestionSource,
       suggestionKeyword: draft.suggestionKeyword || null,
+      reviewReasons: draft.reviewReasons || [],
     },
     createdAt: FieldValue.serverTimestamp(),
   });
@@ -997,6 +1100,7 @@ export async function processExpenseAssistantMessage(params: {
     telegramFirstName: params.message.from?.first_name || null,
     text,
     normalizedText,
+    date: dateCorrection(text) || null,
     amount,
     from,
     category: suggestion.category,
@@ -1074,6 +1178,7 @@ export async function processExpenseAssistantPhoto(params: {
       telegramFirstName: params.message.from?.first_name || null,
       text: caption || extraction.extractedText || extraction.description,
       normalizedText,
+      date: extraction.date || null,
       amount: Number(extraction.amount),
       from: params.personalOnly
         ? "personal"
@@ -1087,6 +1192,13 @@ export async function processExpenseAssistantPhoto(params: {
         "OCR",
       ]),
       description,
+      merchant: extraction.merchant || null,
+      sourceAccount: extraction.sourceAccount || null,
+      destinationAccount: extraction.destinationAccount || null,
+      extractedText: extraction.extractedText || null,
+      confidence: extraction.confidence || null,
+      requiresReview: Boolean(extraction.requiresReview),
+      reviewReasons: extraction.reasons || [],
       status: "pending",
       suggestionSource: suggestion.source === "memory" ? "memory" : "ocr",
       suggestionKeyword: extraction.merchant || suggestion.keyword || null,

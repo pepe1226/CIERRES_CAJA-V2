@@ -8,6 +8,7 @@ export type ExpenseMemorySuggestion = {
   keyword: string;
   source: "memory";
   matchedFrom: "memory" | "movement";
+  confidence?: number;
 };
 
 function normalizeText(value: unknown) {
@@ -97,34 +98,41 @@ export async function findExpenseMemorySuggestion(values: Array<unknown>): Promi
     }
   }
 
-  const movementSnapshot = await db
-    .collection("movements")
-    .orderBy("createdAt", "desc")
-    .limit(300)
-    .get();
+  const movementSnapshots = await Promise.all([
+    db.collection("movements").orderBy("createdAt", "desc").limit(300).get(),
+    db.collection("personalMovements").orderBy("createdAt", "desc").limit(300).get(),
+  ]);
 
-  for (const doc of movementSnapshot.docs) {
-    const data = doc.data();
-    if (data.type !== "outflow") continue;
+  for (const snapshot of movementSnapshots) {
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      if (!["outflow", "expense"].includes(String(data.type || ""))) continue;
 
-    const description = normalizeText([
-      data.description,
-      data.category,
-      data.subcategory,
-      Array.isArray(data.tags) ? data.tags.join(" ") : "",
-    ].join(" "));
+      const description = normalizeText([
+        data.description,
+        data.category,
+        data.subcategory,
+        data.merchant,
+        data.destinationAccount,
+        data.providerName,
+        Array.isArray(data.tags) ? data.tags.join(" ") : "",
+        data.telegramRawExtraction?.text,
+        data.telegramRawExtraction?.extractedText,
+      ].join(" "));
 
-    const matched = candidates.find((candidate) => isMatch(description, candidate));
-    if (!matched) continue;
+      const matched = candidates.find((candidate) => isMatch(description, candidate));
+      if (!matched) continue;
 
-    return {
-      category: String(data.category || "Otros"),
-      subcategory: String(data.subcategory || "GENERAL"),
-      tags: Array.isArray(data.tags) ? data.tags.map(String) : ["SIN CLASIFICAR"],
-      keyword: matched,
-      source: "memory",
-      matchedFrom: "movement",
-    };
+      return {
+        category: String(data.category || "Otros"),
+        subcategory: String(data.subcategory || "GENERAL"),
+        tags: Array.isArray(data.tags) ? data.tags.map(String) : ["SIN CLASIFICAR"],
+        keyword: matched,
+        source: "memory",
+        matchedFrom: "movement",
+        confidence: 0.85,
+      };
+    }
   }
 
   return null;
