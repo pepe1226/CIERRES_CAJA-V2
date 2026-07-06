@@ -239,7 +239,7 @@ export default async function handler(req: any, res: any) {
         "No voy a registrar nada sin una accion clara de gasto.",
         "Ejemplos:",
         ...(isPersonalBotRequest
-          ? ["almuerzo 5", "gasolina 20", "farmacia 8.50"]
+          ? ["2 en platano", "la colita 2", "tanqueo 20", "farmacia 8.50"]
           : ["combustible 20 tienda", "taxi 8 banco", "salida proveedor 50 transito", "revisar correos"]),
       ].join("\n"),
       activeBotToken,

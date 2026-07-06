@@ -70,15 +70,15 @@ const CATEGORY_BUTTONS = [
 ];
 
 const RULES = [
-  { terms: ["gasto personal", "gastos personales", "retiro personal", "para mi", "mio", "personal mio", "uso personal"], suggestion: CATEGORY_BUTTONS[0] },
-  { terms: ["combustible", "gasolina", "diesel", "nafta", "moto"], suggestion: CATEGORY_BUTTONS[1] },
-  { terms: ["taxi", "uber", "flete", "envio", "transporte", "bus", "peaje", "parqueo"], suggestion: CATEGORY_BUTTONS[2] },
-  { terms: ["proveedor", "compra proveedor", "mercaderia"], suggestion: CATEGORY_BUTTONS[3] },
-  { terms: ["encebollado", "cebiche", "ceviche", "almuerzo", "merienda", "desayuno", "comida", "comidas", "colacion", "colada", "cafe", "pan", "bolon", "tigrillo", "chaulafan", "seco", "guatita", "corviche", "empanada", "cola", "gaseosa", "jugo", "agua", "snack", "picada"], suggestion: CATEGORY_BUTTONS[4] },
-  { terms: ["farmacia", "medicina", "medicamento", "clinica", "doctor", "laboratorio", "consulta", "salud"], suggestion: CATEGORY_BUTTONS[5] },
-  { terms: ["funda", "fundas", "cinta", "papeleria", "limpieza", "material"], suggestion: CATEGORY_BUTTONS[6] },
+  { terms: ["gasto personal", "gastos personales", "retiro personal", "para mi", "para mí", "mio", "mí", "mi plata", "plata mia", "plata mía", "personal mio", "personal mío", "uso personal"], suggestion: CATEGORY_BUTTONS[0] },
+  { terms: ["combustible", "gasolina", "diesel", "nafta", "moto", "tanqueo", "llenar tanque", "llenado", "super", "extra", "ecopais", "ecopaís", "lubricadora", "bomba", "surtidor", "aceite", "lavadora"], suggestion: CATEGORY_BUTTONS[1] },
+  { terms: ["taxi", "uber", "flete", "envio", "envío", "transporte", "bus", "peaje", "parqueo", "pasaje", "carrera", "motorizado", "didi", "indriver", "mandado", "la vuelta"], suggestion: CATEGORY_BUTTONS[2] },
+  { terms: ["proveedor", "compra proveedor", "mercaderia", "mercadería", "pedido", "abasto", "provee", "entrega"], suggestion: CATEGORY_BUTTONS[3] },
+  { terms: ["encebollado", "encebolladito", "cebiche", "ceviche", "almuerzo", "merienda", "desayuno", "comida", "comidas", "colacion", "colación", "colada", "cafe", "cafecito", "pan", "bolon", "tigrillo", "chaulafan", "seco", "guatita", "corviche", "empanada", "platano", "plátano", "cola", "gaseosa", "jugo", "agua", "snack", "picada", "caldo", "sopa", "menestra", "bandera", "fritada", "chuzo", "piqueo", "tuky", "colita", "chicha"], suggestion: CATEGORY_BUTTONS[4] },
+  { terms: ["farmacia", "medicina", "medicamento", "clinica", "clínica", "doctor", "laboratorio", "consulta", "salud", "chuchaqui", "vitamina", "vitaminas", "pastilla", "pastillas", "inyeccion", "inyección"], suggestion: CATEGORY_BUTTONS[5] },
+  { terms: ["funda", "fundas", "cinta", "papeleria", "papelería", "limpieza", "material", "bolsa", "carton", "cartón", "gel", "desinfectante"], suggestion: CATEGORY_BUTTONS[6] },
   { terms: ["sueldo", "anticipo", "prestamo", "nomina", "empleado"], suggestion: CATEGORY_BUTTONS[7] },
-  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler"], suggestion: CATEGORY_BUTTONS[8] },
+  { terms: ["luz", "agua potable", "internet", "netlife", "claro", "cnt", "arriendo", "alquiler", "interagua", "cnel", "servicio", "servicios"], suggestion: CATEGORY_BUTTONS[8] },
 ];
 
 function normalizeText(value: unknown) {
@@ -93,7 +93,7 @@ function normalizeText(value: unknown) {
 
 function normalizeKeyword(value: unknown) {
   return normalizeText(value)
-    .replace(/\b(salida|gasto|pago|pague|voy|hacer|una|un|de|del|desde|por|para|con|la|el|en|caja|tienda|banco|transito)\b/g, " ")
+    .replace(/\b(salida|gasto|gastos|egreso|pago|pague|voy|hacer|hice|hacerme|mandar|manda|mandame|pon|ponme|poner|pasa|pase|darme|dame|una|un|unos|unas|de|del|desde|por|para|con|la|el|lo|los|las|en|caja|tienda|banco|transito|personal|mio|mi|mis|me|mí)\b/g, " ")
     .replace(/\b\d+(?:[.,]\d+)?\b/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -139,29 +139,32 @@ function parseDraftDate(value: unknown) {
 
 function parseCaja(text: string): CajaId | null {
   const normalized = normalizeText(text);
-  if (/\b(personal|caja personal|mi caja|caja mia|gasto personal|gastos personales|para mi|mio|uso personal)\b/.test(normalized)) return "personal";
-  if (/\b(banco|cuenta|transferencia bancaria)\b/.test(normalized)) return "bank";
-  if (/\b(transito|transit|ruta|camino)\b/.test(normalized)) return "transit";
-  if (/\b(tienda|caja|efectivo|principal)\b/.test(normalized)) return "safe";
+  if (/\b(personal|caja personal|mi caja|caja mia|gasto personal|gastos personales|para mi|para mí|mio|mí|uso personal|plata mia|plata mía)\b/.test(normalized)) return "personal";
+  if (/\b(banco|cuenta|transferencia bancaria|dep[oó]sito|deposito|banca)\b/.test(normalized)) return "bank";
+  if (/\b(transito|transit|ruta|camino|en camino|voy en camino)\b/.test(normalized)) return "transit";
+  if (/\b(tienda|caja|efectivo|principal|local)\b/.test(normalized)) return "safe";
   return null;
+}
+
+function hasLocalExpenseCue(normalized: string) {
+  return RULES.some((item) => item.terms.some((term) => normalized.includes(term)));
 }
 
 function isLikelyExpenseText(text: string) {
   const normalized = normalizeText(text);
   if (!normalized || normalized.startsWith("/")) return false;
-  if (parseAmount(normalized) <= 0) return false;
 
   const hasExplicitExpenseAction =
-    /\b(salida|gasto|egreso|pago|pague|compre|retire|retiro|saque|sacar)\b/.test(normalized);
+    /\b(salida|gasto|egreso|pago|pague|compre|compra|retire|retiro|saque|sacar|mande|gaste|gast[eé]|hice|me hice|me gaste|me gast[eé])\b/.test(normalized);
   const hasKnownExpenseConcept =
-    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|farmacia|medicina|medicamento|clinica|doctor|laboratorio|salud|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada|gasto personal|gastos personales|retiro personal|para mi|mio|uso personal)\b/.test(normalized);
+    /\b(combustible|gasolina|diesel|taxi|uber|proveedor|fundas|anticipo|sueldo|flete|peaje|parqueo|luz|internet|arriendo|farmacia|medicina|medicamento|clinica|doctor|laboratorio|salud|encebollado|cebiche|ceviche|almuerzo|merienda|desayuno|comida|colacion|cafe|pan|bolon|tigrillo|chaulafan|seco|guatita|corviche|empanada|cola|gaseosa|jugo|snack|picada|gasto personal|gastos personales|retiro personal|para mi|para mí|mio|mí|uso personal|colita|tanqueo|mandado|la vuelta|chuchaqui)\b/.test(normalized);
   const hasLocalExpensePhrase =
     /\b\d+(?:[.,]\d{1,2})?\s+(?:en|de|para|por)\s+[a-z]{3,}/.test(normalized) &&
     hasKnownExpenseConcept;
   const hasIncomeLanguage =
     /\b(ingreso|deposite|deposito|recibi|recibido|cobre|cobro|venta|vendi|abono|acreditacion)\b/.test(normalized);
 
-  return !hasIncomeLanguage && (hasExplicitExpenseAction || hasKnownExpenseConcept || hasLocalExpensePhrase);
+  return !hasIncomeLanguage && (hasExplicitExpenseAction || hasKnownExpenseConcept || hasLocalExpensePhrase || hasLocalExpenseCue(normalized));
 }
 
 function makeTags(values: Array<string | undefined | null>) {
@@ -320,7 +323,9 @@ function assistantMenuText(personalOnly = false) {
       "",
       "Uso:",
       "- Escribe: encebollado 5",
-      "- Escribe: gasolina 20",
+      "- Escribe: la colita 2",
+      "- Escribe: 2 en platano",
+      "- Escribe: tanqueo 20",
       "- Envia una foto o comprobante y te propongo el gasto.",
       "- Corrige conversando: no, era 8.50 / categoria salud / descripcion farmacia",
       "- Eliminar ultimo: borra la ultima salida creada por este bot.",
@@ -340,12 +345,29 @@ function assistantMenuText(personalOnly = false) {
     "Gastos:",
     "- Envia una captura/comprobante y te propongo el gasto.",
     "- Escribe: 5 en encebollado",
+    "- Escribe: 2 en platano",
+    "- Escribe: la vuelta 8",
+    "- Escribe: tanqueo 20",
     "- Escribe: combustible 20 tienda",
     "- Escribe: taxi 8 banco",
     "- Escribe: salida proveedor 50 transito",
     "- Si hay una salida pendiente puedes corregir: no, era banco",
     "- Tambien: el monto era 8.50 / categoria personal / descripcion almuerzo",
     "- Eliminar ultimo: borra la ultima salida creada por este bot.",
+  ].join("\n");
+}
+
+function missingAmountHelpText(suggestion: ExpenseSuggestion, personalOnly = false) {
+  const category = suggestion.category || "gasto";
+  const hint = personalOnly || suggestion.category === "Gastos personales" ? "personal" : "del negocio";
+
+  return [
+    `Entendi que hablas de ${category.toLowerCase()} ${hint}, pero me falta el monto.`,
+    "Escribe el valor junto a la frase, por ejemplo:",
+    "- la colita 2",
+    "- encebollado 5",
+    "- tanqueo 20",
+    "- mandado 8",
   ].join("\n");
 }
 
@@ -594,6 +616,7 @@ function correctionHelpText(draft: ExpenseDraft) {
     "Puedes responder asi:",
     "- no, era banco",
     "- el monto era 8.50",
+    "- 2 en platano",
     "- fecha 03/07/2026",
     "- comercio Farmacia Cruz Azul",
     "- ponlo como personal",
@@ -1087,6 +1110,15 @@ export async function processExpenseAssistantMessage(params: {
   const normalizedText = normalizeText(text);
   const suggestion = await suggestExpense(normalizedText);
   const amount = parseAmount(normalizedText);
+  if (amount <= 0) {
+    await sendTelegramMessage(
+      params.chatId,
+      missingAmountHelpText(suggestion, Boolean(params.personalOnly)),
+      params.botToken,
+      { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+    );
+    return { handled: true, missingAmount: true, suggestion };
+  }
   const from = params.personalOnly
     ? "personal"
     : parseCaja(normalizedText) || (suggestion.category === "Gastos personales" ? "personal" : null);
