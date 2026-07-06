@@ -13,7 +13,7 @@ import {
   learnExpenseMemory,
 } from "./expenseMemory.js";
 
-type CajaId = "safe" | "transit" | "bank";
+type CajaId = "safe" | "transit" | "bank" | "personal";
 
 type GmailMessage = {
   id: string;
@@ -495,6 +495,9 @@ function candidateKeyboard(candidateId: string) {
       ],
       [
         { text: "Transito", callback_data: `gmail:register:${candidateId}:transit` },
+        { text: "Personal", callback_data: `gmail:register:${candidateId}:personal` },
+      ],
+      [
         { text: "Ignorar", callback_data: `gmail:ignore:${candidateId}` },
       ],
     ],
@@ -954,7 +957,7 @@ export async function processGmailExpenseCallback(params: {
     return { handled: true, ignored: true, candidateId };
   }
 
-  if (action === "register" && ["safe", "transit", "bank"].includes(value)) {
+  if (action === "register" && ["safe", "transit", "bank", "personal"].includes(value)) {
     try {
       const created = await createMovementFromCandidate(candidateId, value as CajaId);
 
@@ -965,7 +968,7 @@ export async function processGmailExpenseCallback(params: {
           text: [
             "Gasto de Gmail registrado.",
             `Monto: USD ${Number(created.candidate.amount || 0).toFixed(2)}`,
-            `Caja: ${value === "bank" ? "Banco" : value === "transit" ? "Transito" : "Tienda"}`,
+            `Caja: ${value === "bank" ? "Banco" : value === "transit" ? "Transito" : value === "personal" ? "Caja Personal" : "Tienda"}`,
             `Categoria: ${created.candidate.category || "Otros"}`,
             `Movimiento: ${created.movementId}`,
           ].join("\n"),

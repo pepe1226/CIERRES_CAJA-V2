@@ -17,7 +17,7 @@ import {
   learnExpenseMemory,
 } from "./expenseMemory.js";
 
-type CajaId = "safe" | "transit" | "bank";
+type CajaId = "safe" | "transit" | "bank" | "personal";
 
 type ExpenseSuggestion = {
   category: string;
@@ -108,6 +108,7 @@ function parseLastAmount(text: string) {
 
 function parseCaja(text: string): CajaId | null {
   const normalized = normalizeText(text);
+  if (/\b(personal|caja personal|mi caja|caja mia|gasto personal|gastos personales|para mi|mio|uso personal)\b/.test(normalized)) return "personal";
   if (/\b(banco|cuenta|transferencia bancaria)\b/.test(normalized)) return "bank";
   if (/\b(transito|transit|ruta|camino)\b/.test(normalized)) return "transit";
   if (/\b(tienda|caja|efectivo|principal)\b/.test(normalized)) return "safe";
@@ -177,6 +178,9 @@ function draftKeyboard(draft: ExpenseDraft) {
       { text: "Transito", callback_data: `exp:from:${draft.id}:transit` },
       { text: "Banco", callback_data: `exp:from:${draft.id}:bank` },
     ]);
+    rows.push([
+      { text: "Caja Personal", callback_data: `exp:from:${draft.id}:personal` },
+    ]);
   }
 
   rows.push([
@@ -226,6 +230,7 @@ function deleteMovementKeyboard(movementId: string) {
 function cajaLabel(value: CajaId | null) {
   if (value === "bank") return "Banco";
   if (value === "transit") return "Transito";
+  if (value === "personal") return "Caja Personal";
   if (value === "safe") return "Tienda";
   return "Falta caja";
 }
@@ -582,6 +587,11 @@ async function processDraftCorrection(params: {
     changed.push(`Categoria: ${category.category}`);
   }
 
+  if (category?.category === "Gastos personales" && params.draft.from !== "personal") {
+    updates.from = "personal";
+    changed.push("Caja: Caja Personal");
+  }
+
   const newDescription = descriptionCorrection(params.text);
   if (newDescription && newDescription !== params.draft.description) {
     updates.description = newDescription;
@@ -857,7 +867,7 @@ export async function processExpenseAssistantMessage(params: {
   const normalizedText = normalizeText(text);
   const suggestion = await suggestExpense(normalizedText);
   const amount = parseAmount(normalizedText);
-  const from = parseCaja(normalizedText);
+  const from = parseCaja(normalizedText) || (suggestion.category === "Gastos personales" ? "personal" : null);
   const description = text.replace(/\s+/g, " ").slice(0, 180);
 
   const draft = await saveDraft({
@@ -945,7 +955,7 @@ export async function processExpenseAssistantPhoto(params: {
       text: caption || extraction.extractedText || extraction.description,
       normalizedText,
       amount: Number(extraction.amount),
-      from: extraction.suggestedFrom || parseCaja(normalizedText),
+      from: extraction.suggestedFrom || parseCaja(normalizedText) || (category === "Gastos personales" ? "personal" : null),
       category,
       subcategory,
       tags: makeTags([
@@ -1141,6 +1151,7 @@ export async function processExpenseAssistantCallback(params: {
       category: category.category,
       subcategory: category.subcategory,
       tags: makeTags(category.tags),
+      from: category.category === "Gastos personales" ? "personal" as CajaId : draft.from,
       suggestionSource: "manual",
     };
     await updateDraft(draftId, updated);
@@ -1157,7 +1168,7 @@ export async function processExpenseAssistantCallback(params: {
     return { handled: true };
   }
 
-  if (action === "from" && ["safe", "transit", "bank"].includes(value)) {
+  if (action === "from" && ["safe", "transit", "bank", "personal"].includes(value)) {
     const updated = { ...draft, from: value as CajaId };
     await updateDraft(draftId, { from: value as CajaId });
     if (chatId) await setActiveDraftForChat(chatId, draftId);

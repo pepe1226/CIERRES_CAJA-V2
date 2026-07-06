@@ -89,17 +89,19 @@ import { Dashboard } from './components/Dashboard';
 
 type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
 
-type CashBoxStatus = 'safe' | 'transit' | 'bank';
-type DisplayClosureStatus = CashBoxStatus | 'mixed';
+type CashBoxStatus = 'safe' | 'transit' | 'bank' | 'personal';
+type ClosureCashBoxStatus = Exclude<CashBoxStatus, 'personal'>;
+type DisplayClosureStatus = ClosureCashBoxStatus | 'mixed';
 type ClosureAuditStatus = 'all' | 'matched' | 'difference' | 'pending_report' | 'not_audited';
 type ClosureLedgerEntry = {
-  displayStatus: CashBoxStatus;
+  displayStatus: ClosureCashBoxStatus;
   hasSplitBalance: boolean;
   balances: Record<CashBoxStatus, number>;
 };
 
-const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank'];
-const cashBoxStatusPriority: CashBoxStatus[] = ['safe', 'transit', 'bank'];
+const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'personal'];
+const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank'];
+const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank'];
 
 const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
   const normalized = String(status || '')
@@ -109,18 +111,24 @@ const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
     .trim();
 
   if (['bank', 'banco', 'en banco'].includes(normalized)) return 'bank';
-  if (['transit', 'transito', 'en transito', 'en tránsito', 'camino', 'viaje'].includes(normalized)) return 'transit';
+  if (['transit', 'transito', 'en transito', 'camino', 'viaje'].includes(normalized)) return 'transit';
+  if (['personal', 'caja personal', 'mi caja', 'caja mia', 'gasto personal', 'gastos personales', 'finanzas personales'].includes(normalized)) return 'personal';
   return 'safe';
+};
+
+const normalizeClosureCashBoxStatus = (status?: string | null): ClosureCashBoxStatus => {
+  const normalized = normalizeCashBoxStatus(status);
+  return normalized === 'personal' ? 'safe' : normalized;
 };
 
 const cashBoxValueMatches = (value: string | undefined | null, status: CashBoxStatus) =>
   Boolean(value) && normalizeCashBoxStatus(value) === status;
 
-const closureStatusMatches = (value: string | undefined | null, status: CashBoxStatus) =>
-  normalizeCashBoxStatus(value) === status;
+const closureStatusMatches = (value: string | undefined | null, status: ClosureCashBoxStatus) =>
+  normalizeClosureCashBoxStatus(value) === status;
 
-const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): CashBoxStatus => {
-  return cashBoxStatusPriority.reduce<CashBoxStatus>((primary, status) => {
+const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): ClosureCashBoxStatus => {
+  return cashBoxStatusPriority.reduce<ClosureCashBoxStatus>((primary, status) => {
     const primaryAmount = balance[primary] || 0;
     const statusAmount = balance[status] || 0;
 
@@ -130,7 +138,6 @@ const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): CashBo
     return primary;
   }, 'safe');
 };
-
 
 const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
   date: '',
@@ -150,11 +157,15 @@ const normalizeSearchText = (value: unknown) =>
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
 
-const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
-  if (status === 'transit') return 'En Tránsito';
-  if (status === 'bank') return 'En Banco';
+const getCashBoxLabel = (status?: string | null) => {
+  const normalized = normalizeCashBoxStatus(status);
+  if (normalized === 'transit') return 'En Transito';
+  if (normalized === 'bank') return 'En Banco';
+  if (normalized === 'personal') return 'Caja Personal';
   return 'En Tienda';
 };
+
+const getClosureStatusLabel = (status?: ShiftClosure['status']) => getCashBoxLabel(status);
 
 const getClosureAuditInfo = (closure: ShiftClosure) => {
   const isTelegramPhoto = closure.source === 'telegram' || Boolean(closure.telegramFileId);
@@ -270,14 +281,17 @@ const getMovementDefaults = (
   };
 
   if (type === 'outflow') {
+    const outflowFrom = caja || current.from || ((current.category || '').toLowerCase() === 'gastos personales' ? 'personal' : 'safe');
+    const isPersonalOutflow = normalizeCashBoxStatus(outflowFrom) === 'personal';
+
     return {
       ...base,
       type,
-      category: current.category || 'Sueldos',
-      subcategory: current.subcategory || '',
-      from: caja || current.from || 'safe',
+      category: current.category || (isPersonalOutflow ? 'Gastos personales' : 'Sueldos'),
+      subcategory: current.subcategory || (isPersonalOutflow ? 'GENERAL PERSONAL' : ''),
+      from: outflowFrom,
       to: undefined,
-      tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : []
+      tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : isPersonalOutflow ? ['PERSONAL'] : []
     };
   }
 
@@ -681,10 +695,11 @@ function AppContent() {
       balances[closure.id] = {
         safe: 0,
         transit: 0,
-        bank: 0
+        bank: 0,
+        personal: 0
       };
 
-      const initialStatus = normalizeCashBoxStatus(closure.status);
+      const initialStatus = normalizeClosureCashBoxStatus(closure.status);
       balances[closure.id][initialStatus] = Number(closure.physicalAmount) || 0;
     });
 
@@ -700,7 +715,7 @@ function AppContent() {
       const from = normalizeCashBoxStatus(movement.from);
       const to = normalizeCashBoxStatus(movement.to);
 
-      if (from === to) return;
+      if (from === 'personal' || to === 'personal' || from === to) return;
 
       let remainingAmount = Number(movement.amount) || 0;
 
@@ -743,7 +758,7 @@ function AppContent() {
     });
 
     return Object.entries(balances).reduce((result, [closureId, balance]) => {
-      const activeStatuses = cashBoxStatuses.filter(status => balance[status] > 0.009);
+      const activeStatuses = closureCashBoxStatuses.filter(status => balance[status] > 0.009);
 
       result[closureId] = {
         displayStatus: activeStatuses.length === 0 ? 'safe' : getPrimaryCashBoxStatus(balance),
@@ -759,13 +774,13 @@ function AppContent() {
     Object.entries(closureLedgerById).reduce((result, [closureId, ledger]) => {
       result[closureId] = ledger.displayStatus;
       return result;
-    }, {} as Record<string, CashBoxStatus>),
+    }, {} as Record<string, ClosureCashBoxStatus>),
   [closureLedgerById]);
 
-  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): CashBoxStatus =>
+  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): ClosureCashBoxStatus =>
     closure.id
-      ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
-      : normalizeCashBoxStatus(closure.status),
+      ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
+      : normalizeClosureCashBoxStatus(closure.status),
   [derivedClosureStatusById]);
 
   const isClosureAvailableForTrip = useCallback((closure: ShiftClosure) =>
@@ -787,8 +802,8 @@ function AppContent() {
 
       const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(date, { start, end });
       const derivedStatus = c.id
-        ? derivedClosureStatusById[c.id] || normalizeCashBoxStatus(c.status)
-        : normalizeCashBoxStatus(c.status);
+        ? derivedClosureStatusById[c.id] || normalizeClosureCashBoxStatus(c.status)
+        : normalizeClosureCashBoxStatus(c.status);
 
       const matchesStatus = filterStatus === 'all' || derivedStatus === filterStatus;
       const matchesResponsible = filterResponsible === 'all' || c.responsible === filterResponsible;
@@ -825,7 +840,7 @@ function AppContent() {
         return derivedClosureStatusById[item.id];
       }
 
-      return normalizeCashBoxStatus(item.status);
+      return normalizeClosureCashBoxStatus(item.status);
     });
 
     const allSafe = normalizedStatuses.every(status => status === 'safe');
@@ -867,9 +882,11 @@ function AppContent() {
 
 
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
-    const closuresInBox = closures
-      .filter(c => closureStatusMatches(c.status, status))
-      .reduce((acc, curr) => acc + curr.physicalAmount, 0);
+    const closuresInBox = status === 'personal'
+      ? 0
+      : closures
+        .filter(c => closureStatusMatches(c.status, status))
+        .reduce((acc, curr) => acc + curr.physicalAmount, 0);
     const movementsIn = movements
       .filter(m => cashBoxValueMatches(m.to, status))
       .reduce((acc, curr) => acc + curr.amount, 0);
@@ -883,6 +900,7 @@ function AppContent() {
   const accumulatedSafeTotal = useMemo(() => getAccumulatedBoxTotal('safe'), [getAccumulatedBoxTotal]);
   const accumulatedTransitTotal = useMemo(() => getAccumulatedBoxTotal('transit'), [getAccumulatedBoxTotal]);
   const accumulatedBankTotal = useMemo(() => getAccumulatedBoxTotal('bank'), [getAccumulatedBoxTotal]);
+  const accumulatedPersonalTotal = useMemo(() => getAccumulatedBoxTotal('personal'), [getAccumulatedBoxTotal]);
 
   const applyOutflowPeriod = useCallback((period: 'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom') => {
     const today = new Date();
@@ -943,8 +961,9 @@ function AppContent() {
     const normalizedBox = normalizeCashBoxStatus(box);
     if (normalizedBox === 'transit') return accumulatedTransitTotal;
     if (normalizedBox === 'bank') return accumulatedBankTotal;
+    if (normalizedBox === 'personal') return accumulatedPersonalTotal;
     return accumulatedSafeTotal;
-  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal]);
+  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal, accumulatedPersonalTotal]);
 
   const getAvailableSourceBalance = useCallback((box?: string | null) => {
     let available = getBoxBalance(box);
@@ -1432,7 +1451,7 @@ function AppContent() {
     if (normalizedFrom) {
       const available = getAvailableSourceBalance(normalizedFrom);
       if (movementAmount > available + 0.009) {
-        setFormError(`SALDO INSUFICIENTE EN ${getClosureStatusLabel(normalizedFrom)}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
+        setFormError(`SALDO INSUFICIENTE EN ${getCashBoxLabel(normalizedFrom)}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
         return;
       }
     }
@@ -1521,7 +1540,7 @@ function AppContent() {
 
     if (!closure) return;
 
-    const currentStatus = derivedClosureStatusById[id] || normalizeCashBoxStatus(closure.status);
+    const currentStatus = derivedClosureStatusById[id] || normalizeClosureCashBoxStatus(closure.status);
     const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
@@ -1533,7 +1552,7 @@ function AppContent() {
     }
   };
 
-  const setClosureStatus = async (id: string, status: CashBoxStatus) => {
+  const setClosureStatus = async (id: string, status: ClosureCashBoxStatus) => {
     if (!user) return;
 
     playSound(status);
@@ -1568,7 +1587,7 @@ function AppContent() {
     }
   };
 
-  const setDayStatus = async (dayString: string, status: CashBoxStatus) => {
+  const setDayStatus = async (dayString: string, status: ClosureCashBoxStatus) => {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
     if (!items.length) return;
 
@@ -1734,6 +1753,13 @@ Notas: ${closure.notes || 'N/A'}`;
         color: 'text-emerald-600',
         soft: 'bg-emerald-50',
       },
+      personal: {
+        label: 'Caja Personal',
+        balance: accumulatedPersonalTotal,
+        Icon: Wallet,
+        color: 'text-purple-600',
+        soft: 'bg-purple-50',
+      },
     }[status];
     const BoxIcon = boxInfo.Icon;
     const rows = cashBoxStatementRows[status] || [];
@@ -1802,8 +1828,9 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="grid grid-cols-4 gap-3 px-6 py-4 border-b border-slate-200 bg-slate-50">
             {[
               { label: 'Gasto', Icon: ArrowUpRight, onClick: () => handleOpenAddMovement('outflow', status) },
-              ...(status !== 'bank' ? [{ label: 'Banco', Icon: Building2, onClick: () => handleOpenAddMovement('transfer', status, 'bank') }] : []),
+              ...(status !== 'bank' && status !== 'personal' ? [{ label: 'Banco', Icon: Building2, onClick: () => handleOpenAddMovement('transfer', status, 'bank') }] : []),
               ...(status !== 'transit' ? [{ label: 'Transito', Icon: Truck, onClick: () => handleOpenAddMovement('internal_transfer', status, 'transit') }] : []),
+              ...(status !== 'personal' ? [{ label: 'Personal', Icon: Wallet, onClick: () => handleOpenAddMovement('internal_transfer', status, 'personal') }] : []),
               { label: 'Actualizar', Icon: RefreshCw, onClick: () => setViewingCajaMovements(status) },
             ].map(action => (
               <button
@@ -1966,6 +1993,10 @@ Notas: ${closure.notes || 'N/A'}`;
                 <LayoutDashboard className="w-5 h-5" />
                 <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Dashboard</span>
               </button>
+              <button onClick={() => setViewingCajaMovements('personal')} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
+                <Wallet className="w-5 h-5" />
+                <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Personal</span>
+              </button>
               <button onClick={() => setViewingTripId('LIST')} className="p-3 bg-white/5 hover:bg-amber-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
                 <Truck className="w-5 h-5" />
                 <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Viajes</span>
@@ -2007,7 +2038,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 <ArrowUpRight className="w-4 h-4" />
                 Registrar Gasto
               </button>
-              {contextMenu.caja !== 'bank' && (
+              {contextMenu.caja !== 'bank' && contextMenu.caja !== 'personal' && (
                 <button
                   onClick={() => handleOpenAddMovement('transfer', contextMenu.caja, 'bank')}
                   className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors uppercase tracking-widest"
@@ -2023,6 +2054,15 @@ Notas: ${closure.notes || 'N/A'}`;
                 >
                   <Truck className="w-4 h-4" />
                   Enviar a Transito
+                </button>
+              )}
+              {contextMenu.caja !== 'personal' && (
+                <button
+                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'personal')}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
+                >
+                  <Wallet className="w-4 h-4" />
+                  Enviar a Personal
                 </button>
               )}
               <button
@@ -2689,7 +2729,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       <td className="px-6 py-4 text-center">
                         <select
                           value={inlineAddValues.status || 'safe'}
-                          onChange={e => setInlineAddValues({...inlineAddValues, status: e.target.value as CashBoxStatus})}
+                          onChange={e => setInlineAddValues({...inlineAddValues, status: e.target.value as ClosureCashBoxStatus})}
                           className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
                         >
                           <option value="safe">Tienda</option>
@@ -2755,7 +2795,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            </td>
                            <td className="px-6 py-4 text-center">
                               <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
-                                {cashBoxStatuses.map(status => {
+                                {closureCashBoxStatuses.map(status => {
                                   const statusInfo = getDayStatusInfo(status);
                                   const StatusIcon = statusInfo.Icon;
                                   const active = group.status === status;
@@ -2851,7 +2891,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               <td className="px-6 py-4 text-center">
                                 <select
                                   value={inlineEditValues.status || 'safe'}
-                                  onChange={e => setInlineEditValues({...inlineEditValues, status: e.target.value as CashBoxStatus})}
+                                  onChange={e => setInlineEditValues({...inlineEditValues, status: e.target.value as ClosureCashBoxStatus})}
                                   className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
                                 >
                                   <option value="safe">Tienda</option>
@@ -2915,10 +2955,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4 text-center">
                                 <div className="flex items-center justify-center gap-1">
-                                  {cashBoxStatuses.map(status => {
+                                  {closureCashBoxStatuses.map(status => {
                                     const currentStatus = closure.id
-                                      ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
-                                      : normalizeCashBoxStatus(closure.status);
+                                      ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
+                                      : normalizeClosureCashBoxStatus(closure.status);
                                     const statusInfo = getDayStatusInfo(status);
                                     const StatusIcon = statusInfo.Icon;
                                     const active = currentStatus === status;
@@ -3489,7 +3529,10 @@ Notas: ${closure.notes || 'N/A'}`;
                           <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                           <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
                           {movementValues.type === 'internal_transfer' && (
-                            <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <>
+                              <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                              <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
+                            </>
                           )}
                         </select>
                       </div>
@@ -3508,6 +3551,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                             <option value="transit" className="bg-[#0F172A] text-white">En Tr�nsito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
                         )}
                       </div>
@@ -3527,6 +3571,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                             <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
                         </div>
                         <div>

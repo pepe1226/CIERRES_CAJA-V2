@@ -13,7 +13,7 @@ export type ExpenseImageExtraction = {
   category: string | null;
   subcategory: string | null;
   tags: string[];
-  suggestedFrom: "bank" | "safe" | "transit" | null;
+  suggestedFrom: "bank" | "safe" | "transit" | "personal" | null;
   confidence: number;
   requiresReview: boolean;
   reasons: string[];
@@ -31,7 +31,7 @@ function normalizeExtraction(value: ExpenseImageExtraction): ExpenseImageExtract
   const movementType = ["outflow", "inflow", "transfer", "unknown"].includes(value.movementType)
     ? value.movementType
     : "unknown";
-  const suggestedFrom = ["bank", "safe", "transit"].includes(String(value.suggestedFrom))
+  const suggestedFrom = ["bank", "safe", "transit", "personal"].includes(String(value.suggestedFrom))
     ? value.suggestedFrom
     : null;
 
@@ -77,6 +77,7 @@ Objetivo:
 - Si la imagen dice recibiste, deposito recibido, acreditacion, abono o ingreso, clasificas como inflow y no lo trates como gasto.
 - Si ves Banco Pichincha con "Transferencia exitosa" y "Realizaste una transferencia", es salida desde banco.
 - Para Banco Pichincha, usa suggestedFrom = "bank".
+- Si el comprobante o el texto dice gasto personal, uso personal, mi caja o caja personal, usa suggestedFrom = "personal".
 - Si la imagen es una funda/cierre de caja de cajero y no un gasto, movementType = "unknown" y requiresReview = true.
 - El anio operativo actual es 2026. Si una fecha trae 03/07/2026, devuelve 2026-07-03. Si trae 03/07/26, tambien es 2026-07-03.
 - Devuelve amount como numero decimal positivo, sin simbolos.
@@ -129,7 +130,7 @@ ${params.contextText || "Sin texto adicional"}
           tags: { type: Type.ARRAY, items: { type: Type.STRING } },
           suggestedFrom: {
             type: Type.STRING,
-            enum: ["bank", "safe", "transit"],
+            enum: ["bank", "safe", "transit", "personal"],
             nullable: true,
           },
           confidence: { type: Type.NUMBER },
