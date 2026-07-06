@@ -16,6 +16,7 @@ import {
 } from "../_lib/telegramPerseoReportProcessor.js";
 import {
   expenseAssistantMenuKeyboard,
+  personalFinanceBotMenuKeyboard,
   processExpenseAssistantCallback,
   processExpenseAssistantMessage,
   processExpenseAssistantPhoto,
@@ -63,9 +64,11 @@ export default async function handler(req: any, res: any) {
     telegramBotToken,
     telegramPerseoBotToken,
     telegramExpenseBotToken,
+    telegramPersonalBotToken,
     telegramSecretToken,
     telegramPerseoSecretToken,
     telegramExpenseSecretToken,
+    telegramPersonalSecretToken,
     telegramAllowedChatId,
   } = getTelegramConfig();
 
@@ -77,6 +80,7 @@ export default async function handler(req: any, res: any) {
     telegramSecretToken,
     telegramPerseoSecretToken,
     telegramExpenseSecretToken,
+    telegramPersonalSecretToken,
   ].filter(Boolean).map(String);
 
   if (
@@ -108,14 +112,20 @@ export default async function handler(req: any, res: any) {
   const isExpenseBotRequest =
     Boolean(telegramExpenseSecretToken) &&
     String(receivedSecret || "") === String(telegramExpenseSecretToken);
+  const isPersonalBotRequest =
+    Boolean(telegramPersonalSecretToken) &&
+    String(receivedSecret || "") === String(telegramPersonalSecretToken);
 
   const callbackQuery = body.callback_query;
 
   if (callbackQuery) {
-    if (isExpenseBotRequest) {
+    if (isExpenseBotRequest || isPersonalBotRequest) {
       const result = await processExpenseAssistantCallback({
         callbackQuery,
-        botToken: telegramExpenseBotToken || telegramBotToken,
+        botToken: isPersonalBotRequest
+          ? telegramPersonalBotToken || telegramExpenseBotToken || telegramBotToken
+          : telegramExpenseBotToken || telegramBotToken,
+        personalOnly: isPersonalBotRequest,
       });
 
       return res.status(200).json(result);
@@ -192,13 +202,18 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  if (isExpenseBotRequest) {
+  if (isExpenseBotRequest || isPersonalBotRequest) {
+    const activeBotToken = isPersonalBotRequest
+      ? telegramPersonalBotToken || telegramExpenseBotToken || telegramBotToken
+      : telegramExpenseBotToken || telegramBotToken;
+
     if (largestPhoto?.file_id) {
       const photoResult = await processExpenseAssistantPhoto({
         chatId,
         message,
         largestPhoto,
-        botToken: telegramExpenseBotToken || telegramBotToken,
+        botToken: activeBotToken,
+        personalOnly: isPersonalBotRequest,
       });
 
       if (photoResult.handled) {
@@ -209,7 +224,8 @@ export default async function handler(req: any, res: any) {
     const assistantResult = await processExpenseAssistantMessage({
       chatId,
       message,
-      botToken: telegramExpenseBotToken || telegramBotToken,
+      botToken: activeBotToken,
+      personalOnly: isPersonalBotRequest,
     });
 
     if (assistantResult.handled) {
@@ -219,16 +235,15 @@ export default async function handler(req: any, res: any) {
     await sendTelegramMessage(
       chatId,
       [
-        "No identifique una salida.",
+        isPersonalBotRequest ? "No identifique un gasto personal." : "No identifique una salida.",
         "No voy a registrar nada sin una accion clara de gasto.",
         "Ejemplos:",
-        "combustible 20 tienda",
-        "taxi 8 banco",
-        "salida proveedor 50 transito",
-        "revisar correos",
+        ...(isPersonalBotRequest
+          ? ["almuerzo 5", "gasolina 20", "farmacia 8.50"]
+          : ["combustible 20 tienda", "taxi 8 banco", "salida proveedor 50 transito", "revisar correos"]),
       ].join("\n"),
-      telegramExpenseBotToken || telegramBotToken,
-      { reply_markup: expenseAssistantMenuKeyboard() }
+      activeBotToken,
+      { reply_markup: isPersonalBotRequest ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
     );
 
     return res.status(200).json({

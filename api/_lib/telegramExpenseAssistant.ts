@@ -282,7 +282,22 @@ function gmailScanDetails(result: Awaited<ReturnType<typeof scanGmailForExpenses
   ].filter(Boolean);
 }
 
-function assistantMenuText() {
+function assistantMenuText(personalOnly = false) {
+  if (personalOnly) {
+    return [
+      "Bot personal disponible.",
+      "",
+      "Uso:",
+      "- Escribe: encebollado 5",
+      "- Escribe: gasolina 20",
+      "- Envia una foto o comprobante y te propongo el gasto.",
+      "- Corrige conversando: no, era 8.50 / categoria salud / descripcion farmacia",
+      "- Eliminar ultimo: borra la ultima salida creada por este bot.",
+      "",
+      "Este bot registra solo finanzas personales y no toca cierres ni gastos del negocio.",
+    ].join("\n");
+  }
+
   return [
     "Botones disponibles.",
     "",
@@ -313,6 +328,17 @@ export function expenseAssistantMenuKeyboard() {
       [
         { text: "Revision amplia Gmail", callback_data: "gmail:scanDeep" },
       ],
+      [
+        { text: "Eliminar ultimo", callback_data: "exp:deleteLast" },
+        { text: "Ayuda", callback_data: "exp:help" },
+      ],
+    ],
+  };
+}
+
+export function personalFinanceBotMenuKeyboard() {
+  return {
+    inline_keyboard: [
       [
         { text: "Eliminar ultimo", callback_data: "exp:deleteLast" },
         { text: "Ayuda", callback_data: "exp:help" },
@@ -517,8 +543,10 @@ async function processDraftCorrection(params: {
   botToken?: string;
   draft: ExpenseDraft;
   text: string;
+  personalOnly?: boolean;
 }) {
   const normalized = normalizeText(params.text);
+  const menuKeyboard = params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard();
 
   if (/\b(cancelar|cancela|anular|olvida)\b/.test(normalized)) {
     await updateDraft(params.draft.id!, { status: "cancelled" });
@@ -527,7 +555,7 @@ async function processDraftCorrection(params: {
       params.chatId,
       "Salida cancelada. No se guardo ningun movimiento.",
       params.botToken,
-      { reply_markup: expenseAssistantMenuKeyboard() }
+      { reply_markup: menuKeyboard }
     );
     return { handled: true, corrected: true, cancelled: true, draftId: params.draft.id };
   }
@@ -834,19 +862,35 @@ export async function processExpenseAssistantMessage(params: {
   chatId: number | string;
   message: any;
   botToken?: string;
+  personalOnly?: boolean;
 }) {
   const text = String(params.message.text || params.message.caption || "").trim();
+  const menuKeyboard = params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard();
   if (isMenuRequest(text)) {
     await sendTelegramMessage(
       params.chatId,
-      assistantMenuText(),
+      assistantMenuText(Boolean(params.personalOnly)),
       params.botToken,
-      { reply_markup: expenseAssistantMenuKeyboard() }
+      { reply_markup: menuKeyboard }
     );
     return { handled: true, menu: true };
   }
 
   if (isGmailScanRequest(text)) {
+    if (params.personalOnly) {
+      await sendTelegramMessage(
+        params.chatId,
+        [
+          "Este bot es solo para finanzas personales.",
+          "No revisa Gmail del negocio ni registra movimientos operativos.",
+          "Para registrar un gasto personal escribe algo como: almuerzo 5",
+        ].join("\n"),
+        params.botToken,
+        { reply_markup: menuKeyboard }
+      );
+      return { handled: true, personalOnly: true, gmailBlocked: true };
+    }
+
     try {
       const config = getTelegramConfig();
       const result = await scanGmailForExpenses({
@@ -866,7 +910,7 @@ export async function processExpenseAssistantMessage(params: {
           ...gmailScanDetails(result),
         ].join("\n"),
         params.botToken,
-        { reply_markup: expenseAssistantMenuKeyboard() }
+        { reply_markup: menuKeyboard }
       );
 
       return { handled: true, gmailScan: true, result };
@@ -914,6 +958,7 @@ export async function processExpenseAssistantMessage(params: {
         botToken: params.botToken,
         draft: pendingDraft,
         text,
+        personalOnly: params.personalOnly,
       });
     }
 
@@ -927,7 +972,7 @@ export async function processExpenseAssistantMessage(params: {
         "es un gasto personal",
       ].join("\n"),
       params.botToken,
-      { reply_markup: expenseAssistantMenuKeyboard() }
+      { reply_markup: menuKeyboard }
     );
     return { handled: true, correction: true, foundDraft: false };
   }
@@ -939,7 +984,9 @@ export async function processExpenseAssistantMessage(params: {
   const normalizedText = normalizeText(text);
   const suggestion = await suggestExpense(normalizedText);
   const amount = parseAmount(normalizedText);
-  const from = parseCaja(normalizedText) || (suggestion.category === "Gastos personales" ? "personal" : null);
+  const from = params.personalOnly
+    ? "personal"
+    : parseCaja(normalizedText) || (suggestion.category === "Gastos personales" ? "personal" : null);
   const description = text.replace(/\s+/g, " ").slice(0, 180);
 
   const draft = await saveDraft({
@@ -973,6 +1020,7 @@ export async function processExpenseAssistantPhoto(params: {
   message: any;
   largestPhoto: any;
   botToken?: string;
+  personalOnly?: boolean;
 }) {
   if (!params.largestPhoto?.file_id) return { handled: false };
 
@@ -995,7 +1043,7 @@ export async function processExpenseAssistantPhoto(params: {
         params.chatId,
         imageRejectedText(extraction),
         params.botToken,
-        { reply_markup: expenseAssistantMenuKeyboard() }
+        { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
       );
       return { handled: true, imageExpense: false, extraction };
     }
@@ -1027,7 +1075,9 @@ export async function processExpenseAssistantPhoto(params: {
       text: caption || extraction.extractedText || extraction.description,
       normalizedText,
       amount: Number(extraction.amount),
-      from: extraction.suggestedFrom || parseCaja(normalizedText) || (category === "Gastos personales" ? "personal" : null),
+      from: params.personalOnly
+        ? "personal"
+        : extraction.suggestedFrom || parseCaja(normalizedText) || (category === "Gastos personales" ? "personal" : null),
       category,
       subcategory,
       tags: makeTags([
@@ -1065,9 +1115,13 @@ export async function processExpenseAssistantPhoto(params: {
 export async function processExpenseAssistantCallback(params: {
   callbackQuery: any;
   botToken?: string;
+  personalOnly?: boolean;
 }) {
   const data = String(params.callbackQuery.data || "");
   if (data.startsWith("gmail:")) {
+    if (params.personalOnly) {
+      return { handled: true, ignored: true, reason: "Personal bot does not handle Gmail callbacks" };
+    }
     return processGmailExpenseCallback(params);
   }
 
@@ -1087,9 +1141,9 @@ export async function processExpenseAssistantCallback(params: {
       await editTelegramMessageText({
         chatId,
         messageId,
-        text: assistantMenuText(),
+        text: assistantMenuText(Boolean(params.personalOnly)),
         botToken: params.botToken,
-        extraPayload: { reply_markup: expenseAssistantMenuKeyboard() },
+        extraPayload: { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() },
       });
     }
     return { handled: true, menu: true };
@@ -1105,7 +1159,7 @@ export async function processExpenseAssistantCallback(params: {
           ? movementDeleteText(movement.id, movement.data)
           : "No encontre una salida reciente de este bot para eliminar.",
         botToken: params.botToken,
-        extraPayload: movement ? { reply_markup: deleteMovementKeyboard(movement.id) } : { reply_markup: expenseAssistantMenuKeyboard() },
+        extraPayload: movement ? { reply_markup: deleteMovementKeyboard(movement.id) } : { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() },
       });
     }
     return { handled: true, deleteRequest: true, movementId: movement?.id || null, found: Boolean(movement) };
