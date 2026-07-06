@@ -693,8 +693,57 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
   const amount = Number(candidate.amount || 0);
   if (!Number.isFinite(amount) || amount <= 0) throw new Error("Monto invalido.");
 
-  const movementRef = db.collection("movements").doc();
   const emailDate = candidate.emailDate?.toDate ? candidate.emailDate.toDate() : new Date(candidate.emailDate);
+  const movementRef = from === "personal"
+    ? db.collection("personalMovements").doc()
+    : db.collection("movements").doc();
+
+  if (from === "personal") {
+    const boxRef = db.collection("personalCashBoxes").doc("gmail-personal");
+    const boxDoc = await boxRef.get();
+    if (!boxDoc.exists) {
+      await boxRef.set({
+        name: "GMAIL PERSONAL",
+        type: "bank",
+        openingBalance: 0,
+        color: "#2563EB",
+        isActive: true,
+        createdBy: "gmail-expense-scanner",
+        createdAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    await movementRef.set({
+      date: Timestamp.fromDate(Number.isNaN(emailDate.getTime()) ? new Date() : emailDate),
+      type: "expense",
+      amount,
+      description: `[GMAIL PICHINCHA] ${String(candidate.description || "GASTO BANCARIO")}`.toUpperCase().slice(0, 500),
+      createdBy: "gmail-expense-scanner",
+      fromBoxId: boxRef.id,
+      toBoxId: null,
+      category: candidate.category || "Otros",
+      tags: Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"],
+      source: "gmail",
+      gmailProvider: "banco-pichincha",
+      gmailCandidateId: candidateId,
+      gmailMessageId: candidate.gmailMessageId || null,
+      gmailThreadId: candidate.gmailThreadId || null,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    await ref.set(
+      {
+        status: "registered",
+        movementId: movementRef.id,
+        registeredFrom: from,
+        registeredAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return { movementId: movementRef.id, candidate };
+  }
 
   await movementRef.set({
     date: Timestamp.fromDate(Number.isNaN(emailDate.getTime()) ? new Date() : emailDate),

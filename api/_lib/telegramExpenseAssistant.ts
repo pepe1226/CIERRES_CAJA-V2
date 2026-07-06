@@ -656,41 +656,58 @@ async function learnFromDraft(draft: ExpenseDraft, movementId?: string) {
 }
 
 async function getExpenseMovementForChat(movementId: string, chatId?: number | string | null) {
-  const doc = await getFirebaseAdminDb().collection("movements").doc(movementId).get();
-  if (!doc.exists) return null;
+  const db = getFirebaseAdminDb();
+  const candidates = [
+    await db.collection("movements").doc(movementId).get(),
+    await db.collection("personalMovements").doc(movementId).get(),
+  ];
 
-  const data = doc.data() || {};
-  const isExpenseAssistantMovement =
-    data.type === "outflow" &&
-    data.source === "telegram" &&
-    data.telegramProvider === "expense-assistant";
+  for (const doc of candidates) {
+    if (!doc.exists) continue;
 
-  if (!isExpenseAssistantMovement) return null;
-  if (chatId && String(data.telegramChatId || "") !== String(chatId)) return null;
-
-  return { id: doc.id, ref: doc.ref, data };
-}
-
-async function findLastExpenseMovementForChat(chatId: number | string) {
-  const snapshot = await getFirebaseAdminDb()
-    .collection("movements")
-    .orderBy("createdAt", "desc")
-    .limit(50)
-    .get();
-
-  for (const doc of snapshot.docs) {
-    const data = doc.data();
-    if (
-      data.type === "outflow" &&
+    const data = doc.data() || {};
+    const isExpenseAssistantMovement =
+      ["outflow", "expense"].includes(String(data.type || "")) &&
       data.source === "telegram" &&
-      data.telegramProvider === "expense-assistant" &&
-      String(data.telegramChatId || "") === String(chatId)
-    ) {
-      return { id: doc.id, ref: doc.ref, data };
-    }
+      data.telegramProvider === "expense-assistant";
+
+    if (!isExpenseAssistantMovement) continue;
+    if (chatId && String(data.telegramChatId || "") !== String(chatId)) continue;
+
+    return { id: doc.id, ref: doc.ref, data };
   }
 
   return null;
+}
+
+async function findLastExpenseMovementForChat(chatId: number | string) {
+  const db = getFirebaseAdminDb();
+  const snapshots = await Promise.all([
+    db.collection("movements").orderBy("createdAt", "desc").limit(50).get(),
+    db.collection("personalMovements").orderBy("createdAt", "desc").limit(50).get(),
+  ]);
+
+  const matches: Array<{ id: string; ref: any; data: any }> = [];
+  for (const snapshot of snapshots) {
+    for (const doc of snapshot.docs) {
+      const data = doc.data();
+      if (
+        ["outflow", "expense"].includes(String(data.type || "")) &&
+        data.source === "telegram" &&
+        data.telegramProvider === "expense-assistant" &&
+        String(data.telegramChatId || "") === String(chatId)
+      ) {
+        matches.push({ id: doc.id, ref: doc.ref, data });
+      }
+    }
+  }
+
+  return matches
+    .sort((a, b) => {
+      const aMillis = a.data.createdAt?.toMillis?.() || 0;
+      const bMillis = b.data.createdAt?.toMillis?.() || 0;
+      return bMillis - aMillis;
+    })[0] || null;
 }
 
 async function deleteExpenseMovement(params: {
@@ -715,11 +732,66 @@ async function deleteExpenseMovement(params: {
   return movement;
 }
 
+async function ensureDefaultPersonalTelegramBox(chatId: string) {
+  const db = getFirebaseAdminDb();
+  const ref = db.collection("personalCashBoxes").doc(`telegram-${chatId}`);
+  const doc = await ref.get();
+
+  if (!doc.exists) {
+    await ref.set({
+      name: "TELEGRAM PERSONAL",
+      type: "wallet",
+      openingBalance: 0,
+      color: "#8B5CF6",
+      isActive: true,
+      createdBy: "telegram-personal-bot",
+      createdAt: FieldValue.serverTimestamp(),
+      telegramChatId: chatId,
+    });
+  }
+
+  return ref.id;
+}
+
 async function createMovementFromDraft(draft: ExpenseDraft) {
   if (!draft.from) throw new Error("Falta caja origen.");
   if (!Number.isFinite(draft.amount) || draft.amount <= 0) throw new Error("Monto invalido.");
 
   const db = getFirebaseAdminDb();
+  if (draft.from === "personal") {
+    const boxId = await ensureDefaultPersonalTelegramBox(draft.chatId);
+    const ref = db.collection("personalMovements").doc();
+
+    await ref.set({
+      date: Timestamp.fromDate(new Date()),
+      type: "expense",
+      amount: draft.amount,
+      description: `[TELEGRAM] ${draft.description}`.toUpperCase().slice(0, 500),
+      category: draft.category || "Otros",
+      tags: draft.tags || [],
+      fromBoxId: boxId,
+      toBoxId: null,
+      createdBy: "telegram-personal-bot",
+      createdByName: draft.telegramFirstName || draft.telegramUserName || "Telegram",
+      source: "telegram",
+      telegramProvider: "expense-assistant",
+      telegramRequiresReview: false,
+      telegramConfidence: draft.suggestionSource === "memory" ? 0.95 : 0.75,
+      telegramChatId: draft.chatId,
+      telegramMessageId: draft.messageId || null,
+      telegramUserId: draft.telegramUserId || null,
+      telegramUserName: draft.telegramUserName || null,
+      telegramFirstName: draft.telegramFirstName || null,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    await learnFromDraft(draft, ref.id);
+    await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id });
+    await setActiveDraftForChat(draft.chatId, null);
+
+    return ref.id;
+  }
+
   const ref = db.collection("movements").doc();
 
   await ref.set({

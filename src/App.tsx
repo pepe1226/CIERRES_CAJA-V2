@@ -85,6 +85,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Dashboard } from './components/Dashboard';
+import { PersonalFinance } from './components/PersonalFinance';
 
 
 type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
@@ -388,7 +389,7 @@ function AppContent() {
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<ClosureColumnKey, string>>(emptyClosureColumnFilters);
-  const [currentView, setCurrentView] = useState<'main' | 'dashboard'>('main');
+  const [currentView, setCurrentView] = useState<'main' | 'dashboard' | 'personal'>('main');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const [trips, setTrips] = useState<CollectionTrip[]>([]);
@@ -1975,6 +1976,10 @@ Notas: ${closure.notes || 'N/A'}`;
     return <Dashboard closures={closures} movements={movements} onBack={() => setCurrentView('main')} />;
   }
 
+  if (currentView === 'personal') {
+    return <PersonalFinance user={user} onBack={() => setCurrentView('main')} />;
+  }
+
   return (
     <>
       <div className={`min-h-screen bg-[#0F172A] text-slate-200 pb-20 select-none ${showPrintPreview ? 'hidden' : 'block'} print:hidden`}>
@@ -1993,7 +1998,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 <LayoutDashboard className="w-5 h-5" />
                 <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Dashboard</span>
               </button>
-              <button onClick={() => setViewingCajaMovements('personal')} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
+              <button onClick={() => setCurrentView('personal')} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
                 <Wallet className="w-5 h-5" />
                 <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Personal</span>
               </button>
