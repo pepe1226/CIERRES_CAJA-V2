@@ -1,4 +1,5 @@
-﻿import { FieldValue, Timestamp } from "firebase-admin/firestore";
+﻿import { GoogleGenAI, Type } from "@google/genai";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   answerTelegramCallbackQuery,
@@ -15,6 +16,7 @@ import {
 import {
   findExpenseMemorySuggestion,
   learnExpenseMemory,
+  type ExpenseMemoryNamespace,
 } from "./expenseMemory.js";
 
 type CajaId = "safe" | "transit" | "bank" | "personal";
@@ -30,6 +32,7 @@ type ExpenseSuggestion = {
 type ExpenseDraft = {
   id?: string;
   chatId: string;
+  personalOnly?: boolean;
   messageId?: number;
   telegramUserId?: string | null;
   telegramUserName?: string | null;
@@ -56,6 +59,22 @@ type ExpenseDraft = {
   suggestionKeyword?: string | null;
 };
 
+function assistantNamespace(personalOnly?: boolean): ExpenseMemoryNamespace {
+  return personalOnly ? "personal" : "business";
+}
+
+function draftCollectionName(personalOnly?: boolean) {
+  return personalOnly ? "telegram_personal_expense_drafts" : "telegram_expense_drafts";
+}
+
+function activeChatCollectionName(personalOnly?: boolean) {
+  return personalOnly ? "telegram_personal_expense_active_chats" : "telegram_expense_active_chats";
+}
+
+function learningChatCollectionName(personalOnly?: boolean) {
+  return personalOnly ? "telegram_personal_expense_learning_chats" : "telegram_expense_learning_chats";
+}
+
 const CATEGORY_BUTTONS = [
   { label: "Personal", category: "Gastos personales", subcategory: "GENERAL PERSONAL", tags: ["PERSONAL"] },
   { label: "Combustible", category: "Combustible", subcategory: "MOVILIZACION", tags: ["COMBUSTIBLE", "MOVILIZACION"] },
@@ -68,6 +87,26 @@ const CATEGORY_BUTTONS = [
   { label: "Servicios", category: "Servicios", subcategory: "FIJOS", tags: ["SERVICIOS", "FIJO"] },
   { label: "Otros", category: "Otros", subcategory: "GENERAL", tags: ["SIN CLASIFICAR"] },
 ];
+
+const PERSONAL_CATEGORY_BUTTONS = CATEGORY_BUTTONS.filter((item) =>
+  ["Gastos personales", "Combustible", "Transporte", "Alimentacion", "Salud", "Otros"].includes(item.category)
+);
+
+function categoryButtons(personalOnly?: boolean) {
+  return personalOnly ? PERSONAL_CATEGORY_BUTTONS : CATEGORY_BUTTONS;
+}
+
+function normalizeCategoryForScope(
+  category: string,
+  personalOnly?: boolean
+) {
+  const buttons = categoryButtons(personalOnly);
+  const allowedCategories = new Set(buttons.map((item) => item.category));
+  if (allowedCategories.has(category)) return category;
+  if (!personalOnly && allowedCategories.has("Otros")) return "Otros";
+  if (personalOnly && allowedCategories.has("Gastos personales")) return "Gastos personales";
+  return "Otros";
+}
 
 const RULES = [
   { terms: ["gasto personal", "gastos personales", "retiro personal", "para mi", "para mí", "mio", "mí", "mi plata", "plata mia", "plata mía", "personal mio", "personal mío", "uso personal"], suggestion: CATEGORY_BUTTONS[0] },
@@ -150,6 +189,103 @@ function hasLocalExpenseCue(normalized: string) {
   return RULES.some((item) => item.terms.some((term) => normalized.includes(term)));
 }
 
+type LocalTextInterpretation = {
+  isExpense: boolean;
+  amountMissing: boolean;
+  category: string | null;
+  subcategory: string | null;
+  from: CajaId | null;
+  merchant: string | null;
+  description: string | null;
+  confidence: number;
+  reasons: string[];
+};
+
+async function classifyLocalExpenseText(params: { text: string; personalOnly?: boolean }): Promise<LocalTextInterpretation | null> {
+  const { geminiApiKey, geminiModel } = getTelegramConfig();
+  if (!geminiApiKey) return null;
+
+  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+  const prompt = `
+Clasifica texto corto de WhatsApp/Telegram escrito por un usuario en Ecuador.
+
+Entiende jerga local, frases incompletas y diminutivos.
+Ejemplos que SI suelen ser gasto:
+- "encebolladito"
+- "la colita"
+- "una vuelta"
+- "me hice un mandado"
+- "tanqueo"
+- "carrera"
+- "motorizado"
+- "la funda"
+- "el chuchaqui"
+- "para la farmacia"
+- "un cafecito"
+- "almuerzo de la casa"
+- "un tuki"
+- "pasaje"
+- "una sopa"
+- "la merienda"
+
+Reglas:
+- Si no es gasto, responde isExpense=false.
+- Si es gasto pero falta monto, amountMissing=true.
+- Usa category una de: Gastos personales, Combustible, Transporte, Proveedor, Alimentacion, Salud, Insumos, Personal, Servicios, Otros.
+- Usa from personal si parece gasto personal; bank si parece transferencia o pago bancario; safe si parece caja/tienda; transit si parece movimiento en transito; null si no aplica.
+- merchant debe ser el lugar o beneficiario si se infiere.
+- description debe ser una frase corta util.
+- confidence entre 0 y 1.
+- Si el texto no permite decidir con confianza, responde isExpense=false y deja category/subcategory en null.
+- Nunca inventes categorias nuevas. Usa solo las existentes.
+- Si el texto suena a comida local o bebida, usa Alimentacion.
+- Si suena a combustible o tanqueo, usa Combustible.
+- Si suena a transporte, carrera o mandado, usa Transporte.
+- Si suena a farmacia, consulta, medicina o chuchaqui, usa Salud o Gastos personales segun aplique.
+- Si suena a personal mio, usa Gastos personales.
+- El anio operativo actual es 2026.
+
+Texto:
+${params.text}
+`;
+
+  const response = await ai.models.generateContent({
+    model: geminiModel,
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          isExpense: { type: Type.BOOLEAN },
+          amountMissing: { type: Type.BOOLEAN },
+          category: { type: Type.STRING, nullable: true },
+          subcategory: { type: Type.STRING, nullable: true },
+          from: { type: Type.STRING, enum: ["bank", "safe", "transit", "personal"], nullable: true },
+          merchant: { type: Type.STRING, nullable: true },
+          description: { type: Type.STRING, nullable: true },
+          confidence: { type: Type.NUMBER },
+          reasons: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+        required: ["isExpense", "amountMissing", "category", "subcategory", "from", "merchant", "description", "confidence", "reasons"],
+      },
+    },
+  });
+
+  const parsed = JSON.parse(response.text || "{}");
+  return {
+    isExpense: Boolean(parsed.isExpense),
+    amountMissing: Boolean(parsed.amountMissing),
+    category: parsed.category || null,
+    subcategory: parsed.subcategory || null,
+    from: parsed.from || null,
+    merchant: parsed.merchant || null,
+    description: parsed.description || null,
+    confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 0,
+    reasons: Array.isArray(parsed.reasons) ? parsed.reasons.map(String) : [],
+  };
+}
+
 function isLikelyExpenseText(text: string) {
   const normalized = normalizeText(text);
   if (!normalized || normalized.startsWith("/")) return false;
@@ -197,10 +333,21 @@ function ruleSuggestion(normalizedText: string): ExpenseSuggestion {
   };
 }
 
-async function suggestExpense(normalizedText: string, extraValues: Array<unknown> = []) {
-  const memorySuggestion = await findExpenseMemorySuggestion([normalizedText, ...extraValues]);
-  if (memorySuggestion) return { ...memorySuggestion, source: "memory" as const };
-  return ruleSuggestion(normalizedText);
+async function suggestExpense(normalizedText: string, extraValues: Array<unknown> = [], personalOnly?: boolean) {
+  const memorySuggestion = await findExpenseMemorySuggestion([normalizedText, ...extraValues], assistantNamespace(personalOnly));
+  if (memorySuggestion) {
+    return {
+      ...memorySuggestion,
+      category: normalizeCategoryForScope(memorySuggestion.category, personalOnly),
+      source: "memory" as const,
+    };
+  }
+
+  const suggestion = ruleSuggestion(normalizedText);
+  return {
+    ...suggestion,
+    category: normalizeCategoryForScope(suggestion.category, personalOnly),
+  };
 }
 
 function draftKeyboard(draft: ExpenseDraft) {
@@ -217,8 +364,25 @@ function draftKeyboard(draft: ExpenseDraft) {
     ]);
   }
 
+  rows.push(
+    draft.personalOnly
+      ? [
+          { text: "Comida", callback_data: `exp:cat:${draft.id}:Alimentacion` },
+          { text: "Gasolina", callback_data: `exp:cat:${draft.id}:Combustible` },
+          { text: "Transporte", callback_data: `exp:cat:${draft.id}:Transporte` },
+          { text: "Personal", callback_data: `exp:cat:${draft.id}:Gastos personales` },
+        ]
+      : [
+          { text: "Comida", callback_data: `exp:cat:${draft.id}:Alimentacion` },
+          { text: "Gasolina", callback_data: `exp:cat:${draft.id}:Combustible` },
+          { text: "Transporte", callback_data: `exp:cat:${draft.id}:Transporte` },
+          { text: "Personal", callback_data: `exp:cat:${draft.id}:Gastos personales` },
+        ]
+  );
+
   rows.push([
     { text: "Confirmar", callback_data: `exp:confirm:${draft.id}` },
+    { text: "Aprender", callback_data: `exp:learn:${draft.id}` },
     { text: "Categoria", callback_data: `exp:categories:${draft.id}` },
     { text: "Cancelar", callback_data: `exp:cancel:${draft.id}` },
   ]);
@@ -226,11 +390,12 @@ function draftKeyboard(draft: ExpenseDraft) {
   return { inline_keyboard: rows };
 }
 
-function categoryKeyboard(draftId: string) {
+function categoryKeyboard(draftId: string, personalOnly?: boolean) {
   const rows: any[] = [];
-  for (let index = 0; index < CATEGORY_BUTTONS.length; index += 3) {
+  const buttons = categoryButtons(personalOnly);
+  for (let index = 0; index < buttons.length; index += 3) {
     rows.push(
-      CATEGORY_BUTTONS.slice(index, index + 3).map((item) => ({
+      buttons.slice(index, index + 3).map((item) => ({
         text: item.label,
         callback_data: `exp:cat:${draftId}:${item.category}`,
       }))
@@ -368,6 +533,7 @@ function missingAmountHelpText(suggestion: ExpenseSuggestion, personalOnly = fal
     "- encebollado 5",
     "- tanqueo 20",
     "- mandado 8",
+    "Tambien puedes tocar una categoria o usar los botones rapidos del mensaje del registro.",
   ].join("\n");
 }
 
@@ -471,9 +637,9 @@ function imageRejectedText(extraction: Awaited<ReturnType<typeof extractExpenseF
   ].join("\n");
 }
 
-async function setActiveDraftForChat(chatId: number | string, draftId: string | null) {
+async function setActiveDraftForChat(chatId: number | string, draftId: string | null, personalOnly?: boolean) {
   const db = getFirebaseAdminDb();
-  const ref = db.collection("telegram_expense_active_chats").doc(String(chatId));
+  const ref = db.collection(activeChatCollectionName(personalOnly)).doc(String(chatId));
 
   await ref.set(
     {
@@ -485,9 +651,33 @@ async function setActiveDraftForChat(chatId: number | string, draftId: string | 
   );
 }
 
+async function setLearningDraftForChat(chatId: number | string, draftId: string | null, personalOnly?: boolean) {
+  const db = getFirebaseAdminDb();
+  const ref = db.collection(learningChatCollectionName(personalOnly)).doc(String(chatId));
+
+  await ref.set(
+    {
+      chatId: String(chatId),
+      draftId,
+      updatedAt: FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+async function getLearningDraftForChat(chatId: number | string, personalOnly?: boolean): Promise<ExpenseDraft | null> {
+  const db = getFirebaseAdminDb();
+  const active = await db.collection(learningChatCollectionName(personalOnly)).doc(String(chatId)).get();
+  const draftId = active.data()?.draftId ? String(active.data()?.draftId) : "";
+  if (!draftId) return null;
+  const draft = await getDraft(draftId, personalOnly);
+  if (!draft || draft.status !== "pending") return null;
+  return draft;
+}
+
 async function saveDraft(draft: ExpenseDraft) {
   const db = getFirebaseAdminDb();
-  const ref = db.collection("telegram_expense_drafts").doc();
+  const ref = db.collection(draftCollectionName(draft.personalOnly)).doc();
   const saved = { ...draft, id: ref.id };
 
   await ref.set({
@@ -496,14 +686,14 @@ async function saveDraft(draft: ExpenseDraft) {
     updatedAt: FieldValue.serverTimestamp(),
   });
 
-  await setActiveDraftForChat(saved.chatId, ref.id);
+  await setActiveDraftForChat(saved.chatId, ref.id, saved.personalOnly);
 
   return saved;
 }
 
-async function updateDraft(draftId: string, values: Partial<ExpenseDraft>) {
+async function updateDraft(draftId: string, values: Partial<ExpenseDraft>, personalOnly?: boolean) {
   const db = getFirebaseAdminDb();
-  await db.collection("telegram_expense_drafts").doc(draftId).set(
+  await db.collection(draftCollectionName(personalOnly)).doc(draftId).set(
     {
       ...values,
       updatedAt: FieldValue.serverTimestamp(),
@@ -512,25 +702,25 @@ async function updateDraft(draftId: string, values: Partial<ExpenseDraft>) {
   );
 }
 
-async function getDraft(draftId: string): Promise<ExpenseDraft | null> {
-  const doc = await getFirebaseAdminDb().collection("telegram_expense_drafts").doc(draftId).get();
+async function getDraft(draftId: string, personalOnly?: boolean): Promise<ExpenseDraft | null> {
+  const doc = await getFirebaseAdminDb().collection(draftCollectionName(personalOnly)).doc(draftId).get();
   return doc.exists ? ({ id: doc.id, ...doc.data() } as ExpenseDraft) : null;
 }
 
-async function findLatestPendingDraftForChat(chatId: number | string): Promise<ExpenseDraft | null> {
+async function findLatestPendingDraftForChat(chatId: number | string, personalOnly?: boolean): Promise<ExpenseDraft | null> {
   const db = getFirebaseAdminDb();
-  const active = await db.collection("telegram_expense_active_chats").doc(String(chatId)).get();
+  const active = await db.collection(activeChatCollectionName(personalOnly)).doc(String(chatId)).get();
   const activeDraftId = active.data()?.draftId ? String(active.data()?.draftId) : "";
 
   if (activeDraftId) {
-    const activeDraft = await getDraft(activeDraftId);
+    const activeDraft = await getDraft(activeDraftId, personalOnly);
     if (activeDraft && activeDraft.status === "pending" && String(activeDraft.chatId) === String(chatId)) {
       return activeDraft;
     }
   }
 
   const snapshot = await getFirebaseAdminDb()
-    .collection("telegram_expense_drafts")
+    .collection(draftCollectionName(personalOnly))
     .orderBy("updatedAt", "desc")
     .limit(200)
     .get();
@@ -538,7 +728,7 @@ async function findLatestPendingDraftForChat(chatId: number | string): Promise<E
   for (const doc of snapshot.docs) {
     const data = doc.data();
     if (String(data.chatId || "") === String(chatId) && data.status === "pending") {
-      await setActiveDraftForChat(chatId, doc.id);
+      await setActiveDraftForChat(chatId, doc.id, personalOnly);
       return { id: doc.id, ...data } as ExpenseDraft;
     }
   }
@@ -546,8 +736,9 @@ async function findLatestPendingDraftForChat(chatId: number | string): Promise<E
   return null;
 }
 
-function findCategoryFromText(normalizedText: string) {
-  const byCategory = CATEGORY_BUTTONS.find((item) =>
+function findCategoryFromText(normalizedText: string, personalOnly?: boolean) {
+  const buttons = categoryButtons(personalOnly);
+  const byCategory = buttons.find((item) =>
     normalizeText(item.category) === normalizedText ||
     normalizeText(item.label) === normalizedText ||
     normalizedText.includes(normalizeText(item.category)) ||
@@ -556,6 +747,9 @@ function findCategoryFromText(normalizedText: string) {
   if (byCategory) return byCategory;
 
   const suggestion = ruleSuggestion(normalizedText);
+  if (personalOnly && !PERSONAL_CATEGORY_BUTTONS.some((item) => item.category === suggestion.category)) {
+    return null;
+  }
   if (suggestion.source === "rules") {
     return {
       label: suggestion.category,
@@ -639,8 +833,8 @@ async function processDraftCorrection(params: {
   const menuKeyboard = params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard();
 
   if (/\b(cancelar|cancela|anular|olvida)\b/.test(normalized)) {
-    await updateDraft(params.draft.id!, { status: "cancelled" });
-    await setActiveDraftForChat(params.chatId, null);
+    await updateDraft(params.draft.id!, { status: "cancelled" }, params.personalOnly);
+    await setActiveDraftForChat(params.chatId, null, params.personalOnly);
     await sendTelegramMessage(
       params.chatId,
       "Salida cancelada. No se guardo ningun movimiento.",
@@ -653,7 +847,7 @@ async function processDraftCorrection(params: {
   if (/^(confirmar|confirma|registrar|registra|listo|ok|dale|guardar|guarda)$/.test(normalized)) {
     try {
       const movementId = await createMovementFromDraft(params.draft);
-      await setActiveDraftForChat(params.chatId, null);
+      await setActiveDraftForChat(params.chatId, null, params.personalOnly);
       await sendTelegramMessage(
         params.chatId,
         [
@@ -695,7 +889,7 @@ async function processDraftCorrection(params: {
     changed.push(`Caja: ${cajaLabel(from)}`);
   }
 
-  const category = findCategoryFromText(normalized);
+  const category = findCategoryFromText(normalized, params.personalOnly);
   if (category && category.category !== params.draft.category) {
     updates.category = category.category;
     updates.subcategory = category.subcategory;
@@ -755,7 +949,7 @@ async function processDraftCorrection(params: {
   }
 
   const updatedDraft = { ...params.draft, ...updates };
-  await updateDraft(params.draft.id!, updates);
+  await updateDraft(params.draft.id!, updates, params.personalOnly);
   await sendTelegramMessage(
     params.chatId,
     [
@@ -788,14 +982,40 @@ async function learnFromDraft(draft: ExpenseDraft, movementId?: string) {
     tags: draft.tags || [],
     movementId: movementId || draft.movementId || null,
     source: draft.suggestionSource || "telegram",
+    namespace: assistantNamespace(draft.personalOnly),
   });
 }
 
-async function getExpenseMovementForChat(movementId: string, chatId?: number | string | null) {
+async function learnAliasFromDraft(draft: ExpenseDraft, aliasText: string) {
+  const alias = normalizeKeyword(aliasText) || normalizeText(aliasText);
+  if (!alias || alias.length < 2) {
+    throw new Error("Alias invalido.");
+  }
+
+  await learnExpenseMemory({
+    keywords: [
+      alias,
+      draft.suggestionKeyword,
+      draft.merchant,
+      draft.destinationAccount,
+      draft.sourceAccount,
+      draft.description,
+      draft.text,
+      draft.extractedText,
+    ],
+    category: draft.category,
+    subcategory: draft.subcategory || "GENERAL",
+    tags: draft.tags || [],
+    movementId: draft.movementId || draft.id || null,
+    source: "manual",
+    namespace: assistantNamespace(draft.personalOnly),
+  });
+}
+
+async function getExpenseMovementForChat(movementId: string, chatId?: number | string | null, personalOnly?: boolean) {
   const db = getFirebaseAdminDb();
   const candidates = [
-    await db.collection("movements").doc(movementId).get(),
-    await db.collection("personalMovements").doc(movementId).get(),
+    await db.collection(personalOnly ? "personalMovements" : "movements").doc(movementId).get(),
   ];
 
   for (const doc of candidates) {
@@ -816,11 +1036,10 @@ async function getExpenseMovementForChat(movementId: string, chatId?: number | s
   return null;
 }
 
-async function findLastExpenseMovementForChat(chatId: number | string) {
+async function findLastExpenseMovementForChat(chatId: number | string, personalOnly?: boolean) {
   const db = getFirebaseAdminDb();
   const snapshots = await Promise.all([
-    db.collection("movements").orderBy("createdAt", "desc").limit(50).get(),
-    db.collection("personalMovements").orderBy("createdAt", "desc").limit(50).get(),
+    db.collection(personalOnly ? "personalMovements" : "movements").orderBy("createdAt", "desc").limit(50).get(),
   ]);
 
   const matches: Array<{ id: string; ref: any; data: any }> = [];
@@ -850,8 +1069,9 @@ async function deleteExpenseMovement(params: {
   movementId: string;
   chatId?: number | string | null;
   deletedBy?: string | null;
+  personalOnly?: boolean;
 }) {
-  const movement = await getExpenseMovementForChat(params.movementId, params.chatId);
+  const movement = await getExpenseMovementForChat(params.movementId, params.chatId, params.personalOnly);
   if (!movement) {
     throw new Error("No encontre una salida de este bot para eliminar.");
   }
@@ -935,8 +1155,8 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
     });
 
     await learnFromDraft(draft, ref.id);
-    await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id });
-    await setActiveDraftForChat(draft.chatId, null);
+    await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id }, draft.personalOnly);
+    await setActiveDraftForChat(draft.chatId, null, draft.personalOnly);
 
     return ref.id;
   }
@@ -978,8 +1198,8 @@ async function createMovementFromDraft(draft: ExpenseDraft) {
   });
 
   await learnFromDraft(draft, ref.id);
-  await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id });
-  await setActiveDraftForChat(draft.chatId, null);
+  await updateDraft(draft.id!, { status: "confirmed", movementId: ref.id }, draft.personalOnly);
+  await setActiveDraftForChat(draft.chatId, null, draft.personalOnly);
 
   return ref.id;
 }
@@ -1000,6 +1220,34 @@ export async function processExpenseAssistantMessage(params: {
       { reply_markup: menuKeyboard }
     );
     return { handled: true, menu: true };
+  }
+
+  const learningDraft = await getLearningDraftForChat(params.chatId, params.personalOnly);
+  if (learningDraft) {
+    try {
+      await learnAliasFromDraft(learningDraft, text);
+      await setLearningDraftForChat(params.chatId, null, params.personalOnly);
+      await sendTelegramMessage(
+        params.chatId,
+        [
+          "Aprendido.",
+          `Voy a relacionar "${normalizeText(text)}" con ${learningDraft.category}.`,
+          learningDraft.merchant ? `Tambien voy a usar ${learningDraft.merchant} como pista.` : "",
+          "La próxima vez lo reconoceré mejor.",
+        ].filter(Boolean).join("\n"),
+        params.botToken,
+        { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+      );
+      return { handled: true, learnedAlias: true, draftId: learningDraft.id };
+    } catch (error: any) {
+      await sendTelegramMessage(
+        params.chatId,
+        `No pude aprender esa palabra: ${error?.message || String(error)}`,
+        params.botToken,
+        { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+      );
+      return { handled: true, learnedAlias: false, error: error?.message || String(error) };
+    }
   }
 
   if (isGmailScanRequest(text)) {
@@ -1053,8 +1301,8 @@ export async function processExpenseAssistantMessage(params: {
   if (isDeleteRequest(text)) {
     const movementId = parseDeleteMovementId(text);
     const movement = movementId
-      ? await getExpenseMovementForChat(movementId, params.chatId)
-      : await findLastExpenseMovementForChat(params.chatId);
+      ? await getExpenseMovementForChat(movementId, params.chatId, params.personalOnly)
+      : await findLastExpenseMovementForChat(params.chatId, params.personalOnly);
 
     if (!movement) {
       await sendTelegramMessage(
@@ -1076,7 +1324,7 @@ export async function processExpenseAssistantMessage(params: {
   }
 
   if (isConversationalCorrectionText(text)) {
-    const pendingDraft = await findLatestPendingDraftForChat(params.chatId);
+    const pendingDraft = await findLatestPendingDraftForChat(params.chatId, params.personalOnly);
     if (pendingDraft) {
       return processDraftCorrection({
         chatId: params.chatId,
@@ -1103,17 +1351,68 @@ export async function processExpenseAssistantMessage(params: {
     return { handled: true, correction: true, foundDraft: false };
   }
 
-  if (!isLikelyExpenseText(text)) {
-    return { handled: false };
-  }
-
   const normalizedText = normalizeText(text);
-  const suggestion = await suggestExpense(normalizedText);
-  const amount = parseAmount(normalizedText);
-  if (amount <= 0) {
+  if (!isLikelyExpenseText(text)) {
+    const localHint = await classifyLocalExpenseText({ text, personalOnly: params.personalOnly });
+    if (!localHint?.isExpense) {
+      await sendTelegramMessage(
+        params.chatId,
+        [
+          "No te entendi como salida del negocio.",
+          "Si quieres registrar un movimiento, dime el monto con una frase corta.",
+          "Ejemplos:",
+          "- combustible 20 banco",
+          "- proveedor 50 transito",
+          "- almuerzo 12 tienda",
+          "- ingreso 150 banco",
+        ].join("\n"),
+        params.botToken,
+        { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+      );
+      return { handled: true, unclear: true };
+    }
+
+    const localCategoryLabel = localHint.category
+      ? normalizeCategoryForScope(localHint.category, params.personalOnly)
+      : null;
+    const hintMessage = localHint.category
+      ? [
+          `Entendi que hablas de ${localCategoryLabel?.toLowerCase() || "un gasto"}.`,
+          localHint.merchant ? `Parece relacionado con ${localHint.merchant}.` : "",
+          "Me falta el monto.",
+          "Escribe algo como: 2 en platano / gasolina 20 / almuerzo 5",
+        ].filter(Boolean).join("\n")
+      : missingAmountHelpText({ category: "Otros", subcategory: "GENERAL", tags: [], source: "default" }, Boolean(params.personalOnly));
+
     await sendTelegramMessage(
       params.chatId,
-      missingAmountHelpText(suggestion, Boolean(params.personalOnly)),
+      hintMessage,
+      params.botToken,
+      { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+    );
+    return { handled: true, missingAmount: true, hint: localHint };
+  }
+
+  const suggestion = await suggestExpense(normalizedText, [], params.personalOnly);
+  const amount = parseAmount(normalizedText);
+  if (amount <= 0) {
+    const localHint = await classifyLocalExpenseText({ text, personalOnly: params.personalOnly });
+    const localCategoryLabel = localHint?.category
+      ? normalizeCategoryForScope(localHint.category, params.personalOnly)
+      : null;
+    await sendTelegramMessage(
+      params.chatId,
+      localCategoryLabel
+        ? [
+            `Entendi que hablas de ${localCategoryLabel.toLowerCase()}.`,
+            localHint.merchant ? `Parece relacionado con ${localHint.merchant}.` : "",
+            "Me falta el monto.",
+            "Escribe algo como: 2 en platano / gasolina 20 / almuerzo 5",
+          ].filter(Boolean).join("\n")
+        : [
+            `Entendi que quieres registrar un movimiento ${params.personalOnly ? "personal" : "del negocio"}, pero me falta el monto.`,
+            "Escribe algo como: combustible 20 banco / proveedor 50 transito / almuerzo 5",
+          ].join("\n"),
       params.botToken,
       { reply_markup: params.personalOnly ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
     );
@@ -1126,6 +1425,7 @@ export async function processExpenseAssistantMessage(params: {
 
   const draft = await saveDraft({
     chatId: String(params.chatId),
+    personalOnly: Boolean(params.personalOnly),
     messageId: params.message.message_id || null,
     telegramUserId: params.message.from?.id ? String(params.message.from.id) : null,
     telegramUserName: params.message.from?.username || null,
@@ -1193,7 +1493,7 @@ export async function processExpenseAssistantPhoto(params: {
       extraction.merchant,
       extraction.destinationAccount,
       extraction.description,
-    ]);
+    ], params.personalOnly);
     const category = suggestion.source === "memory" ? suggestion.category : extraction.category || suggestion.category;
     const subcategory = suggestion.source === "memory" ? suggestion.subcategory : extraction.subcategory || suggestion.subcategory || "GENERAL";
     const description = (
@@ -1204,6 +1504,7 @@ export async function processExpenseAssistantPhoto(params: {
 
     const draft = await saveDraft({
       chatId: String(params.chatId),
+      personalOnly: Boolean(params.personalOnly),
       messageId: params.message.message_id || null,
       telegramUserId: params.message.from?.id ? String(params.message.from.id) : null,
       telegramUserName: params.message.from?.username || null,
@@ -1294,7 +1595,7 @@ export async function processExpenseAssistantCallback(params: {
   }
 
   if (action === "deleteLast") {
-    const movement = chatId ? await findLastExpenseMovementForChat(chatId) : null;
+    const movement = chatId ? await findLastExpenseMovementForChat(chatId, params.personalOnly) : null;
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1310,7 +1611,7 @@ export async function processExpenseAssistantCallback(params: {
   }
 
   if (action === "deleteAsk") {
-    const movement = await getExpenseMovementForChat(draftId, chatId);
+    const movement = await getExpenseMovementForChat(draftId, chatId, params.personalOnly);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1343,6 +1644,7 @@ export async function processExpenseAssistantCallback(params: {
         movementId: draftId,
         chatId,
         deletedBy: params.callbackQuery.from?.id ? String(params.callbackQuery.from.id) : null,
+        personalOnly: params.personalOnly,
       });
 
       if (chatId && messageId) {
@@ -1373,7 +1675,7 @@ export async function processExpenseAssistantCallback(params: {
     }
   }
 
-  const draft = await getDraft(draftId);
+  const draft = await getDraft(draftId, params.personalOnly);
   if (!draft || draft.status !== "pending") {
     if (chatId && messageId) {
       await editTelegramMessageText({
@@ -1387,8 +1689,9 @@ export async function processExpenseAssistantCallback(params: {
   }
 
   if (action === "cancel") {
-    await updateDraft(draftId, { status: "cancelled" });
-    if (chatId) await setActiveDraftForChat(chatId, null);
+    await updateDraft(draftId, { status: "cancelled" }, params.personalOnly);
+    if (chatId) await setActiveDraftForChat(chatId, null, params.personalOnly);
+    if (chatId) await setLearningDraftForChat(chatId, null, params.personalOnly);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1401,21 +1704,48 @@ export async function processExpenseAssistantCallback(params: {
   }
 
   if (action === "categories") {
-    if (chatId) await setActiveDraftForChat(chatId, draftId);
+    if (chatId) await setActiveDraftForChat(chatId, draftId, params.personalOnly);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
         messageId,
         text: "Elige la categoria para esta salida.",
         botToken: params.botToken,
-        extraPayload: { reply_markup: categoryKeyboard(draftId) },
+        extraPayload: { reply_markup: categoryKeyboard(draftId, params.personalOnly) },
       });
     }
     return { handled: true };
   }
 
+  if (action === "learn") {
+    if (chatId) {
+      await setActiveDraftForChat(chatId, draftId, params.personalOnly);
+      await setLearningDraftForChat(chatId, draftId, params.personalOnly);
+    }
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: [
+          "Escribe la palabra o alias que quieres que recuerde.",
+          "Ejemplos:",
+          "- platano",
+          "- la colita",
+          "- tanqueo",
+          "- mandado",
+        ].join("\n"),
+        botToken: params.botToken,
+        extraPayload: { reply_markup: draftKeyboard(draft) },
+      });
+    }
+    return { handled: true, learning: true, draftId };
+  }
+
   if (action === "cat") {
-    const category = CATEGORY_BUTTONS.find((item) => item.category === value) || CATEGORY_BUTTONS[CATEGORY_BUTTONS.length - 1];
+    const buttons = categoryButtons(params.personalOnly);
+    const category =
+      buttons.find((item) => item.category === value) ||
+      buttons[buttons.length - 1];
     const updated = {
       ...draft,
       category: category.category,
@@ -1424,8 +1754,8 @@ export async function processExpenseAssistantCallback(params: {
       from: category.category === "Gastos personales" ? "personal" as CajaId : draft.from,
       suggestionSource: "manual",
     };
-    await updateDraft(draftId, updated);
-    if (chatId) await setActiveDraftForChat(chatId, draftId);
+    await updateDraft(draftId, updated, params.personalOnly);
+    if (chatId) await setActiveDraftForChat(chatId, draftId, params.personalOnly);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1440,8 +1770,8 @@ export async function processExpenseAssistantCallback(params: {
 
   if (action === "from" && ["safe", "transit", "bank", "personal"].includes(value)) {
     const updated = { ...draft, from: value as CajaId };
-    await updateDraft(draftId, { from: value as CajaId });
-    if (chatId) await setActiveDraftForChat(chatId, draftId);
+    await updateDraft(draftId, { from: value as CajaId }, params.personalOnly);
+    if (chatId) await setActiveDraftForChat(chatId, draftId, params.personalOnly);
     if (chatId && messageId) {
       await editTelegramMessageText({
         chatId,
@@ -1457,6 +1787,7 @@ export async function processExpenseAssistantCallback(params: {
   if (action === "confirm") {
     try {
       const movementId = await createMovementFromDraft(draft);
+      if (chatId) await setLearningDraftForChat(chatId, null, params.personalOnly);
       if (chatId && messageId) {
         await editTelegramMessageText({
           chatId,

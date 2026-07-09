@@ -12,15 +12,15 @@ jobs:
       - name: Trigger Gmail scan
         env:
           SCAN_URL: https://cierres-caja-v2.vercel.app/api/gmail/scan?max=25
-          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          GMAIL_SCAN_SECRET: ${{ secrets.GMAIL_SCAN_SECRET }}
         run: |
-          if [ -z "$CRON_SECRET" ]; then
-            echo "Missing GitHub secret: CRON_SECRET"
+          if [ -z "$GMAIL_SCAN_SECRET" ]; then
+            echo "Missing GitHub secret: GMAIL_SCAN_SECRET"
             exit 1
           fi
 
           curl --fail --silent --show-error \
             --retry 3 \
             --retry-delay 5 \
-            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Authorization: Bearer $GMAIL_SCAN_SECRET" \
             "$SCAN_URL"

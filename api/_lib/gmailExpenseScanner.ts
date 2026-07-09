@@ -30,12 +30,16 @@ type ParsedBankExpense = {
   subject: string;
   from: string;
   amount: number;
+  movementKind: "expense" | "transfer";
   description: string;
   category: string;
   subcategory: string;
   tags: string[];
   rawText: string;
   merchant?: string | null;
+  destinationBank?: string | null;
+  sourceAccount?: string | null;
+  destinationAccount?: string | null;
   memoryKeyword?: string | null;
 };
 
@@ -61,6 +65,16 @@ type GmailScanResult = {
   results: any[];
 };
 
+const GMAIL_CATEGORY_OPTIONS = [
+  { key: "proveedor", label: "Proveedor", category: "Proveedor", subcategory: "COMPRAS", tags: ["PROVEEDOR", "COMPRAS", "BANCO", "PICHINCHA"] },
+  { key: "servicios", label: "Servicios", category: "Servicios", subcategory: "FIJOS", tags: ["SERVICIOS", "FIJO", "BANCO", "PICHINCHA"] },
+  { key: "combustible", label: "Combustible", category: "Combustible", subcategory: "MOVILIZACION", tags: ["COMBUSTIBLE", "MOVILIZACION", "BANCO", "PICHINCHA"] },
+  { key: "transporte", label: "Transporte", category: "Transporte", subcategory: "MOVILIZACION", tags: ["TRANSPORTE", "MOVILIZACION", "BANCO", "PICHINCHA"] },
+  { key: "alimentacion", label: "Alimentacion", category: "Alimentacion", subcategory: "COMIDAS", tags: ["ALIMENTACION", "COMIDAS", "BANCO", "PICHINCHA"] },
+  { key: "personal", label: "Personal negocio", category: "Personal", subcategory: "ANTICIPO", tags: ["EMPLEADOS", "ANTICIPO", "BANCO", "PICHINCHA"] },
+  { key: "otros", label: "Otro gasto", category: "Otros", subcategory: "GENERAL", tags: ["BANCO", "PICHINCHA", "SIN CLASIFICAR"] },
+];
+
 function env(name: string, fallback = "") {
   return (process.env[name] || fallback).trim();
 }
@@ -78,12 +92,17 @@ export function getGmailExpenseStatus() {
 function getGmailQuery() {
   return env(
     "GMAIL_EXPENSE_QUERY",
-    'newer_than:30d (pichincha OR "Banco Pichincha" OR "notificaciones pichincha" OR "transaccion" OR "transacción" OR "transferencia" OR "compra" OR "consumo")'
+    'newer_than:30d (from:pichincha OR subject:(pichincha OR "banco pichincha" OR notificacion OR transaccion OR transferencia OR compra OR consumo))'
   );
 }
 
 function isAuthorized(req: any) {
-  const expectedSecret = (process.env.CRON_SECRET || getTelegramConfig().telegramSecretToken || "").trim();
+  const expectedSecret = (
+    process.env.GMAIL_SCAN_SECRET ||
+    process.env.CRON_SECRET ||
+    getTelegramConfig().telegramSecretToken ||
+    ""
+  ).trim();
   if (!expectedSecret) return false;
 
   const authHeader = String(req.headers?.authorization || "");
@@ -203,6 +222,15 @@ function parseMoney(value: unknown) {
   const match = text.match(/(?:usd|\$)?(-?\d{1,6}(?:[.,]\d{1,2})?)/i);
   if (!match) return 0;
 
+  const rawNumber = match[1];
+  const plainDigits = rawNumber.replace(/[.,].*$/, "");
+  if (!/[.,]/.test(rawNumber) && plainDigits.length === 4) {
+    const maybeYear = Number(plainDigits);
+    if (maybeYear >= 1900 && maybeYear <= 2099) {
+      return 0;
+    }
+  }
+
   const amount = Number(match[1].replace(",", "."));
   return Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : 0;
 }
@@ -211,13 +239,49 @@ function findAmounts(text: string) {
   const currencyMatches = Array.from(text.matchAll(/(?:usd|\$)\s*(\d{1,6}(?:[.,]\d{1,2})?)/gi));
   const trailingCurrencyMatches = Array.from(text.matchAll(/\b(\d{1,6}(?:[.,]\d{1,2})?)\s*(?:usd|\$)\b/gi));
   const labelMatches = Array.from(
-    text.matchAll(/\b(?:valor|monto|importe|total|por|de|compra|consumo|debito|débito|retiro|transferencia|pago)\b\s*:?\s*(?:usd|\$)?\s*(\d{1,6}(?:[.,]\d{1,2})?)/gi)
+    text.matchAll(/\b(?:valor|monto|importe|total|compra|consumo|debito|d[eé]bito|retiro|transferencia|pago)\b\s*:?\s*(?:usd|\$)?\s*(\d{1,6}(?:[.,]\d{1,2})?)/gi)
   );
   const matches = [...currencyMatches, ...trailingCurrencyMatches, ...labelMatches];
   return matches
     .map((match) => parseMoney(match[1]))
     .filter((amount) => amount > 0 && amount <= 10000)
     .sort((a, b) => b - a);
+}
+
+function extractField(rawText: string, labels: string[]) {
+  const escaped = labels.map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const regex = new RegExp(
+    `(?:${escaped.join("|")})\\s*:?\\s*(.+?)(?=\\n\\s*(?:[A-Za-zÁÉÍÓÚÑa-z0-9][^\\n]{0,40}:)|$)`,
+    "i"
+  );
+  const match = rawText.match(regex);
+  return match?.[1]?.replace(/\s+/g, " ").trim() || "";
+}
+
+function looksInformationalBankMail(normalized: string) {
+  return (
+    /\b(credito digital|cr[eé]dito digital|cuota de tu credito|cuota de tu cr[eé]dito|estas al dia|est[aá]s al d[ií]a|reconocemos tu esfuerzo|gracias maria|gracias por cumplir)\b/.test(normalized) ||
+    (/\b(credito|cr[eé]dito|prestamo|pr[eé]stamo)\b/.test(normalized) &&
+      /\b(cuota|mensual|debito con exito|d[eé]bito con [eé]xito)\b/.test(normalized))
+  );
+}
+
+function inferBankMovement(rawText: string) {
+  const normalized = normalizeText(rawText);
+  const hasTransferSignal =
+    /\b(transferencia solicitada|transferencia exitosa|realizaste una transferencia|enviaste una transferencia|cuenta acreditada|banco destino|nombre del beneficiario|beneficiario|cuenta de origen|cuenta destino)\b/.test(normalized);
+  const hasExpenseSignal =
+    /\b(compra|consumo|debito|transferencia|pago|retiro|transaccion|tarjeta|pagaste|realizaste|enviaste)\b/.test(normalized);
+  const hasIncomeSignal =
+    /\b(deposito|acreditacion|recibiste|recibido|ingreso|abono|te transfirieron)\b/.test(normalized);
+
+  return {
+    normalized,
+    hasTransferSignal,
+    hasExpenseSignal,
+    hasIncomeSignal,
+    looksInformationalOnly: looksInformationalBankMail(normalized),
+  };
 }
 
 function suggestCategory(text: string) {
@@ -245,12 +309,35 @@ function suggestCategory(text: string) {
   return { category: "Otros", subcategory: "GENERAL", tags: ["BANCO", "PICHINCHA"] };
 }
 
+function suggestCategoryForBankMovement(rawText: string, movementKind: "expense" | "transfer", merchant = "") {
+  const combined = [rawText, merchant].filter(Boolean).join("\n");
+  const base = suggestCategory(combined);
+
+  if (movementKind === "transfer" && base.category === "Otros") {
+    return {
+      category: "Proveedor",
+      subcategory: "COMPRAS",
+      tags: ["PROVEEDOR", "TRANSFERENCIA", "BANCO", "PICHINCHA"],
+    };
+  }
+
+  if (movementKind === "transfer") {
+    return {
+      ...base,
+      tags: Array.from(new Set([...(base.tags || []), "TRANSFERENCIA", "BANCO", "PICHINCHA"])).slice(0, 8),
+    };
+  }
+
+  return base;
+}
+
 function analyzePichinchaExpense(message: GmailMessage): { expense: ParsedBankExpense | null; diagnostic: GmailDiagnostic } {
   const subject = getHeader(message, "Subject");
   const from = getHeader(message, "From");
   const body = collectBodyParts(message.payload).join("\n");
   const rawText = [subject, from, message.snippet || "", body].join("\n").slice(0, 8000);
   const normalized = normalizeText(rawText);
+  const headerText = normalizeText([subject, from].join("\n"));
   const amounts = findAmounts(rawText);
   const diagnostic: GmailDiagnostic = {
     reason: "parsed",
@@ -261,7 +348,7 @@ function analyzePichinchaExpense(message: GmailMessage): { expense: ParsedBankEx
   };
 
   const hasPichinchaSignal =
-    /\b(pichincha|banco pichincha)\b/.test(normalized) ||
+    /\b(pichincha|banco pichincha)\b/.test(headerText) ||
     /pichincha/i.test(from) ||
     /pichincha/i.test(subject);
 
@@ -274,25 +361,39 @@ function analyzePichinchaExpense(message: GmailMessage): { expense: ParsedBankEx
     return { expense: null, diagnostic: { ...diagnostic, reason: "sin_monto" } };
   }
 
-  const hasExpenseSignal =
-    /\b(compra|consumo|debito|transferencia|pago|retiro|transaccion|tarjeta|pagaste|realizaste|enviaste)\b/.test(normalized);
-  const hasIncomeSignal =
-    /\b(deposito|acreditacion|recibiste|recibido|ingreso|abono|te transfirieron)\b/.test(normalized);
+  const movement = inferBankMovement(rawText);
+  const beneficiary =
+    extractField(rawText, ["Nombre del beneficiario", "Beneficiario", "Cuenta destino", "Destino"]) ||
+    "";
+  const destinationBank = extractField(rawText, ["Banco destino", "Banco beneficiario"]) || "";
+  const sourceAccount = extractField(rawText, ["Cuenta de origen", "Cuenta origen"]) || "";
+  const destinationAccount = extractField(rawText, ["Cuenta acreditada", "Cuenta destino", "Cuenta beneficiario"]) || "";
+  const merchant = beneficiary || destinationBank || null;
+  const movementKind: "expense" | "transfer" = movement.hasTransferSignal ? "transfer" : "expense";
 
-  if (hasIncomeSignal && !hasExpenseSignal) {
+  if (movement.looksInformationalOnly && !movement.hasTransferSignal) {
+    return { expense: null, diagnostic: { ...diagnostic, reason: "informativo" } };
+  }
+
+  if (movement.hasIncomeSignal && !movement.hasExpenseSignal && !movement.hasTransferSignal) {
     return { expense: null, diagnostic: { ...diagnostic, reason: "parece_ingreso" } };
   }
 
-  const category = suggestCategory(rawText);
+  if (!movement.hasExpenseSignal && !movement.hasTransferSignal) {
+    return { expense: null, diagnostic: { ...diagnostic, reason: "sin_senal_gasto" } };
+  }
+
+  const category = suggestCategoryForBankMovement(rawText, movementKind, merchant || "");
   const emailDate = message.internalDate
     ? new Date(Number(message.internalDate))
     : new Date(getHeader(message, "Date") || Date.now());
 
   const description = [
     "Pichincha",
-    subject || "transaccion bancaria",
+    movementKind === "transfer" ? "transferencia" : "egreso bancario",
+    merchant || subject || "transaccion bancaria",
     (message.snippet || "").replace(/\s+/g, " ").slice(0, 140),
-    hasExpenseSignal ? "" : "REVISAR: detectado por monto en correo Pichincha",
+    movement.hasExpenseSignal || movement.hasTransferSignal ? "" : "REVISAR: detectado por monto en correo Pichincha",
   ].filter(Boolean).join(" - ").slice(0, 240);
 
   return {
@@ -303,11 +404,16 @@ function analyzePichinchaExpense(message: GmailMessage): { expense: ParsedBankEx
       subject,
       from,
       amount,
+      movementKind,
       description,
       category: category.category,
       subcategory: category.subcategory,
       tags: category.tags,
       rawText: rawText.slice(0, 3000),
+      merchant,
+      destinationBank: destinationBank || null,
+      sourceAccount: sourceAccount || null,
+      destinationAccount: destinationAccount || null,
     },
     diagnostic,
   };
@@ -404,6 +510,7 @@ async function parsePichinchaExpenseFromImages(
             subject,
             from,
             amount: Number(amount.toFixed(2)),
+            movementKind: extraction.movementType === "transfer" ? "transfer" : "expense",
             description,
             category: memorySuggestion ? memorySuggestion.category : extraction.category || category.category,
             subcategory: memorySuggestion ? memorySuggestion.subcategory : extraction.subcategory || category.subcategory,
@@ -415,6 +522,9 @@ async function parsePichinchaExpenseFromImages(
               extraction.reasons?.join("; ") || "",
             ].join("\n").slice(0, 3000),
             merchant,
+            destinationBank: extraction.destinationAccount || null,
+            sourceAccount: extraction.sourceAccount || null,
+            destinationAccount: extraction.destinationAccount || null,
             memoryKeyword: memorySuggestion?.keyword || null,
           },
           diagnostic: {
@@ -471,37 +581,77 @@ async function getNotificationChatId(preferredChatId?: number | string) {
 }
 
 function candidateTelegramText(candidateId: string, candidate: any) {
+  const isKnownBusinessExpense = candidate.category && candidate.category !== "Otros";
   return [
-    "Posible gasto no registrado.",
+    candidate.movementKind === "transfer"
+      ? "Posible transferencia/salida bancaria no registrada."
+      : "Posible gasto no registrado.",
     `Fecha: ${candidate.emailDateText}`,
     `Valor: USD ${Number(candidate.amount || 0).toFixed(2)}`,
     candidate.merchant ? `Beneficiario: ${candidate.merchant}` : "",
+    candidate.destinationBank ? `Banco destino: ${candidate.destinationBank}` : "",
+    candidate.destinationAccount ? `Cuenta destino: ${candidate.destinationAccount}` : "",
     `Categoria sugerida: ${candidate.category || "Otros"}`,
     `Descripcion: ${candidate.description}`,
     candidate.duplicateMovement ? "Aviso: existe un movimiento parecido. Revisa antes de registrar." : "",
     candidate.memoryKeyword ? `Memoria: asociada con "${candidate.memoryKeyword}"` : "",
     `Origen: Gmail / Banco Pichincha`,
     "",
+    isKnownBusinessExpense
+      ? "Confirmame si es un gasto conocido del negocio o si en realidad fue personal."
+      : "No la doy por clasificada todavia. Elige si es un gasto del negocio, clasificalo o marcalo como personal.",
+    "",
     `Candidato: ${candidateId}`,
   ].filter(Boolean).join("\n");
 }
 
-function candidateKeyboard(candidateId: string) {
+function candidateKeyboard(candidateId: string, candidate: any) {
+  const suggestedCategory = GMAIL_CATEGORY_OPTIONS.find((item) => item.category === String(candidate.category || ""));
+  if (suggestedCategory && suggestedCategory.category !== "Otros") {
+    return {
+      inline_keyboard: [
+        [
+          { text: `Negocio: ${suggestedCategory.label}`, callback_data: `gmail:categorize:${candidateId}:${suggestedCategory.key}` },
+          { text: "Es personal", callback_data: `gmail:register:${candidateId}:personal` },
+        ],
+        [
+          { text: "Cambiar categoria", callback_data: `gmail:categories:${candidateId}` },
+          { text: "Ignorar", callback_data: `gmail:ignore:${candidateId}` },
+        ],
+      ],
+    };
+  }
+
   return {
     inline_keyboard: [
       [
-        { text: "Registrar Banco", callback_data: `gmail:register:${candidateId}:bank` },
-        { text: "Registrar Tienda", callback_data: `gmail:register:${candidateId}:safe` },
-      ],
-      [
-        { text: "Transito", callback_data: `gmail:register:${candidateId}:transit` },
-        { text: "Personal", callback_data: `gmail:register:${candidateId}:personal` },
+        { text: "Clasificar negocio", callback_data: `gmail:categories:${candidateId}` },
+        { text: "Es personal", callback_data: `gmail:register:${candidateId}:personal` },
       ],
       [
         { text: "Ignorar", callback_data: `gmail:ignore:${candidateId}` },
       ],
     ],
   };
+}
+
+function gmailCategoryKeyboard(candidateId: string) {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let index = 0; index < GMAIL_CATEGORY_OPTIONS.length; index += 2) {
+    rows.push(
+      GMAIL_CATEGORY_OPTIONS.slice(index, index + 2).map((item) => ({
+        text: item.label,
+        callback_data: `gmail:categorize:${candidateId}:${item.key}`,
+      }))
+    );
+  }
+
+  rows.push([
+    { text: "Es personal", callback_data: `gmail:register:${candidateId}:personal` },
+    { text: "Ignorar", callback_data: `gmail:ignore:${candidateId}` },
+  ]);
+
+  return { inline_keyboard: rows };
 }
 
 export function gmailScanKeyboard() {
@@ -593,12 +743,16 @@ async function saveCandidate(expense: ParsedBankExpense) {
     subject: expense.subject,
     from: expense.from,
     amount: expense.amount,
+    movementKind: expense.movementKind,
     description: expense.description,
     category: expense.category,
     subcategory: expense.subcategory,
     tags: expense.tags,
     rawText: expense.rawText,
     merchant: expense.merchant || null,
+    destinationBank: expense.destinationBank || null,
+    sourceAccount: expense.sourceAccount || null,
+    destinationAccount: expense.destinationAccount || null,
     memoryKeyword: expense.memoryKeyword || null,
     duplicateMovement,
     createdAt: FieldValue.serverTimestamp(),
@@ -638,7 +792,7 @@ async function notifyCandidate(
   }
 
   await sendTelegramMessage(chatId, candidateTelegramText(candidateId, candidate), botToken, {
-    reply_markup: candidateKeyboard(candidateId),
+    reply_markup: candidateKeyboard(candidateId, candidate),
   });
 
   await getFirebaseAdminDb().collection("gmail_expense_candidates").doc(candidateId).set(
@@ -680,7 +834,11 @@ async function notifyPendingCandidates(params: {
   return count;
 }
 
-async function createMovementFromCandidate(candidateId: string, from: CajaId) {
+async function createMovementFromCandidate(
+  candidateId: string,
+  from: CajaId,
+  categoryOverride?: { category: string; subcategory: string; tags: string[] } | null
+) {
   const db = getFirebaseAdminDb();
   const ref = db.collection("gmail_expense_candidates").doc(candidateId);
   const doc = await ref.get();
@@ -721,8 +879,8 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
       createdBy: "gmail-expense-scanner",
       fromBoxId: boxRef.id,
       toBoxId: null,
-      category: candidate.category || "Otros",
-      tags: Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"],
+      category: categoryOverride?.category || candidate.category || "Otros",
+      tags: categoryOverride?.tags || (Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"]),
       source: "gmail",
       gmailProvider: "banco-pichincha",
       gmailCandidateId: candidateId,
@@ -753,9 +911,9 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
     createdBy: "gmail-expense-scanner",
     from,
     to: null,
-    category: candidate.category || "Otros",
-    subcategory: candidate.subcategory || null,
-    tags: Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"],
+    category: categoryOverride?.category || candidate.category || "Otros",
+    subcategory: categoryOverride?.subcategory || candidate.subcategory || null,
+    tags: categoryOverride?.tags || (Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"]),
     source: "gmail",
     gmailProvider: "banco-pichincha",
     gmailCandidateId: candidateId,
@@ -774,6 +932,9 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
       status: "registered",
       movementId: movementRef.id,
       registeredFrom: from,
+      category: categoryOverride?.category || candidate.category || "Otros",
+      subcategory: categoryOverride?.subcategory || candidate.subcategory || null,
+      tags: categoryOverride?.tags || (Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"]),
       registeredAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     },
@@ -787,9 +948,9 @@ async function createMovementFromCandidate(candidateId: string, from: CajaId) {
       candidate.rawText,
       candidate.subject,
     ],
-    category: candidate.category || "Otros",
-    subcategory: candidate.subcategory || "GENERAL",
-    tags: Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"],
+    category: categoryOverride?.category || candidate.category || "Otros",
+    subcategory: categoryOverride?.subcategory || candidate.subcategory || "GENERAL",
+    tags: categoryOverride?.tags || (Array.isArray(candidate.tags) ? candidate.tags : ["BANCO", "PICHINCHA"]),
     movementId: movementRef.id,
     source: "gmail",
   });
@@ -1004,6 +1165,73 @@ export async function processGmailExpenseCallback(params: {
     }
 
     return { handled: true, ignored: true, candidateId };
+  }
+
+  if (action === "categories") {
+    const candidateDoc = await getFirebaseAdminDb().collection("gmail_expense_candidates").doc(candidateId).get();
+    if (chatId && messageId) {
+      await editTelegramMessageText({
+        chatId,
+        messageId,
+        text: candidateDoc.exists
+          ? [
+              "Clasifica este gasto del negocio antes de registrarlo.",
+              `Valor: USD ${Number(candidateDoc.data()?.amount || 0).toFixed(2)}`,
+              `Descripcion: ${String(candidateDoc.data()?.description || "GASTO BANCARIO")}`,
+              "",
+              "Si no es del negocio, toca 'Es personal'.",
+            ].join("\n")
+          : "No encontre este candidato de Gmail.",
+        botToken: params.botToken,
+        extraPayload: candidateDoc.exists ? { reply_markup: gmailCategoryKeyboard(candidateId) } : undefined,
+      });
+    }
+
+    return { handled: true, categoryMenu: true, candidateId };
+  }
+
+  if (action === "categorize") {
+    const selected = GMAIL_CATEGORY_OPTIONS.find((item) => item.key === value);
+    if (!selected) {
+      return { handled: true, ignored: true, reason: "Categoria Gmail no soportada" };
+    }
+
+    try {
+      const created = await createMovementFromCandidate(candidateId, "bank", {
+        category: selected.category,
+        subcategory: selected.subcategory,
+        tags: selected.tags,
+      });
+
+      if (chatId && messageId) {
+        await editTelegramMessageText({
+          chatId,
+          messageId,
+          text: [
+            "Gasto de Gmail registrado.",
+            `Monto: USD ${Number(created.candidate.amount || 0).toFixed(2)}`,
+            "Caja: Banco",
+            `Categoria: ${selected.category}`,
+            `Subcategoria: ${selected.subcategory}`,
+            `Movimiento: ${created.movementId}`,
+          ].join("\n"),
+          botToken: params.botToken,
+        });
+      }
+
+      return { handled: true, registered: true, candidateId, movementId: created.movementId };
+    } catch (error: any) {
+      if (chatId && messageId) {
+        await editTelegramMessageText({
+          chatId,
+          messageId,
+          text: `No pude clasificar y registrar el gasto de Gmail: ${error?.message || String(error)}`,
+          botToken: params.botToken,
+          extraPayload: { reply_markup: gmailCategoryKeyboard(candidateId) },
+        });
+      }
+      return { handled: true, registered: false, error: error?.message || String(error) };
+    }
   }
 
   if (action === "register" && ["safe", "transit", "bank", "personal"].includes(value)) {

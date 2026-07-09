@@ -11,6 +11,8 @@ export type ExpenseMemorySuggestion = {
   confidence?: number;
 };
 
+export type ExpenseMemoryNamespace = "business" | "personal";
+
 function normalizeText(value: unknown) {
   return String(value ?? "")
     .normalize("NFD")
@@ -40,6 +42,16 @@ function memoryKey(keyword: string) {
     .slice(0, 100);
 }
 
+function memoryCollectionName(namespace: ExpenseMemoryNamespace) {
+  return namespace === "personal" ? "personal_expense_category_memory" : "expense_category_memory";
+}
+
+function movementCollections(namespace: ExpenseMemoryNamespace) {
+  return namespace === "personal"
+    ? ["personalMovements"]
+    : ["movements"];
+}
+
 function keywordCandidates(values: Array<unknown>) {
   const output = new Set<string>();
 
@@ -67,14 +79,17 @@ function isMatch(searchText: string, keyword: string) {
   return keyword.length >= 8 && keyword.includes(searchText) && searchText.length >= 8;
 }
 
-export async function findExpenseMemorySuggestion(values: Array<unknown>): Promise<ExpenseMemorySuggestion | null> {
+export async function findExpenseMemorySuggestion(
+  values: Array<unknown>,
+  namespace: ExpenseMemoryNamespace = "business"
+): Promise<ExpenseMemorySuggestion | null> {
   const searchText = normalizeText(values.filter(Boolean).join(" "));
   const candidates = keywordCandidates(values);
   if (!searchText && candidates.length === 0) return null;
 
   const db = getFirebaseAdminDb();
   const memorySnapshot = await db
-    .collection("expense_category_memory")
+    .collection(memoryCollectionName(namespace))
     .orderBy("uses", "desc")
     .limit(250)
     .get();
@@ -98,10 +113,11 @@ export async function findExpenseMemorySuggestion(values: Array<unknown>): Promi
     }
   }
 
-  const movementSnapshots = await Promise.all([
-    db.collection("movements").orderBy("createdAt", "desc").limit(300).get(),
-    db.collection("personalMovements").orderBy("createdAt", "desc").limit(300).get(),
-  ]);
+  const movementSnapshots = await Promise.all(
+    movementCollections(namespace).map((collectionName) =>
+      db.collection(collectionName).orderBy("createdAt", "desc").limit(300).get()
+    )
+  );
 
   for (const snapshot of movementSnapshots) {
     for (const doc of snapshot.docs) {
@@ -145,6 +161,7 @@ export async function learnExpenseMemory(params: {
   tags?: string[];
   movementId?: string | null;
   source?: string;
+  namespace?: ExpenseMemoryNamespace;
 }) {
   if (!params.category || params.category === "Otros") return;
 
@@ -156,7 +173,7 @@ export async function learnExpenseMemory(params: {
   const key = memoryKey(primary);
   if (!key) return;
 
-  await db.collection("expense_category_memory").doc(key).set(
+  await db.collection(memoryCollectionName(params.namespace || "business")).doc(key).set(
     {
       keyword: primary,
       aliases: candidates.slice(1, 10),
