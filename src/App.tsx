@@ -3,19 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { ShiftClosure, Movement, UserProfile, CollectionTrip } from './types';
+import React, { lazy, Suspense, useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { ShiftClosure, Movement } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { auth, db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
-import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
 import { 
   collection, 
   doc, 
-  setDoc, 
-  getDoc, 
-  onSnapshot, 
-  query, 
-  orderBy, 
   addDoc, 
   updateDoc, 
   deleteDoc, 
@@ -34,10 +28,8 @@ import {
   startOfWeek
 } from 'date-fns';
 import { es } from 'date-fns/locale';
-import html2pdf from 'html2pdf.js';
 import { 
   Plus, 
-  LogOut, 
   History, 
   TrendingDown, 
   TrendingUp, 
@@ -71,190 +63,43 @@ import {
   CreditCard,
   ArrowRightLeft,
   Tag,
-  Printer,
-  Download,
-  LayoutDashboard,
   ChevronLeft,
   ChevronRight,
   ShieldAlert
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Dashboard } from './components/Dashboard';
+import { PrintPreview } from './components/PrintPreview';
+import { AppHeader } from './components/AppHeader';
+import { LoginScreen } from './components/LoginScreen';
+import { useAuthProfile } from './hooks/useAuthProfile';
+import { useFinanceData } from './hooks/useFinanceData';
+import {
+  buildClosureLedger,
+  getDayClosureStatus,
+  getDerivedClosureStatuses,
+  normalizeCashBoxStatus,
+  type CashBoxStatus,
+  type DisplayClosureStatus
+} from './lib/cashLedger';
+import {
+  calculateClosureDifference,
+  emptyClosureColumnFilters,
+  getClosureColumnSearchValue,
+  getClosureSearchValues,
+  getClosureStatusLabel,
+  getMovementDefaults,
+  normalizeSearchText,
+  toNonNegativeNumber,
+  type ClosureColumnKey
+} from './lib/closureUtils';
 
-
-type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
-
-type CashBoxStatus = 'safe' | 'transit' | 'bank';
-type DisplayClosureStatus = CashBoxStatus | 'mixed';
-type ClosureLedgerEntry = {
-  displayStatus: CashBoxStatus;
-  hasSplitBalance: boolean;
-  balances: Record<CashBoxStatus, number>;
-};
-
-const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank'];
-const cashBoxStatusPriority: CashBoxStatus[] = ['safe', 'transit', 'bank'];
-
-const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
-  const normalized = String(status || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
-
-  if (['bank', 'banco', 'en banco'].includes(normalized)) return 'bank';
-  if (['transit', 'transito', 'en transito', 'en tránsito', 'camino', 'viaje'].includes(normalized)) return 'transit';
-  return 'safe';
-};
-
-const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): CashBoxStatus => {
-  return cashBoxStatusPriority.reduce<CashBoxStatus>((primary, status) => {
-    const primaryAmount = balance[primary] || 0;
-    const statusAmount = balance[status] || 0;
-
-    if (statusAmount > primaryAmount + 0.009) return status;
-    if (Math.abs(statusAmount - primaryAmount) <= 0.009 && statusAmount > 0.009) return status;
-
-    return primary;
-  }, 'safe');
-};
-
-
-const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
-  date: '',
-  responsible: '',
-  physicalAmount: '',
-  systemAmount: '',
-  systemBalance: '',
-  difference: '',
-  status: '',
-  notes: ''
-};
-
-const normalizeSearchText = (value: unknown) =>
-  String(value ?? '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
-
-const getClosureStatusLabel = (status?: ShiftClosure['status']) => {
-  if (status === 'transit') return 'En Tránsito';
-  if (status === 'bank') return 'En Banco';
-  return 'En Tienda';
-};
-
-const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
-  (Number(closure.physicalAmount) || 0) - (Number(closure.systemBalance) || 0);
-
-const toNonNegativeNumber = (value: unknown) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-};
-
-const getMovementDefaults = (
-  type: Movement['type'],
-  caja?: string,
-  current: Partial<Movement> = {}
-): Partial<Movement> => {
-  const base = {
-    amount: toNonNegativeNumber(current.amount),
-    description: current.description || '',
-    date: current.date || new Date().toISOString()
-  };
-
-  if (type === 'outflow') {
-    return {
-      ...base,
-      type,
-      category: current.category || 'Sueldos',
-      subcategory: current.subcategory || '',
-      from: caja || current.from || 'safe',
-      to: undefined
-    };
-  }
-
-  if (type === 'transfer') {
-    const from = caja || (current.from && current.from !== 'bank' ? current.from : 'transit');
-    return {
-      ...base,
-      type,
-      category: undefined,
-      subcategory: '',
-      from,
-      to: 'bank'
-    };
-  }
-
-  const from = caja || current.from || 'safe';
-  const to = current.to && current.to !== from
-    ? current.to
-    : from === 'safe'
-      ? 'transit'
-      : 'safe';
-
-  return {
-    ...base,
-    type,
-    category: undefined,
-    subcategory: '',
-    from,
-    to
-  };
-};
-
-const getClosureSearchValues = (closure: ShiftClosure) => {
-  const parsedDate = parseISO(closure.date);
-  const dateValues = Number.isNaN(parsedDate.getTime())
-    ? [closure.date]
-    : [
-        closure.date,
-        format(parsedDate, 'dd/MM/yyyy HH:mm'),
-        format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es }),
-        format(parsedDate, 'yyyy-MM-dd'),
-        format(parsedDate, 'HH:mm')
-      ];
-
-  return [
-    ...dateValues,
-    closure.responsible,
-    closure.physicalAmount,
-    closure.systemAmount,
-    closure.systemBalance,
-    closure.difference,
-    closure.status,
-    getClosureStatusLabel(closure.status),
-    closure.notes,
-    closure.tripId,
-    closure.id
-  ];
-};
-
-const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColumnKey) => {
-  const parsedDate = parseISO(closure.date);
-  const dateValue = Number.isNaN(parsedDate.getTime())
-    ? closure.date
-    : `${closure.date} ${format(parsedDate, 'dd/MM/yyyy HH:mm')} ${format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es })} ${format(parsedDate, 'yyyy-MM-dd')} ${format(parsedDate, 'HH:mm')}`;
-
-  const values: Record<ClosureColumnKey, unknown> = {
-    date: dateValue,
-    responsible: closure.responsible,
-    physicalAmount: closure.physicalAmount,
-    systemAmount: closure.systemAmount,
-    systemBalance: closure.systemBalance,
-    difference: closure.difference,
-    status: `${closure.status || ''} ${getClosureStatusLabel(closure.status)}`,
-    notes: closure.notes || ''
-  };
-
-  return values[column];
-};
+const Dashboard = lazy(() =>
+  import('./components/Dashboard').then(module => ({ default: module.Dashboard }))
+);
 
 function AppContent() {
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [closures, setClosures] = useState<ShiftClosure[]>([]);
-  const [movements, setMovements] = useState<Movement[]>([]);
+  const { user, loading } = useAuthProfile();
+  const { closures, movements, trips } = useFinanceData(Boolean(user));
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
@@ -262,7 +107,6 @@ function AppContent() {
   const [currentView, setCurrentView] = useState<'main' | 'dashboard'>('main');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  const [trips, setTrips] = useState<CollectionTrip[]>([]);
   const [selectedClosures, setSelectedClosures] = useState<Set<string>>(new Set());
   const [isCreatingTrip, setIsCreatingTrip] = useState(false);
   const [isTripLoading, setIsTripLoading] = useState(false);
@@ -350,45 +194,8 @@ function AppContent() {
     }
   };
   const [showPrintPreview, setShowPrintPreview] = useState(false);
-  const [printError, setPrintError] = useState<string | null>(null);
   const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
   const [historyView, setHistoryView] = useState<{ type: string; title: string } | null>(null);
-  const reportRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-  const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
-    try {
-      if (firebaseUser) {
-        const userRef = doc(db, 'users', firebaseUser.uid);
-        const userDoc = await getDoc(userRef);
-
-        if (userDoc.exists()) {
-          setUser(userDoc.data() as UserProfile);
-        } else {
-          const newUser: UserProfile = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email || '',
-            displayName: firebaseUser.displayName || '',
-            role: 'user'
-          };
-
-          await setDoc(userRef, newUser);
-          setUser(newUser);
-        }
-      } else {
-        setUser(null);
-      }
-    } catch (error) {
-      console.error('Error cargando usuario desde Firestore:', error);
-      alert('Login correcto, pero Firestore no permite cargar o crear el usuario. Revisa Firestore Database y Rules.');
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
-  });
-
-  return () => unsubscribe();
-}, []);
 
   useEffect(() => {
     const handleClick = () => setContextMenu(null);
@@ -397,56 +204,17 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
-
-    const qClosures = query(collection(db, 'closures'), orderBy('date', 'desc'));
-    const unsubscribeClosures = onSnapshot(qClosures, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id,
-        date: (doc.data().date as Timestamp).toDate().toISOString()
-      })) as ShiftClosure[];
-      setClosures(data);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'closures'));
-
-    const qMovements = query(collection(db, 'movements'), orderBy('date', 'desc'));
-    const unsubscribeMovements = onSnapshot(qMovements, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id,
-        date: (doc.data().date as Timestamp).toDate().toISOString()
-      })) as Movement[];
-      setMovements(data);
-
-      setCategories(prev => {
-        const unique = new Set([...prev]);
-        data.forEach(m => m.category && unique.add(m.category));
-        return Array.from(unique).sort();
-      });
-      setSubcategories(prev => {
-        const unique = new Set([...prev]);
-        data.forEach(m => m.subcategory && unique.add(m.subcategory));
-        return Array.from(unique).sort();
-      });
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'movements'));
-
-    const qTrips = query(collection(db, 'trips'), orderBy('startDate', 'desc'));
-    const unsubscribeTrips = onSnapshot(qTrips, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id,
-        startDate: (doc.data().startDate as Timestamp).toDate().toISOString(),
-        completionDate: doc.data().completionDate ? (doc.data().completionDate as Timestamp).toDate().toISOString() : undefined
-      })) as CollectionTrip[];
-      setTrips(data);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'trips'));
-
-    return () => {
-      unsubscribeClosures();
-      unsubscribeMovements();
-      unsubscribeTrips();
-    };
-  }, [user]);
+    setCategories(previous => {
+      const unique = new Set(previous);
+      movements.forEach(movement => movement.category && unique.add(movement.category));
+      return Array.from(unique).sort();
+    });
+    setSubcategories(previous => {
+      const unique = new Set(previous);
+      movements.forEach(movement => movement.subcategory && unique.add(movement.subcategory));
+      return Array.from(unique).sort();
+    });
+  }, [movements]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -520,95 +288,15 @@ function AppContent() {
     }
   };
 
-  const closureLedgerById = useMemo(() => {
-    const balances: Record<string, Record<CashBoxStatus, number>> = {};
+  const closureLedgerById = useMemo(
+    () => buildClosureLedger(closures, movements),
+    [closures, movements]
+  );
 
-    closures.forEach(closure => {
-      if (!closure.id) return;
-
-      balances[closure.id] = {
-        safe: 0,
-        transit: 0,
-        bank: 0
-      };
-
-      const initialStatus = normalizeCashBoxStatus(closure.status);
-      balances[closure.id][initialStatus] = Number(closure.physicalAmount) || 0;
-    });
-
-    const orderedTransfers = [...movements]
-      .filter(movement =>
-        (movement.type === 'transfer' || movement.type === 'internal_transfer') &&
-        movement.from &&
-        movement.to
-      )
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    orderedTransfers.forEach(movement => {
-      const from = normalizeCashBoxStatus(movement.from);
-      const to = normalizeCashBoxStatus(movement.to);
-
-      if (from === to) return;
-
-      let remainingAmount = Number(movement.amount) || 0;
-
-      if (remainingAmount <= 0) return;
-
-      const movementTime = new Date(movement.date).getTime();
-
-      const candidateClosures = [...closures]
-        .filter(closure => {
-          if (!closure.id) return false;
-
-          const closureTime = new Date(closure.date).getTime();
-
-          if (Number.isNaN(movementTime) || Number.isNaN(closureTime)) return true;
-
-          return closureTime <= movementTime;
-        })
-        // Al mover dinero físicamente, normalmente se toma primero lo más reciente disponible.
-        .sort((a, b) => b.date.localeCompare(a.date));
-
-      for (const closure of candidateClosures) {
-        if (!closure.id) continue;
-
-        const closureBalance = balances[closure.id];
-
-        if (!closureBalance) continue;
-
-        const availableAmount = closureBalance[from];
-
-        if (availableAmount <= 0) continue;
-
-        const movedAmount = Math.min(availableAmount, remainingAmount);
-
-        closureBalance[from] -= movedAmount;
-        closureBalance[to] += movedAmount;
-        remainingAmount -= movedAmount;
-
-        if (remainingAmount <= 0.009) break;
-      }
-    });
-
-    return Object.entries(balances).reduce((result, [closureId, balance]) => {
-      const activeStatuses = cashBoxStatuses.filter(status => balance[status] > 0.009);
-
-      result[closureId] = {
-        displayStatus: activeStatuses.length === 0 ? 'safe' : getPrimaryCashBoxStatus(balance),
-        hasSplitBalance: activeStatuses.length > 1,
-        balances: balance
-      };
-
-      return result;
-    }, {} as Record<string, ClosureLedgerEntry>);
-  }, [closures, movements]);
-
-  const derivedClosureStatusById = useMemo(() =>
-    Object.entries(closureLedgerById).reduce((result, [closureId, ledger]) => {
-      result[closureId] = ledger.displayStatus;
-      return result;
-    }, {} as Record<string, CashBoxStatus>),
-  [closureLedgerById]);
+  const derivedClosureStatusById = useMemo(
+    () => getDerivedClosureStatuses(closureLedgerById),
+    [closureLedgerById]
+  );
 
   const getClosureDisplayStatus = useCallback((closure: ShiftClosure): CashBoxStatus =>
     closure.id
@@ -660,29 +348,11 @@ function AppContent() {
     closures.filter(c => c.id && selectedClosures.has(c.id) && isClosureAvailableForTrip(c)),
   [closures, selectedClosures, isClosureAvailableForTrip]);
 
-  const getDayStatusFromItems = (items: ShiftClosure[]): DisplayClosureStatus => {
-    if (items.length === 0) return 'safe';
-
-    const hasSplitClosure = items.some(item => item.id && closureLedgerById[item.id]?.hasSplitBalance);
-
-    const normalizedStatuses = items.map(item => {
-      if (item.id && derivedClosureStatusById[item.id]) {
-        return derivedClosureStatusById[item.id];
-      }
-
-      return normalizeCashBoxStatus(item.status);
-    });
-
-    const allSafe = normalizedStatuses.every(status => status === 'safe');
-    const allTransit = normalizedStatuses.every(status => status === 'transit');
-    const allBank = normalizedStatuses.every(status => status === 'bank');
-
-    if (allBank) return 'bank';
-    if (allTransit) return 'transit';
-    if (allSafe && !hasSplitClosure) return 'safe';
-
-    return 'mixed';
-  };
+  const getDayStatusFromItems = useCallback(
+    (items: ShiftClosure[]): DisplayClosureStatus =>
+      getDayClosureStatus(items, closureLedgerById, derivedClosureStatusById),
+    [closureLedgerById, derivedClosureStatusById]
+  );
 
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
@@ -708,7 +378,7 @@ function AppContent() {
 
         return { date, items: sortedItems, totals, status };
       });
-  }, [filteredClosures, derivedClosureStatusById, closureLedgerById]);
+  }, [filteredClosures, getDayStatusFromItems]);
 
 
   const accumulatedSafeTotal = useMemo(() => {
@@ -1335,27 +1005,6 @@ function AppContent() {
     };
   };
 
-  const handlePrint = () => {
-    window.print();
-  };
-
-  const handleDownload = async () => {
-    if (!reportRef.current) return;
-    setPrintError(null);
-    const opt = {
-      margin: 10,
-      filename: `reporte_cierres_${format(new Date(), 'yyyy-MM-dd')}.pdf`,
-      image: { type: 'jpeg' as const, quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true, logging: false },
-      jsPDF: { unit: 'mm' as const, format: 'a4', orientation: 'portrait' as const }
-    };
-    try {
-      await html2pdf().set(opt).from(reportRef.current).save();
-    } catch (err) {
-      setPrintError('Error al generar PDF. Intente imprimir directamente.');
-    }
-  };
-
   const copyToClipboard = (closure: ShiftClosure) => {
     const text = `Cierre ${format(parseISO(closure.date), 'dd/MM/yyyy HH:mm')}
 Responsable: ${closure.responsible}
@@ -1437,60 +1086,32 @@ Notas: ${closure.notes || 'N/A'}`;
   }
 
   if (!user) {
-    return (
-       <div className="min-h-screen flex items-center justify-center bg-[#0F172A] p-4 relative overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-600/10 blur-[120px] rounded-full" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-600/10 blur-[120px] rounded-full" />
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full bg-[#1E293B]/80 backdrop-blur-xl rounded-[2.5rem] shadow-2xl p-10 text-center border border-white/10 relative z-10"
-        >
-          <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-700 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl shadow-blue-500/20">
-            <DollarSign className="w-12 h-12 text-white" />
-          </div>
-          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.1</h1>
-          <p className="text-slate-400 mb-10 leading-relaxed text-lg">Gestiona tus cierres de caja en la nube.</p>
-          <button onClick={signInWithGoogle} className="w-full py-5 bg-white text-[#0F172A] rounded-2xl font-black text-lg hover:bg-slate-100 transition-all shadow-xl flex items-center justify-center gap-3">
-            <UserIcon className="w-6 h-6" />
-            Ingresar con Google
-            <ArrowRight className="w-5 h-5" />
-          </button>
-        </motion.div>
-      </div>
-    );
+    return <LoginScreen onLogin={signInWithGoogle} />;
   }
 
   if (currentView === 'dashboard') {
-    return <Dashboard closures={closures} movements={movements} onBack={() => setCurrentView('main')} />;
+    return (
+      <Suspense fallback={
+        <div className="min-h-screen flex items-center justify-center bg-[#0F172A]">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500" />
+        </div>
+      }>
+        <Dashboard closures={closures} movements={movements} onBack={() => setCurrentView('main')} />
+      </Suspense>
+    );
   }
 
   return (
     <>
       <div className={`min-h-screen bg-[#0F172A] text-slate-200 pb-20 select-none ${showPrintPreview ? 'hidden' : 'block'} print:hidden`}>
-        <header className="bg-[#1E293B]/50 backdrop-blur-md border-b border-white/5 sticky top-0 z-30">
-          <div className="w-full px-4 h-20 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center">
-                <Calculator className="text-white w-7 h-7" />
-              </div>
-              <h1 className="text-xl font-black text-white">CIERRES 1.1</h1>
-            </div>
-            <div className="flex items-center gap-4">
-              <button onClick={() => setShowPrintPreview(true)} className="p-3 bg-white/5 hover:bg-blue-500/10 text-slate-400 rounded-2xl border border-white/5"><Printer className="w-5 h-5" /></button>
-              <button onClick={handleExportCSV} className="p-3 bg-white/5 hover:bg-emerald-500/10 text-slate-400 rounded-2xl border border-white/5"><Download className="w-5 h-5" /></button>
-              <button onClick={() => setCurrentView('dashboard')} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
-                <LayoutDashboard className="w-5 h-5" />
-                <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Dashboard</span>
-              </button>
-              <button onClick={() => setViewingTripId('LIST')} className="p-3 bg-white/5 hover:bg-amber-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
-                <Truck className="w-5 h-5" />
-                <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Viajes</span>
-              </button>
-              <button onClick={logOut} className="p-3 bg-white/5 hover:bg-red-500/10 text-slate-400 rounded-2xl border border-white/5"><LogOut className="w-5 h-5" /></button>
-            </div>
-          </div>
-        </header>
+        <AppHeader
+          isExporting={isExporting}
+          onOpenPrint={() => setShowPrintPreview(true)}
+          onExportCsv={handleExportCSV}
+          onOpenDashboard={() => setCurrentView('dashboard')}
+          onOpenTrips={() => setViewingTripId('LIST')}
+          onLogout={logOut}
+        />
 
         <main className="w-full px-4 py-10">
           {/* Success Feedback Notification */}
@@ -2683,131 +2304,16 @@ Notas: ${closure.notes || 'N/A'}`;
           )}
         </AnimatePresence>
 
-        <div className={`fixed inset-0 bg-[#F8FAFC] text-slate-900 z-[9999] overflow-auto ${showPrintPreview ? 'block' : 'hidden'} print:block`}>
-           <div className="p-8 flex justify-between bg-[#0F172A] text-white print:hidden items-center">
-             <div className="flex items-center gap-4">
-               <div className="p-3 bg-blue-600 rounded-2xl">
-                 <Printer className="w-6 h-6" />
-               </div>
-               <div>
-                  <h3 className="text-xl font-black uppercase tracking-tight">Previsualización de Reporte</h3>
-                  <p className="text-slate-400 text-xs uppercase tracking-widest">{format(new Date(), "EEEE dd 'de' MMMM", { locale: es })}</p>
-               </div>
-             </div>
-             <div className="flex gap-4">
-               <button onClick={handleDownload} className="bg-white text-[#0F172A] hover:bg-slate-100 px-8 py-3 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-lg flex items-center gap-2">
-                 <Download className="w-4 h-4" />
-                 Descargar PDF
-               </button>
-               <button onClick={() => setShowPrintPreview(false)} className="bg-rose-600 hover:bg-rose-500 text-white px-8 py-3 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-lg flex items-center gap-2">
-                 <X className="w-4 h-4" />
-                 Cerrar Preview
-               </button>
-             </div>
-           </div>
-           
-           <div ref={reportRef} className="max-w-[210mm] mx-auto bg-white p-16 shadow-2xl min-h-screen">
-              {/* Report Header */}
-              <div className="flex justify-between items-start border-b-4 border-slate-950 pb-10 mb-12">
-                <div>
-                  <h1 className="text-5xl font-black text-slate-950 mb-2 font-sans">REPORTE DE CIERRES</h1>
-                  <p className="text-slate-500 font-sans font-black tracking-widest text-sm uppercase">Consolidado de Operaciones • Sistema 1.1</p>
-                  <p className="text-slate-500 text-xs mt-4 uppercase font-bold tracking-widest flex items-center gap-2">
-                    <Calendar className="w-3 h-3" />
-                    Periodo: {format(parseISO(filterStartDate), 'dd/MM/yyyy')} — {format(parseISO(filterEndDate), 'dd/MM/yyyy')}
-                  </p>
-                </div>
-                <div className="text-right">
-                  <div className="bg-slate-950 text-white p-4 rounded-2xl mb-4">
-                    <p className="text-[10px] font-black tracking-widest mb-1 uppercase opacity-60">Total Consolidado</p>
-                    <p className="text-2xl font-black font-sans">${groupedClosures.reduce((a, b) => a + b.totals.physicalAmount, 0).toLocaleString('es-CL')}</p>
-                  </div>
-                  <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest">Generado por</p>
-                  <p className="text-slate-900 text-xs font-black uppercase">{user.displayName || user.email}</p>
-                </div>
-              </div>
-
-              {/* Summary Sections */}
-              <div className="grid grid-cols-3 gap-8 mb-12">
-                <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Total Recaudado</p>
-                  <p className="text-3xl font-black text-slate-950 font-sans">${groupedClosures.reduce((a,b) => a+b.totals.physicalAmount, 0).toLocaleString('es-CL')}</p>
-                </div>
-                <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Total Diferencias</p>
-                  <p className={`text-3xl font-black font-sans ${groupedClosures.reduce((a,b) => a+b.totals.difference, 0) < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                    ${groupedClosures.reduce((a,b) => a+b.totals.difference, 0).toLocaleString('es-CL')}
-                  </p>
-                </div>
-                <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
-                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Cant. Registros</p>
-                  <p className="text-3xl font-black text-slate-950 font-sans">{filteredClosures.length}</p>
-                </div>
-              </div>
-
-              {/* Data Table */}
-              <div className="space-y-12">
-                {groupedClosures.map(group => (
-                  <div key={group.date} className="page-break-inside-avoid">
-                    <div className="flex items-center justify-between border-b-2 border-slate-200 pb-2 mb-4">
-                      <h3 className="text-lg font-black text-slate-950 uppercase tracking-tight">
-                        {format(parseISO(group.date), 'EEEE dd MMMM yyyy', { locale: es })}
-                      </h3>
-                      <div className="text-right">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mr-4">Total Día</span>
-                        <span className="text-lg font-black text-slate-950 font-sans">${group.totals.physicalAmount.toLocaleString('es-CL')}</span>
-                      </div>
-                    </div>
-                    
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-slate-500 font-black text-[10px] uppercase tracking-widest text-left border-b border-slate-100">
-                          <th className="py-4">Hora</th>
-                          <th className="py-4">Responsable</th>
-                          <th className="py-4 text-right">Monto Físico</th>
-                          <th className="py-4 text-right">Diferencia</th>
-                          <th className="py-4 text-center">Estado</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {group.items.map(item => (
-                          <tr key={item.id} className="border-b border-slate-50 text-slate-700">
-                            <td className="py-4 font-sans font-bold text-slate-500">{format(parseISO(item.date), 'HH:mm')}</td>
-                            <td className="py-4 font-black text-slate-900 uppercase text-xs">{item.responsible}</td>
-                            <td className="py-4 text-right font-black font-sans text-slate-950">${item.physicalAmount.toLocaleString('es-CL')}</td>
-                            <td className={`py-4 text-right font-black font-sans ${item.difference < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                              ${item.difference.toLocaleString('es-CL')}
-                            </td>
-                            <td className="py-4 text-center">
-                              <span className="text-[8px] font-black uppercase tracking-widest bg-slate-100 px-2 py-1 rounded">
-                                {(() => {
-                                  const itemStatus = getClosureDisplayStatus(item);
-                                  return itemStatus === 'bank' ? 'En Banco' : itemStatus === 'transit' ? 'Tránsito' : 'En Tienda';
-                                })()}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ))}
-              </div>
-
-              {/* Footer */}
-              <div className="mt-20 pt-10 border-t border-slate-200 text-center">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Fin del Reporte — Registro de Auditoría: {new Date().getTime()}</p>
-                <div className="mt-8 flex justify-center gap-20">
-                  <div className="w-48 border-t border-slate-300 pt-2">
-                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Firma Responsable</p>
-                  </div>
-                  <div className="w-48 border-t border-slate-300 pt-2">
-                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Firma Revisión</p>
-                  </div>
-                </div>
-              </div>
-           </div>
-        </div>
+        <PrintPreview
+          open={showPrintPreview}
+          filterStartDate={filterStartDate}
+          filterEndDate={filterEndDate}
+          userName={user.displayName || user.email}
+          groups={groupedClosures}
+          closureCount={filteredClosures.length}
+          getClosureDisplayStatus={getClosureDisplayStatus}
+          onClose={() => setShowPrintPreview(false)}
+        />
       </div>
 
        <AnimatePresence>
