@@ -15,6 +15,13 @@ export interface ShiftClosure {
   perseoMatchedAt?: string;
   perseoAuditStatus?: 'matched' | 'difference' | 'missing_report' | 'ambiguous' | string;
   perseoRaw?: Record<string, unknown>;
+  source?: 'telegram' | string;
+  note?: string;
+  telegramFileId?: string;
+  telegramFileUniqueId?: string | null;
+  telegramFilePath?: string;
+  telegramRequiresReview?: boolean;
+  telegramConfidence?: number | null;
 }
 
 export interface CollectionTrip {
@@ -34,6 +41,7 @@ export interface Movement {
   type: 'inflow' | 'outflow' | 'transfer' | 'internal_transfer';
   category?: string;
   subcategory?: string;
+  tags?: string[];
   amount: number;
   description: string;
   createdBy: string;

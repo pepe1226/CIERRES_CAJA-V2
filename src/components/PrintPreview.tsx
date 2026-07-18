@@ -3,7 +3,8 @@ import { format, parseISO } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { Calendar, Download, Printer, X } from 'lucide-react';
 import type { ShiftClosure } from '../types';
-import type { CashBoxStatus } from '../lib/cashLedger';
+
+type ClosureCashBoxStatus = 'safe' | 'transit' | 'bank';
 
 type ClosureGroup = {
   date: string;
@@ -23,7 +24,7 @@ type PrintPreviewProps = {
   userName: string;
   groups: ClosureGroup[];
   closureCount: number;
-  getClosureDisplayStatus: (closure: ShiftClosure) => CashBoxStatus;
+  getClosureDisplayStatus: (closure: ShiftClosure) => ClosureCashBoxStatus;
   onClose: () => void;
 };
 

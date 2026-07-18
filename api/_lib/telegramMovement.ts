@@ -5,9 +5,14 @@ type GeminiTipo = "ingreso" | "egreso" | "transferencia" | "desconocido";
 type AppMovementType = "inflow" | "outflow" | "transfer" | "internal_transfer";
 type CajaId = "safe" | "transit" | "bank";
 
+const ACTIVE_BUSINESS_YEAR = 2026;
+
 export type TelegramFinancialExtraction = {
   tipo: GeminiTipo;
   monto: number | null;
+  venta_sistema?: number | null;
+  cuadre_sistema?: number | null;
+  sistema?: number | null;
   moneda: string | null;
   fecha: string | null;
   caja: string | null;
@@ -29,7 +34,13 @@ function env(name: string, fallback = "") {
 export function getTelegramConfig() {
   return {
     telegramBotToken: env("TELEGRAM_BOT_TOKEN"),
+    telegramPerseoBotToken: env("TELEGRAM_PERSEO_BOT_TOKEN"),
+    telegramExpenseBotToken: env("TELEGRAM_EXPENSE_BOT_TOKEN"),
+    telegramPersonalBotToken: env("TELEGRAM_PERSONAL_BOT_TOKEN"),
     telegramSecretToken: env("TELEGRAM_SECRET_TOKEN"),
+    telegramPerseoSecretToken: env("TELEGRAM_PERSEO_SECRET_TOKEN"),
+    telegramExpenseSecretToken: env("TELEGRAM_EXPENSE_SECRET_TOKEN"),
+    telegramPersonalSecretToken: env("TELEGRAM_PERSONAL_SECRET_TOKEN"),
     telegramAllowedChatId: env("TELEGRAM_ALLOWED_CHAT_ID"),
     telegramCreatedByUid: env("TELEGRAM_CREATED_BY_UID", "telegram-bot"),
     geminiApiKey: env("GEMINI_API_KEY"),
@@ -47,7 +58,13 @@ export function getTelegramStatus() {
         config.geminiApiKey
     ),
     hasTelegramBotToken: Boolean(config.telegramBotToken),
+    hasTelegramPerseoBotToken: Boolean(config.telegramPerseoBotToken),
+    hasTelegramExpenseBotToken: Boolean(config.telegramExpenseBotToken),
+    hasTelegramPersonalBotToken: Boolean(config.telegramPersonalBotToken),
     hasTelegramSecretToken: Boolean(config.telegramSecretToken),
+    hasTelegramPerseoSecretToken: Boolean(config.telegramPerseoSecretToken),
+    hasTelegramExpenseSecretToken: Boolean(config.telegramExpenseSecretToken),
+    hasTelegramPersonalSecretToken: Boolean(config.telegramPersonalSecretToken),
     hasGeminiApiKey: Boolean(config.geminiApiKey),
     geminiModel: config.geminiModel,
     allowedChatId: config.telegramAllowedChatId || null,
@@ -57,16 +74,15 @@ export function getTelegramStatus() {
 
 async function telegramApi<T>(
   method: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  botToken = getTelegramConfig().telegramBotToken
 ): Promise<T> {
-  const { telegramBotToken } = getTelegramConfig();
-
-  if (!telegramBotToken) {
+  if (!botToken) {
     throw new Error("Falta TELEGRAM_BOT_TOKEN en Vercel.");
   }
 
   const response = await fetch(
-    `https://api.telegram.org/bot${telegramBotToken}/${method}`,
+    `https://api.telegram.org/bot${botToken}/${method}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -83,30 +99,72 @@ async function telegramApi<T>(
   return data as T;
 }
 
-export async function sendTelegramMessage(chatId: number | string, text: string) {
+export async function sendTelegramMessage(
+  chatId: number | string,
+  text: string,
+  botToken?: string,
+  extraPayload: Record<string, unknown> = {}
+) {
   try {
     await telegramApi("sendMessage", {
       chat_id: chatId,
       text,
       parse_mode: "HTML",
-    });
+      ...extraPayload,
+    }, botToken);
   } catch (error) {
     console.error("No se pudo responder en Telegram:", error);
   }
 }
 
-export async function downloadTelegramPhoto(fileId: string) {
-  const { telegramBotToken } = getTelegramConfig();
+export async function editTelegramMessageText(params: {
+  chatId: number | string;
+  messageId: number;
+  text: string;
+  botToken?: string;
+  extraPayload?: Record<string, unknown>;
+}) {
+  try {
+    await telegramApi("editMessageText", {
+      chat_id: params.chatId,
+      message_id: params.messageId,
+      text: params.text,
+      parse_mode: "HTML",
+      ...(params.extraPayload || {}),
+    }, params.botToken);
+  } catch (error) {
+    console.error("No se pudo editar mensaje en Telegram:", error);
+  }
+}
 
+export async function answerTelegramCallbackQuery(params: {
+  callbackQueryId: string;
+  text?: string;
+  showAlert?: boolean;
+  botToken?: string;
+}) {
+  try {
+    await telegramApi("answerCallbackQuery", {
+      callback_query_id: params.callbackQueryId,
+      text: params.text || "",
+      show_alert: Boolean(params.showAlert),
+    }, params.botToken);
+  } catch (error) {
+    console.error("No se pudo responder callback de Telegram:", error);
+  }
+}
+
+export async function downloadTelegramPhoto(fileId: string, botToken?: string) {
   const fileInfo = await telegramApi<{
     ok: true;
     result: { file_path: string };
   }>("getFile", {
     file_id: fileId,
-  });
+  }, botToken);
 
   const telegramFilePath = fileInfo.result.file_path;
-  const fileUrl = `https://api.telegram.org/file/bot${telegramBotToken}/${telegramFilePath}`;
+  const token = botToken || getTelegramConfig().telegramBotToken;
+  const fileUrl = `https://api.telegram.org/file/bot${token}/${telegramFilePath}`;
   const imageResponse = await fetch(fileUrl);
 
   if (!imageResponse.ok) {
@@ -207,12 +265,66 @@ function mapTipoToMovementType(
   return "outflow";
 }
 
+function isValidDateParts(year: number, month: number, day: number) {
+  const date = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+function getFallbackDateParts(fallbackDate: Date) {
+  return {
+    year: ACTIVE_BUSINESS_YEAR,
+    month: fallbackDate.getUTCMonth() + 1,
+    day: fallbackDate.getUTCDate(),
+  };
+}
+
+function toBusinessDate(year: number, month: number, day: number, fallbackDate: Date) {
+  let normalizedYear = year;
+
+  if (normalizedYear < 100) normalizedYear += 2000;
+  if (normalizedYear !== ACTIVE_BUSINESS_YEAR) {
+    normalizedYear = ACTIVE_BUSINESS_YEAR;
+  }
+
+  if (!isValidDateParts(normalizedYear, month, day)) {
+    return null;
+  }
+
+  return new Date(Date.UTC(normalizedYear, month - 1, day, 12, 0, 0));
+}
+
 function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
   if (!value) {
     return fallbackDate;
   }
 
-  const text = value.trim();
+  const text = value
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.]/g, "-");
+
+  const fallback = getFallbackDateParts(fallbackDate);
+
+  const dayOnlyMatch = text.match(/^(\d{1,2})$/);
+
+  if (dayOnlyMatch) {
+    const parsed = toBusinessDate(fallback.year, fallback.month, Number(dayOnlyMatch[1]), fallbackDate);
+
+    return parsed || fallbackDate;
+  }
+
+  const dayMonthMatch = text.match(/^(\d{1,2})[-/](\d{1,2})$/);
+
+  if (dayMonthMatch) {
+    const parsed = toBusinessDate(fallback.year, Number(dayMonthMatch[2]), Number(dayMonthMatch[1]), fallbackDate);
+
+    return parsed || fallbackDate;
+  }
 
   const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
 
@@ -221,7 +333,7 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
     const month = Number(isoMatch[2]);
     const day = Number(isoMatch[3]);
 
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    return toBusinessDate(year, month, day, fallbackDate) || fallbackDate;
   }
 
   const shortDateMatch = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
@@ -229,16 +341,16 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
   if (shortDateMatch) {
     const day = Number(shortDateMatch[1]);
     const month = Number(shortDateMatch[2]);
-    let year = Number(shortDateMatch[3]);
+    const year = Number(shortDateMatch[3]);
 
-    if (year < 100) {
-      year = 2000 + year;
-    }
-
-    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    return toBusinessDate(year, month, day, fallbackDate) || fallbackDate;
   }
 
-  const parsed = new Date(text);
+  if (/^\d+$/.test(text)) {
+    return fallbackDate;
+  }
+
+  const parsed = new Date(value);
 
   if (!Number.isNaN(parsed.getTime())) {
     return parsed;
@@ -272,7 +384,7 @@ export function buildMovementFromExtraction(
 
   const hasValidDate =
     typeof extraction.fecha === "string" &&
-    extraction.fecha.trim().length >= 8 &&
+    extraction.fecha.trim().length > 0 &&
     !Number.isNaN(movementDate.getTime());
 
   const hasResponsible = Boolean(
@@ -477,7 +589,9 @@ Eres un asistente para registrar cierres de caja desde fotos enviadas por Telegr
 Regla principal:
 La mayoría de imágenes tendrán solamente:
 - fecha escrita a mano
-- valor o monto
+- valor o monto fisico de la funda
+- venta sistema, venta total o total vendido si aparece
+- cuadre sistema, saldo sistema o sistema si aparece
 - responsable o nombre de persona
 
 Ejemplo:
@@ -486,10 +600,15 @@ $45.15
 ESQ Yulexi
 
 En estos casos:
+- El anio operativo del sistema es 2026.
 - Interpretar la fecha como DD-MM-YY.
 - 03-05-26 significa 2026-05-03.
+- Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes del mensaje de Telegram y anio 2026.
+- Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio 2026.
+- Nunca uses 26 como anio 0026 ni intercambies dia y anio.
 - El monto es el valor escrito junto al símbolo $.
-- El responsable es el nombre escrito en la etiqueta.
+- El responsable/cajero es el nombre escrito en la etiqueta, normalmente despues de ESQ, Responsable, Sr. o Sra.
+- Coloca el responsable/cajero en proveedor_cliente, no solo en descripcion.
 - El tipo debe ser "ingreso".
 - La caja debe ser "Principal".
 - La categoría debe ser "Cierre de caja".
@@ -531,6 +650,9 @@ ${params.caption || "Sin texto adicional"}
             enum: ["ingreso", "egreso", "transferencia", "desconocido"],
           },
           monto: { type: Type.NUMBER, nullable: true },
+          venta_sistema: { type: Type.NUMBER, nullable: true },
+          cuadre_sistema: { type: Type.NUMBER, nullable: true },
+          sistema: { type: Type.NUMBER, nullable: true },
           moneda: { type: Type.STRING, nullable: true },
           fecha: {
             type: Type.STRING,
@@ -554,6 +676,9 @@ ${params.caption || "Sin texto adicional"}
         required: [
           "tipo",
           "monto",
+          "venta_sistema",
+          "cuadre_sistema",
+          "sistema",
           "moneda",
           "fecha",
           "caja",

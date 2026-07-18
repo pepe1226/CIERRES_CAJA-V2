@@ -7,35 +7,39 @@ import React, { lazy, Suspense, useState, useEffect, useMemo, useRef, useCallbac
 import { ShiftClosure, Movement } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
-import { 
-  collection, 
-  doc, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
+import {
+  collection,
+  doc,
+  addDoc,
+  updateDoc,
+  deleteDoc,
   serverTimestamp,
   Timestamp
 } from 'firebase/firestore';
-import { 
-  format, 
-  startOfMonth, 
-  endOfMonth, 
-  isWithinInterval, 
+import {
+  format,
+  startOfMonth,
+  endOfMonth,
+  isWithinInterval,
   parseISO,
   startOfDay,
   endOfDay,
   subDays,
+  subMonths,
+  startOfYear,
+  endOfYear,
   startOfWeek
 } from 'date-fns';
 import { es } from 'date-fns/locale';
-import { 
-  Plus, 
-  History, 
-  TrendingDown, 
-  TrendingUp, 
+import {
+  Plus,
+  LogOut,
+  History,
+  TrendingDown,
+  TrendingUp,
   ChevronDown,
-  AlertCircle, 
-  CheckCircle2, 
+  AlertCircle,
+  CheckCircle2,
   User as UserIcon,
   DollarSign,
   Banknote,
@@ -63,9 +67,14 @@ import {
   CreditCard,
   ArrowRightLeft,
   Tag,
+  Printer,
+  Download,
+  LayoutDashboard,
   ChevronLeft,
   ChevronRight,
-  ShieldAlert
+  ShieldAlert,
+  Eye,
+  Share2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { PrintPreview } from './components/PrintPreview';
@@ -73,29 +82,306 @@ import { AppHeader } from './components/AppHeader';
 import { LoginScreen } from './components/LoginScreen';
 import { useAuthProfile } from './hooks/useAuthProfile';
 import { useFinanceData } from './hooks/useFinanceData';
-import {
-  buildClosureLedger,
-  getDayClosureStatus,
-  getDerivedClosureStatuses,
-  normalizeCashBoxStatus,
-  type CashBoxStatus,
-  type DisplayClosureStatus
-} from './lib/cashLedger';
-import {
-  calculateClosureDifference,
-  emptyClosureColumnFilters,
-  getClosureColumnSearchValue,
-  getClosureSearchValues,
-  getClosureStatusLabel,
-  getMovementDefaults,
-  normalizeSearchText,
-  toNonNegativeNumber,
-  type ClosureColumnKey
-} from './lib/closureUtils';
 
 const Dashboard = lazy(() =>
   import('./components/Dashboard').then(module => ({ default: module.Dashboard }))
 );
+const PersonalFinance = lazy(() =>
+  import('./components/PersonalFinance').then(module => ({ default: module.PersonalFinance }))
+);
+
+
+type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
+
+type CashBoxStatus = 'safe' | 'transit' | 'bank' | 'personal';
+type ClosureCashBoxStatus = Exclude<CashBoxStatus, 'personal'>;
+type DisplayClosureStatus = ClosureCashBoxStatus | 'mixed';
+type ClosureAuditStatus = 'all' | 'matched' | 'difference' | 'pending_report' | 'not_audited';
+type ClosureLedgerEntry = {
+  displayStatus: ClosureCashBoxStatus;
+  hasSplitBalance: boolean;
+  balances: Record<CashBoxStatus, number>;
+};
+
+const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'personal'];
+const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank'];
+const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank'];
+
+const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
+  const normalized = String(status || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+  if (['bank', 'banco', 'en banco'].includes(normalized)) return 'bank';
+  if (['transit', 'transito', 'en transito', 'camino', 'viaje'].includes(normalized)) return 'transit';
+  if (['personal', 'caja personal', 'mi caja', 'caja mia', 'gasto personal', 'gastos personales', 'finanzas personales'].includes(normalized)) return 'personal';
+  return 'safe';
+};
+
+const normalizeClosureCashBoxStatus = (status?: string | null): ClosureCashBoxStatus => {
+  const normalized = normalizeCashBoxStatus(status);
+  return normalized === 'personal' ? 'safe' : normalized;
+};
+
+const cashBoxValueMatches = (value: string | undefined | null, status: CashBoxStatus) =>
+  Boolean(value) && normalizeCashBoxStatus(value) === status;
+
+const closureStatusMatches = (value: string | undefined | null, status: ClosureCashBoxStatus) =>
+  normalizeClosureCashBoxStatus(value) === status;
+
+const getPrimaryCashBoxStatus = (balance: Record<CashBoxStatus, number>): ClosureCashBoxStatus => {
+  return cashBoxStatusPriority.reduce<ClosureCashBoxStatus>((primary, status) => {
+    const primaryAmount = balance[primary] || 0;
+    const statusAmount = balance[status] || 0;
+
+    if (statusAmount > primaryAmount + 0.009) return status;
+    if (Math.abs(statusAmount - primaryAmount) <= 0.009 && statusAmount > 0.009) return status;
+
+    return primary;
+  }, 'safe');
+};
+
+const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
+  date: '',
+  responsible: '',
+  physicalAmount: '',
+  systemAmount: '',
+  systemBalance: '',
+  difference: '',
+  status: '',
+  notes: ''
+};
+
+const normalizeSearchText = (value: unknown) =>
+  String(value ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+
+const getCashBoxLabel = (status?: string | null) => {
+  const normalized = normalizeCashBoxStatus(status);
+  if (normalized === 'transit') return 'En Transito';
+  if (normalized === 'bank') return 'En Banco';
+  if (normalized === 'personal') return 'Caja Personal';
+  return 'En Tienda';
+};
+
+const getClosureStatusLabel = (status?: ShiftClosure['status']) => getCashBoxLabel(status);
+
+const getClosureAuditInfo = (closure: ShiftClosure) => {
+  const isTelegramPhoto = closure.source === 'telegram' || Boolean(closure.telegramFileId);
+  const hasPerseoReport = closure.systemSource === 'perseo' || Boolean(closure.perseoReportId);
+  const difference = Number(closure.difference) || 0;
+
+  if (hasPerseoReport) {
+    const isDifference =
+      closure.perseoAuditStatus === 'difference' ||
+      Math.abs(difference) > 0.009;
+
+    return {
+      status: isDifference ? 'difference' : 'matched',
+      label: isDifference ? 'Diferencia' : 'Auditado OK',
+      detail: isTelegramPhoto ? 'Foto Telegram cruzada con Perseo' : 'Cierre cruzado con Perseo',
+      className: isDifference
+        ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+        : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+    } as const;
+  }
+
+  if (isTelegramPhoto) {
+    return {
+      status: 'pending_report',
+      label: 'Falta Venta Sistema',
+      detail: 'Foto Telegram recibida; falta llenar Venta Sistema',
+      className: 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+    } as const;
+  }
+
+  return {
+    status: 'not_audited',
+    label: 'Sin auditoría',
+    detail: 'Cierre manual o sin venta de sistema asociada',
+    className: 'bg-slate-500/10 text-slate-500 border-slate-500/20'
+  } as const;
+};
+
+const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
+  (Number(closure.physicalAmount) || 0) - (Number(closure.systemBalance) || 0);
+
+const toNonNegativeNumber = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+type ExpenseClassificationRule = {
+  category: string;
+  subcategory: string;
+  tags: string[];
+  terms: string[];
+};
+const EXPENSE_CLASSIFICATION_RULES: ExpenseClassificationRule[] = [
+  { category: 'Gastos personales', subcategory: 'GENERAL PERSONAL', tags: ['PERSONAL'], terms: ['gasto personal', 'gastos personales', 'retiro personal', 'para mi', 'mio', 'personal mio', 'personal jose', 'uso personal'] },
+  { category: 'Sueldos', subcategory: 'NOMINA', tags: ['PERSONAL', 'SUELDOS'], terms: ['sueldo', 'salario', 'nomina', 'pago empleado', 'anticipo', 'decimo', 'beneficio'] },
+  { category: 'Arriendo', subcategory: 'LOCAL', tags: ['LOCAL', 'FIJO'], terms: ['arriendo', 'alquiler', 'renta', 'local'] },
+  { category: 'Luz', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['luz', 'energia', 'electrica', 'empresa electrica'] },
+  { category: 'Agua', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['agua', 'interagua'] },
+  { category: 'Internet', subcategory: 'CONECTIVIDAD', tags: ['SERVICIOS', 'FIJO'], terms: ['internet', 'wifi', 'cnt', 'claro', 'netlife', 'fibra'] },
+  { category: 'Transporte', subcategory: 'MOVILIZACION', tags: ['OPERACION', 'TRANSPORTE'], terms: ['taxi', 'uber', 'flete', 'envio', 'gasolina', 'combustible', 'parqueo', 'peaje', 'bus'] },
+  { category: 'Insumos', subcategory: 'COMPRAS', tags: ['OPERACION', 'INSUMOS'], terms: ['insumo', 'compra', 'proveedor', 'material', 'fundas', 'papeleria', 'limpieza', 'cinta'] },
+  { category: 'Mantenimiento', subcategory: 'REPARACION', tags: ['OPERACION', 'MANTENIMIENTO'], terms: ['mantenimiento', 'reparacion', 'arreglo', 'tecnico', 'equipo'] },
+  { category: 'Banco', subcategory: 'COMISIONES', tags: ['BANCO', 'COMISION'], terms: ['comision', 'banco', 'transferencia bancaria', 'deposito', 'retiro'] },
+  { category: 'Impuestos', subcategory: 'SRI', tags: ['IMPUESTOS'], terms: ['sri', 'iva', 'impuesto', 'patente', 'municipio'] },
+];
+const normalizeExpenseText = (value: string) =>
+  value
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+const normalizeExpenseTag = (value: string) =>
+  normalizeExpenseText(value)
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+const mergeExpenseTags = (tags: Array<string | undefined | null>) =>
+  Array.from(new Set(tags.map(tag => tag ? normalizeExpenseTag(tag) : '').filter(Boolean))).slice(0, 8);
+const classifyExpenseDescription = (description: string) => {
+  const normalized = normalizeExpenseText(description);
+  if (!normalized) return null;
+  const matchedRule = EXPENSE_CLASSIFICATION_RULES
+    .map(rule => ({
+      rule,
+      score: rule.terms.reduce((acc, term) => normalized.includes(normalizeExpenseText(term)) ? acc + 1 : acc, 0)
+    }))
+    .sort((a, b) => b.score - a.score)[0];
+  if (!matchedRule || matchedRule.score === 0) {
+    return {
+      category: 'Otros',
+      subcategory: 'GENERAL',
+      tags: mergeExpenseTags(['SIN CLASIFICAR'])
+    };
+  }
+  return {
+    category: matchedRule.rule.category,
+    subcategory: matchedRule.rule.subcategory,
+    tags: mergeExpenseTags(matchedRule.rule.tags)
+  };
+};
+const getMovementDefaults = (
+  type: Movement['type'],
+  caja?: string,
+  current: Partial<Movement> = {}
+): Partial<Movement> => {
+  const base = {
+    amount: toNonNegativeNumber(current.amount),
+    description: current.description || '',
+    date: current.date || new Date().toISOString(),
+    tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : []
+  };
+
+  if (type === 'outflow') {
+    const outflowFrom = caja || current.from || ((current.category || '').toLowerCase() === 'gastos personales' ? 'personal' : 'safe');
+    const isPersonalOutflow = normalizeCashBoxStatus(outflowFrom) === 'personal';
+
+    return {
+      ...base,
+      type,
+      category: current.category || (isPersonalOutflow ? 'Gastos personales' : 'Sueldos'),
+      subcategory: current.subcategory || (isPersonalOutflow ? 'GENERAL PERSONAL' : ''),
+      from: outflowFrom,
+      to: undefined,
+      tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : isPersonalOutflow ? ['PERSONAL'] : []
+    };
+  }
+
+  if (type === 'transfer') {
+    const currentFrom = current.from ? normalizeCashBoxStatus(current.from) : null;
+    const selectedBox = caja ? normalizeCashBoxStatus(caja) : null;
+    const from = selectedBox && selectedBox !== 'bank'
+      ? selectedBox
+      : currentFrom && currentFrom !== 'bank'
+        ? currentFrom
+        : 'safe';
+    return {
+      ...base,
+      type,
+      category: undefined,
+      subcategory: '',
+      tags: [],
+      from,
+      to: 'bank'
+    };
+  }
+
+  const from = caja || current.from || 'safe';
+  const to = current.to && current.to !== from
+    ? current.to
+    : from === 'safe'
+      ? 'transit'
+      : 'safe';
+
+  return {
+    ...base,
+    type,
+    category: undefined,
+    subcategory: '',
+    tags: [],
+    from,
+    to
+  };
+};
+
+const getClosureSearchValues = (closure: ShiftClosure) => {
+  const parsedDate = parseISO(closure.date);
+  const dateValues = Number.isNaN(parsedDate.getTime())
+    ? [closure.date]
+    : [
+        closure.date,
+        format(parsedDate, 'dd/MM/yyyy HH:mm'),
+        format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es }),
+        format(parsedDate, 'yyyy-MM-dd'),
+        format(parsedDate, 'HH:mm')
+      ];
+
+  return [
+    ...dateValues,
+    closure.responsible,
+    closure.physicalAmount,
+    closure.systemAmount,
+    closure.systemBalance,
+    closure.difference,
+    closure.status,
+    getClosureStatusLabel(closure.status),
+    closure.notes,
+    closure.tripId,
+    closure.id
+  ];
+};
+
+const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColumnKey) => {
+  const parsedDate = parseISO(closure.date);
+  const dateValue = Number.isNaN(parsedDate.getTime())
+    ? closure.date
+    : `${closure.date} ${format(parsedDate, 'dd/MM/yyyy HH:mm')} ${format(parsedDate, 'dd MMM yyyy HH:mm', { locale: es })} ${format(parsedDate, 'yyyy-MM-dd')} ${format(parsedDate, 'HH:mm')}`;
+
+  const values: Record<ClosureColumnKey, unknown> = {
+    date: dateValue,
+    responsible: closure.responsible,
+    physicalAmount: closure.physicalAmount,
+    systemAmount: closure.systemAmount,
+    systemBalance: closure.systemBalance,
+    difference: closure.difference,
+    status: `${closure.status || ''} ${getClosureStatusLabel(closure.status)}`,
+    notes: closure.notes || ''
+  };
+
+  return values[column];
+};
 
 function AppContent() {
   const { user, loading } = useAuthProfile();
@@ -104,7 +390,7 @@ function AppContent() {
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<ClosureColumnKey, string>>(emptyClosureColumnFilters);
-  const [currentView, setCurrentView] = useState<'main' | 'dashboard'>('main');
+  const [currentView, setCurrentView] = useState<'main' | 'dashboard' | 'personal'>('main');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const [selectedClosures, setSelectedClosures] = useState<Set<string>>(new Set());
@@ -123,22 +409,28 @@ function AppContent() {
   const [viewingCajaMovements, setViewingCajaMovements] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, caja: string } | null>(null);
 
-  const [categories, setCategories] = useState<string[]>(['Sueldos', 'Arriendo', 'Luz', 'Agua', 'Internet', 'Insumos', 'Otros']);
+  const [categories, setCategories] = useState<string[]>(['Gastos personales', 'Sueldos', 'Arriendo', 'Luz', 'Agua', 'Internet', 'Insumos', 'Otros']);
   const [subcategories, setSubcategories] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [isAddingNewCategory, setIsAddingNewCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isAddingNewSubcategory, setIsAddingNewSubcategory] = useState(false);
   const [newSubcategoryName, setNewSubcategoryName] = useState('');
+  const [newExpenseTag, setNewExpenseTag] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [isEditingCategories, setIsEditingCategories] = useState(false);
-  
+
   const [filterStartDate, setFilterStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
   const [filterEndDate, setFilterEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterResponsible, setFilterResponsible] = useState('all');
+  const [filterAudit, setFilterAudit] = useState<ClosureAuditStatus>('all');
   const [filterDateRangeType, setFilterDateRangeType] = useState('mes');
+  const [outflowPeriodType, setOutflowPeriodType] = useState<'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom'>('este_mes');
+  const [outflowStartDate, setOutflowStartDate] = useState(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
+  const [outflowEndDate, setOutflowEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
   const [hideCollected, setHideCollected] = useState(false);
+  const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
 
   const [movementValues, setMovementValues] = useState<Partial<Movement>>({
     type: 'outflow',
@@ -146,8 +438,38 @@ function AppContent() {
     description: '',
     date: new Date().toISOString(),
     category: 'Sueldos',
-    subcategory: ''
+    subcategory: '',
+    tags: []
   });
+
+  const applySmartExpenseDescription = (description: string) => {
+    const suggestion = classifyExpenseDescription(description);
+    setMovementValues(prev => ({
+      ...prev,
+      description,
+      ...(prev.type === 'outflow' && suggestion ? {
+        category: suggestion.category,
+        subcategory: suggestion.subcategory,
+        tags: mergeExpenseTags([...(prev.tags || []), ...suggestion.tags])
+      } : {})
+    }));
+  };
+  const addExpenseTag = () => {
+    const tag = normalizeExpenseTag(newExpenseTag);
+    if (!tag) return;
+    setMovementValues(prev => ({
+      ...prev,
+      tags: mergeExpenseTags([...(prev.tags || []), tag])
+    }));
+    setNewExpenseTag('');
+  };
+  const removeExpenseTag = (tagToRemove: string) => {
+    const normalized = normalizeExpenseTag(tagToRemove);
+    setMovementValues(prev => ({
+      ...prev,
+      tags: (prev.tags || []).filter(tag => normalizeExpenseTag(tag) !== normalized)
+    }));
+  };
 
   const [isInlineAdding, setIsInlineAdding] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -227,10 +549,10 @@ function AppContent() {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     const oscillator = audioContext.createOscillator();
     const gainNode = audioContext.createGain();
-    
+
     oscillator.connect(gainNode);
     gainNode.connect(audioContext.destination);
-    
+
     if (type === 'transit') {
       oscillator.type = 'sine';
       oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
@@ -243,10 +565,10 @@ function AppContent() {
       oscillator.type = 'square';
       oscillator.frequency.setValueAtTime(220, audioContext.currentTime);
     }
-    
+
     gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
-    
+
     oscillator.start();
     oscillator.stop(audioContext.currentTime + 0.2);
   };
@@ -260,7 +582,7 @@ function AppContent() {
   const handleExportCSV = async () => {
     setIsExporting(true);
     try {
-      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'Físico', 'Diferencia', 'Estado', 'Notas'].join(';');
+      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'Físico', 'Diferencia', 'Estado', 'Auditoría', 'Notas'].join(';');
       const rows = closures.map(c => [
         format(parseISO(c.date), 'dd/MM/yyyy HH:mm'),
         c.responsible,
@@ -269,9 +591,10 @@ function AppContent() {
         c.physicalAmount,
         c.difference,
         getClosureDisplayStatus(c),
+        getClosureAuditInfo(c).label,
         c.notes || ''
       ].join(';'));
-      
+
       const csvContent = "\ufeff" + [headers, ...rows].join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -288,20 +611,101 @@ function AppContent() {
     }
   };
 
-  const closureLedgerById = useMemo(
-    () => buildClosureLedger(closures, movements),
-    [closures, movements]
-  );
+  const closureLedgerById = useMemo(() => {
+    const balances: Record<string, Record<CashBoxStatus, number>> = {};
 
-  const derivedClosureStatusById = useMemo(
-    () => getDerivedClosureStatuses(closureLedgerById),
-    [closureLedgerById]
-  );
+    closures.forEach(closure => {
+      if (!closure.id) return;
 
-  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): CashBoxStatus =>
+      balances[closure.id] = {
+        safe: 0,
+        transit: 0,
+        bank: 0,
+        personal: 0
+      };
+
+      const initialStatus = normalizeClosureCashBoxStatus(closure.status);
+      balances[closure.id][initialStatus] = Number(closure.physicalAmount) || 0;
+    });
+
+    const orderedTransfers = [...movements]
+      .filter(movement =>
+        (movement.type === 'transfer' || movement.type === 'internal_transfer') &&
+        movement.from &&
+        movement.to
+      )
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    orderedTransfers.forEach(movement => {
+      const from = normalizeCashBoxStatus(movement.from);
+      const to = normalizeCashBoxStatus(movement.to);
+
+      if (from === 'personal' || to === 'personal' || from === to) return;
+
+      let remainingAmount = Number(movement.amount) || 0;
+
+      if (remainingAmount <= 0) return;
+
+      const movementTime = new Date(movement.date).getTime();
+
+      const candidateClosures = [...closures]
+        .filter(closure => {
+          if (!closure.id) return false;
+
+          const closureTime = new Date(closure.date).getTime();
+
+          if (Number.isNaN(movementTime) || Number.isNaN(closureTime)) return true;
+
+          return closureTime <= movementTime;
+        })
+        // Al mover dinero físicamente, normalmente se toma primero lo más reciente disponible.
+        .sort((a, b) => b.date.localeCompare(a.date));
+
+      for (const closure of candidateClosures) {
+        if (!closure.id) continue;
+
+        const closureBalance = balances[closure.id];
+
+        if (!closureBalance) continue;
+
+        const availableAmount = closureBalance[from];
+
+        if (availableAmount <= 0) continue;
+
+        const movedAmount = Math.min(availableAmount, remainingAmount);
+
+        closureBalance[from] -= movedAmount;
+        closureBalance[to] += movedAmount;
+        remainingAmount -= movedAmount;
+
+        if (remainingAmount <= 0.009) break;
+      }
+    });
+
+    return Object.entries(balances).reduce((result, [closureId, balance]) => {
+      const activeStatuses = closureCashBoxStatuses.filter(status => balance[status] > 0.009);
+
+      result[closureId] = {
+        displayStatus: activeStatuses.length === 0 ? 'safe' : getPrimaryCashBoxStatus(balance),
+        hasSplitBalance: activeStatuses.length > 1,
+        balances: balance
+      };
+
+      return result;
+    }, {} as Record<string, ClosureLedgerEntry>);
+  }, [closures, movements]);
+
+  const derivedClosureStatusById = useMemo(() =>
+    Object.entries(closureLedgerById).reduce((result, [closureId, ledger]) => {
+      result[closureId] = ledger.displayStatus;
+      return result;
+    }, {} as Record<string, ClosureCashBoxStatus>),
+  [closureLedgerById]);
+
+  const getClosureDisplayStatus = useCallback((closure: ShiftClosure): ClosureCashBoxStatus =>
     closure.id
-      ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
-      : normalizeCashBoxStatus(closure.status),
+      ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
+      : normalizeClosureCashBoxStatus(closure.status),
   [derivedClosureStatusById]);
 
   const isClosureAvailableForTrip = useCallback((closure: ShiftClosure) =>
@@ -320,11 +724,11 @@ function AppContent() {
       const date = parseISO(c.date);
       const start = startOfDay(parseISO(filterStartDate));
       const end = endOfDay(parseISO(filterEndDate));
-      
+
       const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(date, { start, end });
       const derivedStatus = c.id
-        ? derivedClosureStatusById[c.id] || normalizeCashBoxStatus(c.status)
-        : normalizeCashBoxStatus(c.status);
+        ? derivedClosureStatusById[c.id] || normalizeClosureCashBoxStatus(c.status)
+        : normalizeClosureCashBoxStatus(c.status);
 
       const matchesStatus = filterStatus === 'all' || derivedStatus === filterStatus;
       const matchesResponsible = filterResponsible === 'all' || c.responsible === filterResponsible;
@@ -335,10 +739,13 @@ function AppContent() {
         normalizeSearchText(getClosureColumnSearchValue(c, column)).includes(value)
       );
       const matchesHideCollected = !hideCollected || !c.tripId;
-        
-      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected;
+      const matchesOnlyStoreClosures = !showOnlyStoreClosures || isClosureAvailableForTrip(c);
+      const auditInfo = getClosureAuditInfo(c);
+      const matchesAudit = filterAudit === 'all' || auditInfo.status === filterAudit;
+
+      return matchesDate && matchesStatus && matchesResponsible && matchesSearch && matchesColumnFilters && matchesHideCollected && matchesOnlyStoreClosures && matchesAudit;
     });
-  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, debouncedSearchTerm, columnFilters, hideCollected, filterDateRangeType, derivedClosureStatusById]);
+  }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, filterAudit, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
 
   const uniqueResponsibles = useMemo(() => {
     return Array.from(new Set(closures.map(c => c.responsible))).sort();
@@ -348,11 +755,29 @@ function AppContent() {
     closures.filter(c => c.id && selectedClosures.has(c.id) && isClosureAvailableForTrip(c)),
   [closures, selectedClosures, isClosureAvailableForTrip]);
 
-  const getDayStatusFromItems = useCallback(
-    (items: ShiftClosure[]): DisplayClosureStatus =>
-      getDayClosureStatus(items, closureLedgerById, derivedClosureStatusById),
-    [closureLedgerById, derivedClosureStatusById]
-  );
+  const getDayStatusFromItems = (items: ShiftClosure[]): DisplayClosureStatus => {
+    if (items.length === 0) return 'safe';
+
+    const hasSplitClosure = items.some(item => item.id && closureLedgerById[item.id]?.hasSplitBalance);
+
+    const normalizedStatuses = items.map(item => {
+      if (item.id && derivedClosureStatusById[item.id]) {
+        return derivedClosureStatusById[item.id];
+      }
+
+      return normalizeClosureCashBoxStatus(item.status);
+    });
+
+    const allSafe = normalizedStatuses.every(status => status === 'safe');
+    const allTransit = normalizedStatuses.every(status => status === 'transit');
+    const allBank = normalizedStatuses.every(status => status === 'bank');
+
+    if (allBank) return 'bank';
+    if (allTransit) return 'transit';
+    if (allSafe && !hasSplitClosure) return 'safe';
+
+    return 'mixed';
+  };
 
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
@@ -378,40 +803,92 @@ function AppContent() {
 
         return { date, items: sortedItems, totals, status };
       });
-  }, [filteredClosures, getDayStatusFromItems]);
+  }, [filteredClosures, derivedClosureStatusById, closureLedgerById]);
 
 
-  const accumulatedSafeTotal = useMemo(() => {
-    const closuresSafe = closures.filter(c => c.status === 'safe').reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements.filter(m => m.to === 'safe').reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements.filter(m => m.from === 'safe').reduce((acc, curr) => acc + curr.amount, 0);
-    return closuresSafe + movementsIn - movementsOut;
+  const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
+    const closuresInBox = status === 'personal'
+      ? 0
+      : closures
+        .filter(c => closureStatusMatches(c.status, status))
+        .reduce((acc, curr) => acc + curr.physicalAmount, 0);
+    const movementsIn = movements
+      .filter(m => cashBoxValueMatches(m.to, status))
+      .reduce((acc, curr) => acc + curr.amount, 0);
+    const movementsOut = movements
+      .filter(m => cashBoxValueMatches(m.from, status))
+      .reduce((acc, curr) => acc + curr.amount, 0);
+
+    return closuresInBox + movementsIn - movementsOut;
   }, [closures, movements]);
 
-  const accumulatedTransitTotal = useMemo(() => {
-    const closuresTransit = closures.filter(c => c.status === 'transit').reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements.filter(m => m.to === 'transit').reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements.filter(m => m.from === 'transit').reduce((acc, curr) => acc + curr.amount, 0);
-    return closuresTransit + movementsIn - movementsOut;
-  }, [closures, movements]);
+  const accumulatedSafeTotal = useMemo(() => getAccumulatedBoxTotal('safe'), [getAccumulatedBoxTotal]);
+  const accumulatedTransitTotal = useMemo(() => getAccumulatedBoxTotal('transit'), [getAccumulatedBoxTotal]);
+  const accumulatedBankTotal = useMemo(() => getAccumulatedBoxTotal('bank'), [getAccumulatedBoxTotal]);
+  const accumulatedPersonalTotal = useMemo(() => getAccumulatedBoxTotal('personal'), [getAccumulatedBoxTotal]);
 
-  const accumulatedBankTotal = useMemo(() => {
-    const closuresBank = closures.filter(c => c.status === 'bank').reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements.filter(m => m.to === 'bank').reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements.filter(m => m.from === 'bank').reduce((acc, curr) => acc + curr.amount, 0);
-    return closuresBank + movementsIn - movementsOut;
-  }, [closures, movements]);
+  const applyOutflowPeriod = useCallback((period: 'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom') => {
+    const today = new Date();
+    const previousMonth = subMonths(today, 1);
+
+    if (period === 'este_mes') {
+      setOutflowStartDate(format(startOfMonth(today), 'yyyy-MM-dd'));
+      setOutflowEndDate(format(endOfMonth(today), 'yyyy-MM-dd'));
+    }
+
+    if (period === 'mes_pasado') {
+      setOutflowStartDate(format(startOfMonth(previousMonth), 'yyyy-MM-dd'));
+      setOutflowEndDate(format(endOfMonth(previousMonth), 'yyyy-MM-dd'));
+    }
+
+    if (period === 'anio_actual') {
+      setOutflowStartDate(format(startOfYear(today), 'yyyy-MM-dd'));
+      setOutflowEndDate(format(endOfYear(today), 'yyyy-MM-dd'));
+    }
+
+    setOutflowPeriodType(period);
+  }, []);
+
+  const filteredOutflowMovements = useMemo(() => {
+    return movements.filter(m => {
+      if (m.type !== 'outflow') return false;
+      if (outflowPeriodType === 'siempre') return true;
+
+      const movementDate = parseISO(m.date);
+      const start = startOfDay(parseISO(outflowStartDate));
+      const end = endOfDay(parseISO(outflowEndDate));
+
+      if (Number.isNaN(movementDate.getTime()) || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+        return true;
+      }
+
+      return isWithinInterval(movementDate, { start, end });
+    });
+  }, [movements, outflowPeriodType, outflowStartDate, outflowEndDate]);
 
   const accumulatedOutflowTotal = useMemo(() => {
-    return movements.filter(m => m.type === 'outflow').reduce((acc, curr) => acc + curr.amount, 0);
-  }, [movements]);
+    return filteredOutflowMovements.reduce((acc, curr) => acc + curr.amount, 0);
+  }, [filteredOutflowMovements]);
+
+  const outflowPeriodLabel = useMemo(() => {
+    if (outflowPeriodType === 'este_mes') return 'Este mes';
+    if (outflowPeriodType === 'mes_pasado') return 'Mes pasado';
+    if (outflowPeriodType === 'anio_actual') return 'Anio actual';
+    if (outflowPeriodType === 'siempre') return 'Todo el historial';
+
+    const start = parseISO(outflowStartDate);
+    const end = parseISO(outflowEndDate);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 'Periodo especifico';
+    return `${format(start, 'dd/MM/yyyy')} - ${format(end, 'dd/MM/yyyy')}`;
+  }, [outflowPeriodType, outflowStartDate, outflowEndDate]);
 
   const getBoxBalance = useCallback((box?: string | null) => {
     const normalizedBox = normalizeCashBoxStatus(box);
     if (normalizedBox === 'transit') return accumulatedTransitTotal;
     if (normalizedBox === 'bank') return accumulatedBankTotal;
+    if (normalizedBox === 'personal') return accumulatedPersonalTotal;
     return accumulatedSafeTotal;
-  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal]);
+  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal, accumulatedPersonalTotal]);
 
   const getAvailableSourceBalance = useCallback((box?: string | null) => {
     let available = getBoxBalance(box);
@@ -433,9 +910,9 @@ function AppContent() {
   }, [editingMovementId, getBoxBalance, movements]);
 
   const combinedMovements = useMemo(() => {
-    const boxMovements = movements.map(m => ({ 
-      ...m, 
-      source: 'movement' as const 
+    const boxMovements = movements.map(m => ({
+      ...m,
+      source: 'movement' as const
     }));
     const boxClosures = closures.map(c => {
       const displayStatus = getClosureDisplayStatus(c);
@@ -455,6 +932,7 @@ function AppContent() {
       tripId: c.tripId,
       category: undefined,
       subcategory: undefined,
+      tags: undefined,
       from: undefined,
       to: displayStatus
     };
@@ -462,9 +940,37 @@ function AppContent() {
     return [...boxMovements, ...boxClosures].sort((a, b) => b.date.localeCompare(a.date));
   }, [movements, closures, getClosureDisplayStatus]);
 
-  const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string) => {
+  const cashBoxStatementRows = useMemo(() => {
+    return cashBoxStatuses.reduce((result, status) => {
+      let runningBalance = getBoxBalance(status);
+
+      result[status] = combinedMovements
+        .filter(m =>
+          (m.source === 'movement' && (cashBoxValueMatches(m.from, status) || cashBoxValueMatches(m.to, status))) ||
+          (m.source === 'closure' && m.status === status && !m.tripId)
+        )
+        .map(m => {
+          const signedAmount = m.source === 'closure' || cashBoxValueMatches(m.to, status)
+            ? Number(m.amount) || 0
+            : -(Number(m.amount) || 0);
+          const balanceAfter = runningBalance;
+          runningBalance -= signedAmount;
+
+          return {
+            ...m,
+            signedAmount,
+            balanceAfter,
+          };
+        });
+
+      return result;
+    }, {} as Record<CashBoxStatus, Array<(typeof combinedMovements)[number] & { signedAmount: number; balanceAfter: number }>>);
+  }, [combinedMovements, getBoxBalance]);
+
+  const handleOpenAddMovement = (type: 'outflow' | 'transfer' | 'internal_transfer', caja?: string, destination?: CashBoxStatus) => {
     setFormError(null);
-    setMovementValues(getMovementDefaults(type, caja));
+    const defaults = getMovementDefaults(type, caja);
+    setMovementValues(destination ? { ...defaults, to: destination } : defaults);
     setEditingMovementId(null);
     setIsAddingMovement(true);
     setContextMenu(null);
@@ -487,17 +993,17 @@ function AppContent() {
 
   const handleCreateTrip = async () => {
     if (!user || !tripFormValues.description) return;
-    
+
     setIsTripLoading(true);
     // If there are selected closures, use only eligible ones. Otherwise, use all available safe closures in the date range.
-    const selectedList = selectedClosures.size > 0 
+    const selectedList = selectedClosures.size > 0
       ? selectedTripClosures
       : closures.filter(c => {
           const d = parseISO(c.date);
           return isClosureAvailableForTrip(c) &&
-                 isWithinInterval(d, { 
-                   start: startOfDay(parseISO(tripFormValues.startDate)), 
-                   end: endOfDay(parseISO(tripFormValues.endDate)) 
+                 isWithinInterval(d, {
+                   start: startOfDay(parseISO(tripFormValues.startDate)),
+                   end: endOfDay(parseISO(tripFormValues.endDate))
                  });
         });
 
@@ -531,9 +1037,9 @@ function AppContent() {
 
       setIsCreatingTrip(false);
       setSelectedClosures(new Set());
-      setTripFormValues({ 
-        description: '', 
-        notes: '', 
+      setTripFormValues({
+        description: '',
+        notes: '',
         startDate: format(new Date(), 'yyyy-MM-dd'),
         endDate: format(new Date(), 'yyyy-MM-dd')
       });
@@ -551,7 +1057,7 @@ function AppContent() {
         status: 'completed',
         completionDate: serverTimestamp()
       });
-      
+
       const tripClosures = closures.filter(c => c.tripId === tripId);
       for (const c of tripClosures) {
         if (c.id) {
@@ -574,7 +1080,7 @@ function AppContent() {
       const tripClosures = closures.filter(c => c.tripId === tripId);
       for (const c of tripClosures) {
         if (c.id) {
-          await updateDoc(doc(db, 'closures', c.id), { 
+          await updateDoc(doc(db, 'closures', c.id), {
             tripId: null,
             status: 'safe'
           });
@@ -589,14 +1095,14 @@ function AppContent() {
 
   const lastEnterPress = useRef<number>(0);
   const handleKeyDown = (
-    e: React.KeyboardEvent, 
-    onSave: () => void, 
+    e: React.KeyboardEvent,
+    onSave: () => void,
     nextRef?: React.RefObject<HTMLInputElement | null>,
     prevRef?: React.RefObject<HTMLInputElement | null>
   ) => {
     if (e.key === 'Enter') {
       const now = Date.now();
-      
+
       // If there is a next field, go to it on single enter
       if (nextRef && nextRef.current) {
         e.preventDefault();
@@ -628,7 +1134,7 @@ function AppContent() {
       prevRef.current.focus();
       if (prevRef.current.type !== 'datetime-local') prevRef.current.select();
     }
-    
+
     // Space bar shortcut to save (since space is not used in numeric/code fields here)
     if (e.key === ' ' && !e.repeat && (e.target as HTMLElement).tagName === 'INPUT') {
       const type = (e.target as HTMLInputElement).type;
@@ -798,9 +1304,10 @@ function AppContent() {
   const handleSaveMovement = async () => {
     if (!user) return;
     setFormError(null);
-    
+
     let currentCategory = movementValues.category;
     let currentSubcategory = movementValues.subcategory;
+    const currentTags = mergeExpenseTags(movementValues.tags || []);
 
     // Auto-commit pending new category
     if (isAddingNewCategory && newCategoryName.trim()) {
@@ -821,37 +1328,55 @@ function AppContent() {
     }
 
     const movementAmount = toNonNegativeNumber(movementValues.amount);
+    const movementType = movementValues.type;
+    const normalizedFrom = movementValues.from ? normalizeCashBoxStatus(movementValues.from) : undefined;
+    const normalizedTo = movementType === 'transfer'
+      ? 'bank'
+      : movementValues.to
+        ? normalizeCashBoxStatus(movementValues.to)
+        : undefined;
 
     if (movementAmount <= 0) {
       setFormError('EL MONTO DEBE SER MAYOR A 0');
       return;
     }
-    
+
     if (!movementValues.description.trim()) {
       setFormError('INGRESE UNA DESCRIPCIÓN');
       return;
     }
 
-    if ((movementValues.type === 'transfer' || movementValues.type === 'internal_transfer')) {
-      if (!movementValues.from || !movementValues.to) {
+    if (movementType === 'transfer') {
+      if (!normalizedFrom) {
         setFormError('SELECCIONE ORIGEN Y DESTINO');
         return;
       }
-      if (movementValues.from === movementValues.to) {
+      if (normalizedFrom === 'bank') {
+        setFormError('PARA ENVIAR A BANCO, EL ORIGEN DEBE SER TIENDA O TRÁNSITO');
+        return;
+      }
+    }
+
+    if (movementType === 'internal_transfer') {
+      if (!normalizedFrom || !normalizedTo) {
+        setFormError('SELECCIONE ORIGEN Y DESTINO');
+        return;
+      }
+      if (normalizedFrom === normalizedTo) {
         setFormError('ORIGEN Y DESTINO DEBEN SER DIFERENTES');
         return;
       }
     }
 
-    if (movementValues.type === 'outflow' && !movementValues.from) {
+    if (movementType === 'outflow' && !normalizedFrom) {
       setFormError('SELECCIONE DESDE DONDE SE PAGA');
       return;
     }
 
-    if (movementValues.from) {
-      const available = getAvailableSourceBalance(movementValues.from);
+    if (normalizedFrom) {
+      const available = getAvailableSourceBalance(normalizedFrom);
       if (movementAmount > available + 0.009) {
-        setFormError(`SALDO INSUFICIENTE EN ${getClosureStatusLabel(normalizeCashBoxStatus(movementValues.from))}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
+        setFormError(`SALDO INSUFICIENTE EN ${getCashBoxLabel(normalizedFrom)}. DISPONIBLE: $${available.toLocaleString('es-CL')}`);
         return;
       }
     }
@@ -861,14 +1386,15 @@ function AppContent() {
       const { id: _id, ...rest } = movementValues;
       const data: any = {
         date: Timestamp.fromDate(new Date(movementValues.date!)),
-        type: movementValues.type,
+        type: movementType,
         amount: movementAmount,
         description: movementValues.description.toUpperCase(),
         createdBy: user.uid,
-        category: movementValues.type === 'outflow' ? currentCategory || 'Sueldos' : null,
-        subcategory: movementValues.type === 'outflow' ? currentSubcategory || null : null,
-        from: movementValues.from || null,
-        to: movementValues.type === 'outflow' ? null : movementValues.to || null,
+        category: movementType === 'outflow' ? currentCategory || 'Sueldos' : null,
+        subcategory: movementType === 'outflow' ? currentSubcategory || null : null,
+        tags: movementType === 'outflow' ? currentTags : null,
+        from: normalizedFrom || null,
+        to: movementType === 'outflow' ? null : normalizedTo || null,
       };
 
       if (!editingMovementId) {
@@ -877,7 +1403,7 @@ function AppContent() {
 
       // Remove null/undefined fields that are not needed or not allowed to be null if they shouldn't be
       Object.keys(data).forEach(key => {
-        if (data[key] === undefined || data[key] === null) {
+        if (data[key] === undefined || data[key] === null || (Array.isArray(data[key]) && data[key].length === 0)) {
           delete data[key];
         }
       });
@@ -887,7 +1413,7 @@ function AppContent() {
       } else {
         await addDoc(collection(db, 'movements'), data);
       }
-      
+
       setIsAddingMovement(false);
       setEditingMovementId(null);
       setViewingCajaMovements(null);
@@ -895,6 +1421,7 @@ function AppContent() {
       setNewCategoryName('');
       setIsAddingNewSubcategory(false);
       setNewSubcategoryName('');
+      setNewExpenseTag('');
       setFormError(null);
     } catch (err: any) {
       console.error('Error saving movement:', err);
@@ -938,13 +1465,25 @@ function AppContent() {
 
     if (!closure) return;
 
-    const currentStatus = derivedClosureStatusById[id] || normalizeCashBoxStatus(closure.status);
+    const currentStatus = derivedClosureStatusById[id] || normalizeClosureCashBoxStatus(closure.status);
     const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
 
     try {
       await updateDoc(doc(db, 'closures', id), { status: nextStatus });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
+    }
+  };
+
+  const setClosureStatus = async (id: string, status: ClosureCashBoxStatus) => {
+    if (!user) return;
+
+    playSound(status);
+
+    try {
+      await updateDoc(doc(db, 'closures', id), { status });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
     }
@@ -963,13 +1502,28 @@ function AppContent() {
     const nextStatus = getNextStatus(currentStatus);
 
     playSound(nextStatus);
-    
+
     try {
       for (const item of items) {
         await updateDoc(doc(db, 'closures', item.id!), { status: nextStatus });
       }
     } catch (err) {
       console.error('Day status toggle error:', err);
+    }
+  };
+
+  const setDayStatus = async (dayString: string, status: ClosureCashBoxStatus) => {
+    const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
+    if (!items.length) return;
+
+    playSound(status);
+
+    try {
+      for (const item of items) {
+        await updateDoc(doc(db, 'closures', item.id!), { status });
+      }
+    } catch (err) {
+      console.error('Day status update error:', err);
     }
   };
 
@@ -1077,6 +1631,217 @@ Notas: ${closure.notes || 'N/A'}`;
     );
   };
 
+  const renderCashBoxStatementModal = () => {
+    if (!viewingCajaMovements) return null;
+
+    const status = viewingCajaMovements as CashBoxStatus;
+    const boxInfo = {
+      safe: {
+        label: 'En Tienda',
+        balance: accumulatedSafeTotal,
+        Icon: ShieldCheck,
+        color: 'text-blue-600',
+        soft: 'bg-blue-50',
+      },
+      transit: {
+        label: 'En Transito',
+        balance: accumulatedTransitTotal,
+        Icon: Truck,
+        color: 'text-amber-600',
+        soft: 'bg-amber-50',
+      },
+      bank: {
+        label: 'Banco',
+        balance: accumulatedBankTotal,
+        Icon: Building2,
+        color: 'text-emerald-600',
+        soft: 'bg-emerald-50',
+      },
+      personal: {
+        label: 'Caja Personal',
+        balance: accumulatedPersonalTotal,
+        Icon: Wallet,
+        color: 'text-purple-600',
+        soft: 'bg-purple-50',
+      },
+    }[status];
+    const BoxIcon = boxInfo.Icon;
+    const rows = cashBoxStatementRows[status] || [];
+    const firstDate = rows[0]?.date;
+    const editStatementRow = (m: typeof rows[number]) => {
+      if (m.source === 'movement') {
+        setMovementValues({
+          ...m,
+          date: m.date
+        });
+        setEditingMovementId(m.id);
+        setIsAddingMovement(true);
+      } else {
+        const closure = closures.find(c => c.id === m.id);
+        if (closure) {
+          setInlineEditingId(closure.id!);
+          setInlineEditValues({ ...closure });
+          setViewingCajaMovements(null);
+        }
+      }
+    };
+
+    return (
+      <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 20 }}
+          className="w-full max-w-xl bg-slate-50 text-slate-950 rounded-[2rem] border border-white/20 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]"
+        >
+          <div className="px-5 py-4 border-b border-slate-200 bg-white flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <BoxIcon className={`w-6 h-6 ${boxInfo.color}`} />
+              <div>
+                <h3 className="text-lg font-black tracking-tight">Mi cuenta</h3>
+                <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">{boxInfo.label}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setViewingCajaMovements(null)}
+              className="w-11 h-11 flex items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition-all"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="px-5 py-5 bg-white border-b border-slate-200">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold text-slate-500 uppercase">Saldo actual <span className="text-amber-400">★</span></p>
+                <div className="flex items-center gap-2 mt-1">
+                  <p className="text-4xl font-black tracking-tight">${boxInfo.balance.toLocaleString('es-CL')}</p>
+                  <Eye className={`w-5 h-5 ${boxInfo.color}`} />
+                </div>
+              </div>
+              <button
+                type="button"
+                className={`inline-flex items-center gap-1.5 text-xs font-bold ${boxInfo.color} mt-4`}
+              >
+                <Share2 className="w-4 h-4" />
+                Compartir cuenta
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-4 gap-3 px-6 py-4 border-b border-slate-200 bg-slate-50">
+            {[
+              { label: 'Gasto', Icon: ArrowUpRight, onClick: () => handleOpenAddMovement('outflow', status) },
+              ...(status !== 'bank' && status !== 'personal' ? [{ label: 'Banco', Icon: Building2, onClick: () => handleOpenAddMovement('transfer', status, 'bank') }] : []),
+              ...(status !== 'transit' ? [{ label: 'Transito', Icon: Truck, onClick: () => handleOpenAddMovement('internal_transfer', status, 'transit') }] : []),
+              ...(status !== 'personal' ? [{ label: 'Personal', Icon: Wallet, onClick: () => handleOpenAddMovement('internal_transfer', status, 'personal') }] : []),
+              { label: 'Actualizar', Icon: RefreshCw, onClick: () => setViewingCajaMovements(status) },
+            ].map(action => (
+              <button
+                key={action.label}
+                type="button"
+                onClick={action.onClick}
+                className={`flex flex-col items-center gap-1 ${boxInfo.color}`}
+                title={action.label}
+              >
+                <span className="w-10 h-10 rounded-full border border-slate-200 bg-white shadow-sm flex items-center justify-center">
+                  <action.Icon className="w-5 h-5" />
+                </span>
+                <span className="text-[9px] font-black uppercase text-slate-500">{action.label}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 py-4">
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-base font-black">Movimientos</h4>
+              <button
+                type="button"
+                className={`inline-flex items-center gap-1.5 text-xs font-bold ${boxInfo.color}`}
+              >
+                <Calendar className="w-4 h-4" />
+                Filtrar por fechas
+              </button>
+            </div>
+
+            {firstDate && (
+              <p className="text-[11px] font-bold text-slate-500 mb-2">
+                {format(parseISO(firstDate), 'EEEE, dd MMM. yyyy', { locale: es })}
+              </p>
+            )}
+
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              {rows.length > 0 ? rows.map(m => (
+                <div
+                  key={`${m.source}-${m.id}`}
+                  className="min-h-[84px] border-b border-slate-200 last:border-b-0 px-4 py-3 hover:bg-slate-50 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 pr-2">
+                      <p className="text-sm font-semibold text-slate-700 leading-snug uppercase">{m.description}</p>
+                      <div className="flex flex-wrap items-center gap-2 mt-2 text-[10px] font-bold text-slate-400 uppercase">
+                        <span>{format(parseISO(m.date), 'dd/MM/yyyy HH:mm')}</span>
+                        <span className={`px-2 py-0.5 rounded-md ${boxInfo.soft} ${boxInfo.color}`}>
+                          {m.source === 'closure' ? 'Cierre de caja' : m.type === 'outflow' ? 'Gasto' : m.to === status ? 'Ingreso' : 'Salida'}
+                        </span>
+                        {m.category && <span>{m.category}</span>}
+                        {m.subcategory && <span>{m.subcategory}</span>}
+                        {m.tags?.map(tag => <span key={tag}>{tag}</span>)}
+                      </div>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase mt-2">
+                        {m.source === 'closure'
+                          ? `Responsable: ${m.responsible || 'Sin responsable'}`
+                          : m.signedAmount < 0
+                            ? `Hacia: ${m.to || 'Gasto'}`
+                            : `Desde: ${m.from || 'Ingreso'}`}
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className={`text-lg font-black ${m.signedAmount >= 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
+                        {m.signedAmount >= 0 ? '+' : '-'}${Math.abs(m.signedAmount).toLocaleString('es-CL')}
+                      </p>
+                      <p className="text-sm font-semibold text-slate-500">${m.balanceAfter.toLocaleString('es-CL')}</p>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end gap-2 mt-3">
+                    <button
+                      type="button"
+                      onClick={() => editStatementRow(m)}
+                      className="w-9 h-9 flex items-center justify-center rounded-xl bg-blue-50 text-blue-600 hover:bg-blue-100 transition-all"
+                      title="Editar"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (m.source === 'movement') {
+                          handleDeleteMovement(m.id);
+                        } else {
+                          handleDelete(m.id);
+                        }
+                      }}
+                      className="w-9 h-9 flex items-center justify-center rounded-xl bg-rose-50 text-rose-600 hover:bg-rose-100 transition-all"
+                      title="Eliminar"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )) : (
+                <div className="py-16 text-center">
+                  <History className="w-14 h-14 text-slate-300 mx-auto mb-4" />
+                  <p className="text-slate-400 font-black uppercase tracking-widest text-xs">No hay movimientos registrados para esta caja</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </motion.div>
+      </div>
+    );
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0F172A]">
@@ -1091,12 +1856,16 @@ Notas: ${closure.notes || 'N/A'}`;
 
   if (currentView === 'dashboard') {
     return (
-      <Suspense fallback={
-        <div className="min-h-screen flex items-center justify-center bg-[#0F172A]">
-          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-purple-500" />
-        </div>
-      }>
+      <Suspense fallback={<div className="min-h-screen bg-[#0F172A]" />}>
         <Dashboard closures={closures} movements={movements} onBack={() => setCurrentView('main')} />
+      </Suspense>
+    );
+  }
+
+  if (currentView === 'personal') {
+    return (
+      <Suspense fallback={<div className="min-h-screen bg-[#0F172A]" />}>
+        <PersonalFinance user={user} onBack={() => setCurrentView('main')} />
       </Suspense>
     );
   }
@@ -1109,6 +1878,7 @@ Notas: ${closure.notes || 'N/A'}`;
           onOpenPrint={() => setShowPrintPreview(true)}
           onExportCsv={handleExportCSV}
           onOpenDashboard={() => setCurrentView('dashboard')}
+          onOpenPersonal={() => setCurrentView('personal')}
           onOpenTrips={() => setViewingTripId('LIST')}
           onLogout={logOut}
         />
@@ -1130,7 +1900,7 @@ Notas: ${closure.notes || 'N/A'}`;
           )}
           {/* Context Menu */}
           {contextMenu && (
-            <div 
+            <div
               style={{ top: contextMenu.y, left: contextMenu.x }}
               className="fixed z-[200] bg-[#1E293B] border border-white/10 rounded-2xl shadow-2xl py-2 min-w-[200px] overflow-hidden backdrop-blur-xl"
               onClick={e => e.stopPropagation()}
@@ -1138,25 +1908,43 @@ Notas: ${closure.notes || 'N/A'}`;
               <div className="px-4 py-2 border-b border-white/5 mb-2">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Acciones: {contextMenu.caja.toUpperCase()}</p>
               </div>
-              <button 
+              <button
                 onClick={() => handleOpenAddMovement('outflow', contextMenu.caja)}
                 className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-rose-500/20 hover:text-rose-400 transition-colors uppercase tracking-widest"
               >
                 <ArrowUpRight className="w-4 h-4" />
                 Registrar Gasto
               </button>
-              {contextMenu.caja !== 'bank' && (
-                <button 
-                  onClick={() => handleOpenAddMovement('transfer', contextMenu.caja)}
+              {contextMenu.caja !== 'bank' && contextMenu.caja !== 'personal' && (
+                <button
+                  onClick={() => handleOpenAddMovement('transfer', contextMenu.caja, 'bank')}
                   className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors uppercase tracking-widest"
                 >
                   <Building2 className="w-4 h-4" />
                   Enviar a Banco
                 </button>
               )}
-              <button 
+              {contextMenu.caja !== 'transit' && (
+                <button
+                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'transit')}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-amber-500/20 hover:text-amber-400 transition-colors uppercase tracking-widest"
+                >
+                  <Truck className="w-4 h-4" />
+                  Enviar a Transito
+                </button>
+              )}
+              {contextMenu.caja !== 'personal' && (
+                <button
+                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'personal')}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
+                >
+                  <Wallet className="w-4 h-4" />
+                  Enviar a Personal
+                </button>
+              )}
+              <button
                 onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-amber-500/20 hover:text-amber-400 transition-colors uppercase tracking-widest"
+                className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
               >
                 <ArrowRightLeft className="w-4 h-4" />
                 Transferencia Interna
@@ -1166,10 +1954,11 @@ Notas: ${closure.notes || 'N/A'}`;
 
           {/* Movements Viewer Modal */}
           <AnimatePresence>
-            {viewingCajaMovements && (
+            {renderCashBoxStatementModal()}
+            {false && viewingCajaMovements && (
               <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
-                <motion.div 
-                  initial={{ opacity:0, y: 20 }} 
+                <motion.div
+                  initial={{ opacity:0, y: 20 }}
                   animate={{ opacity:1, y: 0 }}
                   exit={{ opacity:0, y: 20 }}
                   className="w-full max-w-4xl bg-[#1E293B] rounded-[2.5rem] border border-white/5 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
@@ -1184,18 +1973,18 @@ Notas: ${closure.notes || 'N/A'}`;
                       </h3>
                       <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Historial detallado de transacciones</p>
                     </div>
-                    <button 
+                    <button
                       onClick={() => setViewingCajaMovements(null)}
                       className="w-12 h-12 flex items-center justify-center rounded-full bg-white/5 text-slate-400 hover:bg-white/10 hover:text-white transition-all"
                     >
                       <X className="w-6 h-6" />
                     </button>
                   </div>
-                  
+
                   <div className="flex-1 overflow-y-auto p-8">
                     <div className="space-y-4">
                       {combinedMovements
-                        .filter(m => 
+                        .filter(m =>
                           (m.source === 'movement' && (m.from === viewingCajaMovements || m.to === viewingCajaMovements)) ||
                           (m.source === 'closure' && m.status === viewingCajaMovements && !m.tripId)
                         )
@@ -1214,11 +2003,11 @@ Notas: ${closure.notes || 'N/A'}`;
                                   <p className="text-white font-black text-lg uppercase leading-tight">{m.description}</p>
                                   <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md ${
                                     m.source === 'closure' ? 'bg-blue-500/10 text-blue-500' :
-                                    m.type === 'outflow' ? 'bg-rose-500/10 text-rose-500' : 
+                                    m.type === 'outflow' ? 'bg-rose-500/10 text-rose-500' :
                                     m.to === viewingCajaMovements ? 'bg-emerald-500/10 text-emerald-500' : 'bg-amber-500/10 text-amber-500'
                                   }`}>
                                     {m.source === 'closure' ? 'Cierre de Caja' :
-                                     m.type === 'outflow' ? 'Gasto' : 
+                                     m.type === 'outflow' ? 'Gasto' :
                                      m.to === viewingCajaMovements ? 'Ingreso' : 'Salida'}
                                   </span>
                                 </div>
@@ -1244,7 +2033,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </p>
                               </div>
                               <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <button 
+                                <button
                                   onClick={() => {
                                     if (m.source === 'movement') {
                                       setMovementValues({
@@ -1269,7 +2058,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 >
                                   <Edit2 className="w-4 h-4" />
                                 </button>
-                                <button 
+                                <button
                                   onClick={() => {
                                     if (m.source === 'movement') {
                                       handleDeleteMovement(m.id);
@@ -1285,8 +2074,8 @@ Notas: ${closure.notes || 'N/A'}`;
                             </div>
                           </div>
                         ))}
-                      
-                      {combinedMovements.filter(m => 
+
+                      {combinedMovements.filter(m =>
                         (m.source === 'movement' && (m.from === viewingCajaMovements || m.to === viewingCajaMovements)) ||
                         (m.source === 'closure' && m.status === viewingCajaMovements && !m.tripId)
                       ).length === 0 && (
@@ -1303,7 +2092,7 @@ Notas: ${closure.notes || 'N/A'}`;
           </AnimatePresence>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12 text-left">
-            <div 
+            <div
               onDoubleClick={() => setViewingCajaMovements('safe')}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -1320,7 +2109,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
             </div>
-            <div 
+            <div
               onDoubleClick={() => setViewingCajaMovements('transit')}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -1337,7 +2126,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedTransitTotal.toLocaleString('es-CL')}</p>
             </div>
-            <div 
+            <div
               onDoubleClick={() => setViewingCajaMovements('bank')}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -1354,7 +2143,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBankTotal.toLocaleString('es-CL')}</p>
             </div>
-            <div 
+            <div
               onDoubleClick={() => setHistoryView({ type: 'outflow', title: 'GASTOS TOTALES' })}
               className="bg-[#1E293B] p-8 rounded-[2rem] border border-rose-500/20 relative overflow-hidden group cursor-pointer hover:border-rose-500/50 transition-colors shadow-2xl"
               title="Doble clic para ver historial"
@@ -1367,13 +2156,52 @@ Notas: ${closure.notes || 'N/A'}`;
                 GASTOS TOTALES
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedOutflowTotal.toLocaleString('es-CL')}</p>
+              <p className="text-[10px] font-black text-rose-300/70 uppercase tracking-widest mt-2">Periodo: ${outflowPeriodLabel}</p>
+              <div className="grid grid-cols-2 gap-2 mt-4 relative z-10">
+                {[
+                  { label: 'Este mes', value: 'este_mes' as const },
+                  { label: 'Mes pasado', value: 'mes_pasado' as const },
+                  { label: 'Anio actual', value: 'anio_actual' as const },
+                  { label: 'Periodo', value: 'custom' as const },
+                ].map(option => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      option.value === 'custom' ? setOutflowPeriodType('custom') : applyOutflowPeriod(option.value);
+                    }}
+                    className={`min-h-[30px] rounded-lg border px-2 text-[9px] font-black uppercase tracking-widest transition-colors ${outflowPeriodType === option.value ? 'border-rose-500 bg-rose-500/15 text-rose-200' : 'border-white/10 bg-white/5 text-slate-500 hover:border-rose-500/40'}`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              {outflowPeriodType === 'custom' && (
+                <div className="grid grid-cols-2 gap-2 mt-3 relative z-10">
+                  <input
+                    type="date"
+                    value={outflowStartDate}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={e => setOutflowStartDate(e.target.value)}
+                    className="min-w-0 rounded-lg border border-white/10 bg-slate-950/50 px-2 py-2 text-[11px] font-bold text-slate-200 outline-none focus:border-rose-500"
+                  />
+                  <input
+                    type="date"
+                    value={outflowEndDate}
+                    onClick={(event) => event.stopPropagation()}
+                    onChange={e => setOutflowEndDate(e.target.value)}
+                    className="min-w-0 rounded-lg border border-white/10 bg-slate-950/50 px-2 py-2 text-[11px] font-bold text-slate-200 outline-none focus:border-rose-500"
+                  />
+                </div>
+              )}
             </div>
           </div>
 
           <AnimatePresence>
             {historyView && (
               <div className="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md text-left">
-                <motion.div 
+                <motion.div
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.95 }}
@@ -1389,12 +2217,12 @@ Notas: ${closure.notes || 'N/A'}`;
                         <p className="text-slate-400 text-xs uppercase font-black tracking-widest">Historial completo detallado</p>
                       </div>
                     </div>
-                    
+
                     <div className="flex items-center gap-4 flex-1 md:max-w-md">
                       <div className="relative flex-1">
                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
-                        <input 
-                          type="text" 
+                        <input
+                          type="text"
                           placeholder="BUSCAR MOVIMIENTO..."
                           className="w-full pl-11 pr-4 py-3 bg-white/5 border border-white/5 rounded-xl text-xs font-black uppercase tracking-widest outline-none focus:ring-2 focus:ring-rose-500 transition-all"
                           onInput={(e) => {
@@ -1407,7 +2235,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           }}
                         />
                       </div>
-                      <button 
+                      <button
                         onClick={() => setHistoryView(null)}
                         className="p-3 bg-white/5 hover:bg-white/10 rounded-2xl transition-all"
                       >
@@ -1419,9 +2247,8 @@ Notas: ${closure.notes || 'N/A'}`;
                   <div className="flex-1 overflow-auto p-8 pt-4">
                     <div className="grid gap-8">
                       {Object.entries(
-                        movements
-                          .filter(m => m.type === 'outflow')
-                          .reduce((groups: Record<string, typeof movements>, m) => {
+                        filteredOutflowMovements
+                          .reduce((groups: Record<string, typeof filteredOutflowMovements>, m) => {
                             const date = format(parseISO(m.date), 'yyyy-MM-dd');
                             if (!groups[date]) groups[date] = [];
                             groups[date].push(m);
@@ -1440,7 +2267,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               TOTAL DÍA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
                             </span>
                           </div>
-                          
+
                           <div className="grid gap-3">
                             {dailyMovements
                               .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
@@ -1478,8 +2305,8 @@ Notas: ${closure.notes || 'N/A'}`;
                           </div>
                         </div>
                       ))}
-                      
-                      {movements.filter(m => m.type === 'outflow').length === 0 && (
+
+                      {filteredOutflowMovements.length === 0 && (
                         <div className="text-center py-20 bg-white/5 rounded-[2rem] border border-dashed border-white/10">
                           <TrendingDown className="w-16 h-16 text-slate-800 mx-auto mb-4 opacity-20" />
                           <p className="text-slate-500 font-black uppercase tracking-widest text-xs">No hay movimientos registrados</p>
@@ -1487,11 +2314,11 @@ Notas: ${closure.notes || 'N/A'}`;
                       )}
                     </div>
                   </div>
-                  
+
                   <div className="p-6 border-t border-white/5 bg-white/[0.02] flex justify-between items-center px-10">
                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Monto Consolidado</span>
                     <span className="text-xl font-black font-mono text-rose-500">
-                      -${movements.filter(m => m.type === 'outflow').reduce((s, m) => s + m.amount, 0).toLocaleString('es-CL')}
+                      -${filteredOutflowMovements.reduce((s, m) => s + m.amount, 0).toLocaleString('es-CL')}
                     </span>
                   </div>
                 </motion.div>
@@ -1506,7 +2333,7 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
             <div className="flex flex-wrap items-center gap-4">
               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mr-2">Periodo:</span>
-              <button 
+              <button
                 onClick={() => {
                   setFilterStartDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
                   setFilterEndDate(format(new Date(), 'yyyy-MM-dd'));
@@ -1516,7 +2343,7 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 Semana
               </button>
-              <button 
+              <button
                 onClick={() => {
                   setFilterStartDate(format(startOfMonth(new Date()), 'yyyy-MM-dd'));
                   setFilterEndDate(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
@@ -1526,7 +2353,7 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 Este Mes
               </button>
-              <button 
+              <button
                 onClick={() => {
                   setFilterDateRangeType('siempre');
                 }}
@@ -1536,9 +2363,9 @@ Notas: ${closure.notes || 'N/A'}`;
               </button>
               <div className="h-8 w-[1px] bg-white/10 hidden sm:block" />
               <div className="flex items-center bg-[#1E293B] rounded-2xl border border-white/5 p-1">
-                <input 
-                  type="date" 
-                  value={filterStartDate} 
+                <input
+                  type="date"
+                  value={filterStartDate}
                   onChange={e => {
                     setFilterStartDate(e.target.value);
                     setFilterDateRangeType('custom');
@@ -1546,9 +2373,9 @@ Notas: ${closure.notes || 'N/A'}`;
                   className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
                 />
                 <ArrowRight className="w-3 h-3 text-slate-600" />
-                <input 
-                  type="date" 
-                  value={filterEndDate} 
+                <input
+                  type="date"
+                  value={filterEndDate}
                   onChange={e => {
                     setFilterEndDate(e.target.value);
                     setFilterDateRangeType('custom');
@@ -1556,16 +2383,16 @@ Notas: ${closure.notes || 'N/A'}`;
                   className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
                 />
               </div>
-              <select 
-                value={filterResponsible} 
+              <select
+                value={filterResponsible}
                 onChange={e => setFilterResponsible(e.target.value)}
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
                 <option value="all">Todos los Responsables</option>
                 {uniqueResponsibles.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
-              <select 
-                value={filterStatus} 
+              <select
+                value={filterStatus}
                 onChange={e => setFilterStatus(e.target.value)}
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
@@ -1574,7 +2401,18 @@ Notas: ${closure.notes || 'N/A'}`;
                 <option value="transit">En Tránsito</option>
                 <option value="bank">En Banco</option>
               </select>
-              <button 
+              <select
+                value={filterAudit}
+                onChange={e => setFilterAudit(e.target.value as ClosureAuditStatus)}
+                className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
+              >
+                <option value="all">Toda Auditoría</option>
+                <option value="difference">Con Diferencia</option>
+                <option value="pending_report">Falta Venta Sistema</option>
+                <option value="matched">Auditado OK</option>
+                <option value="not_audited">Sin Auditoría</option>
+              </select>
+              <button
                 onClick={() => setHideCollected(!hideCollected)}
                 className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${hideCollected ? 'bg-amber-500/10 border-amber-500/50 text-amber-500' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
               >
@@ -1582,6 +2420,15 @@ Notas: ${closure.notes || 'N/A'}`;
                   {hideCollected && <Check className="w-3 h-3 text-slate-950 font-black" />}
                 </div>
                 <span className="text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Ocultar recolectados</span>
+              </button>
+              <button
+                onClick={() => setShowOnlyStoreClosures(!showOnlyStoreClosures)}
+                className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${showOnlyStoreClosures ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
+              >
+                <div className={`w-4 h-4 rounded-md border flex items-center justify-center ${showOnlyStoreClosures ? 'bg-blue-500 border-blue-500' : 'border-slate-600'}`}>
+                  {showOnlyStoreClosures && <Check className="w-3 h-3 text-slate-950 font-black" />}
+                </div>
+                <span className="text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Solo en tienda</span>
               </button>
             </div>
           </div>
@@ -1614,14 +2461,14 @@ Notas: ${closure.notes || 'N/A'}`;
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-4">
-              <button 
+              <button
                 onClick={() => {
                   if (!isInlineAdding && !inlineAddValues.date) {
                     // Only set current time if no date is preserved
                     setInlineAddValues(v => ({ ...v, date: new Date().toISOString() }));
                   }
                   setIsInlineAdding(!isInlineAdding);
-                }} 
+                }}
                 className={`px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-lg ${isInlineAdding ? 'bg-slate-700 text-white shadow-slate-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'}`}
               >
                 {isInlineAdding ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
@@ -1670,10 +2517,10 @@ Notas: ${closure.notes || 'N/A'}`;
                     <tr className="bg-blue-950/20 border-y-2 border-blue-500/30">
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-xl px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
-                          <input 
+                          <input
                             ref={dateInputRef}
-                            type="datetime-local" 
-                            value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''} 
+                            type="datetime-local"
+                            value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
                             onChange={e => {
                               if (!e.target.value) return;
                               try {
@@ -1684,22 +2531,22 @@ Notas: ${closure.notes || 'N/A'}`;
                               } catch (e) {}
                             }}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, responsibleInputRef)}
-                            className="w-full bg-transparent outline-none text-white font-sans font-bold text-[10px]" 
+                            className="w-full bg-transparent outline-none text-white font-sans font-bold text-[10px]"
                           />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-blue-500">
-                          <input 
+                          <input
                             ref={responsibleInputRef}
                             list="responsibles-list"
-                            type="text" 
-                            value={inlineAddValues.responsible} 
+                            type="text"
+                            value={inlineAddValues.responsible}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, responsible: e.target.value.toUpperCase()})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, responsible: e.target.value.toUpperCase()})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, physicalAmountRef, dateInputRef)}
-                            className="w-full bg-transparent outline-none text-white placeholder:text-slate-600 font-bold text-xs uppercase" 
-                            placeholder="RESPONSABLE" 
+                            className="w-full bg-transparent outline-none text-white placeholder:text-slate-600 font-bold text-xs uppercase"
+                            placeholder="RESPONSABLE"
                           />
                           <datalist id="responsibles-list">
                             {uniqueResponsibles.map(r => <option key={r} value={r} />)}
@@ -1708,45 +2555,45 @@ Notas: ${closure.notes || 'N/A'}`;
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input 
+                          <input
                             ref={physicalAmountRef}
                             type="number"
                             min="0"
-                            value={inlineAddValues.physicalAmount || ''} 
+                            value={inlineAddValues.physicalAmount || ''}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemAmountRef, responsibleInputRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
+                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
                             placeholder="FÍSICO"
                           />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input 
+                          <input
                             ref={systemAmountRef}
                             type="number"
                             min="0"
-                            value={inlineAddValues.systemAmount || ''} 
+                            value={inlineAddValues.systemAmount || ''}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value)})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemBalanceRef, physicalAmountRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
+                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
                             placeholder="VENTA"
                           />
                         </div>
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input 
+                          <input
                             ref={systemBalanceRef}
                             type="number"
                             min="0"
-                            value={inlineAddValues.systemBalance || ''} 
+                            value={inlineAddValues.systemBalance || ''}
                             onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value)})} 
+                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, undefined, systemAmountRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs" 
+                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
                             placeholder="CUADRE"
                           />
                         </div>
@@ -1757,16 +2604,19 @@ Notas: ${closure.notes || 'N/A'}`;
                         </div>
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <button 
-                          onClick={() => setInlineAddValues({...inlineAddValues, status: getNextStatus(inlineAddValues.status!)})} 
-                          className={`p-2 rounded-xl transition-all shadow-lg border ${inlineAddValues.status === 'safe' ? 'bg-rose-500/20 text-rose-500 border-rose-500/20' : inlineAddValues.status === 'transit' ? 'bg-amber-500/20 text-amber-500 border-amber-500/20' : 'bg-emerald-500/20 text-emerald-500 border-emerald-500/20'}`}
+                        <select
+                          value={inlineAddValues.status || 'safe'}
+                          onChange={e => setInlineAddValues({...inlineAddValues, status: e.target.value as ClosureCashBoxStatus})}
+                          className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
                         >
-                          <ShieldCheck className="w-4 h-4" />
-                        </button>
+                          <option value="safe">Tienda</option>
+                          <option value="transit">Transito</option>
+                          <option value="bank">Banco</option>
+                        </select>
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="flex justify-end gap-2">
-                           <button 
+                           <button
                             onClick={() => {
                               const note = prompt('Notas / Observaciones:', inlineAddValues.notes || '');
                               if (note !== null) setInlineAddValues({...inlineAddValues, notes: note});
@@ -1775,15 +2625,15 @@ Notas: ${closure.notes || 'N/A'}`;
                           >
                             <MessageSquare className="w-4 h-4" />
                           </button>
-                          <button 
-                            onClick={handleSaveInlineAdd} 
+                          <button
+                            onClick={handleSaveInlineAdd}
                             disabled={isSaving}
                             className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-xl transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50"
                           >
                             <Check className="w-4 h-4" />
                           </button>
-                          <button 
-                            onClick={() => setIsInlineAdding(false)} 
+                          <button
+                            onClick={() => setIsInlineAdding(false)}
                             className="bg-white/5 hover:bg-white/10 text-slate-500 p-2 rounded-xl transition-all"
                           >
                             <X className="w-4 h-4" />
@@ -1821,26 +2671,26 @@ Notas: ${closure.notes || 'N/A'}`;
                               </div>
                            </td>
                            <td className="px-6 py-4 text-center">
-                              {(() => {
-                                const statusInfo = getDayStatusInfo(group.status);
-                                const StatusIcon = statusInfo.Icon;
-                                const isMixedStatus = group.status === 'mixed';
+                              <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
+                                {closureCashBoxStatuses.map(status => {
+                                  const statusInfo = getDayStatusInfo(status);
+                                  const StatusIcon = statusInfo.Icon;
+                                  const active = group.status === status;
 
-                                return (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleDayStatus(group.date);
-                                    }}
-                                    disabled={isMixedStatus}
-                                    title={`Estado del resumen del día: ${statusInfo.label} | Registros: ${group.items.map(item => item.id ? derivedClosureStatusById[item.id] || normalizeCashBoxStatus(item.status) : normalizeCashBoxStatus(item.status)).join(', ')}`}
-                                    className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase flex items-center gap-2 mx-auto transition-all ${statusInfo.className} ${isMixedStatus ? 'opacity-60 cursor-not-allowed' : ''}`}
-                                  >
-                                    <StatusIcon className="w-3 h-3" />
-                                    {statusInfo.label}
-                                  </button>
-                                );
-                              })()}
+                                  return (
+                                    <button
+                                      key={status}
+                                      type="button"
+                                      onClick={() => setDayStatus(group.date, status)}
+                                      title={`Enviar todos los cierres del día a ${statusInfo.label}`}
+                                      className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                                    >
+                                      <StatusIcon className="w-3 h-3" />
+                                      {status === 'safe' ? 'Tienda' : status === 'transit' ? 'Transito' : 'Banco'}
+                                    </button>
+                                  );
+                                })}
+                              </div>
                            </td>
                            <td className="px-6 py-4 text-right">
                               <ChevronDown className={`w-5 h-5 text-slate-700 transition-transform ml-auto ${expandedDays[group.date] ? 'rotate-180' : ''}`} />
@@ -1851,9 +2701,9 @@ Notas: ${closure.notes || 'N/A'}`;
                             <tr key={closure.id} className="bg-blue-950/30 border-y border-blue-500/20">
                                <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-xl px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
-                                  <input 
-                                    type="datetime-local" 
-                                    value={inlineEditValues.date ? format(parseISO(inlineEditValues.date), "yyyy-MM-dd'T'HH:mm") : ''} 
+                                  <input
+                                    type="datetime-local"
+                                    value={inlineEditValues.date ? format(parseISO(inlineEditValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
                                     onChange={e => setInlineEditValues({...inlineEditValues, date: new Date(e.target.value).toISOString()})}
                                     className="bg-transparent outline-none text-white font-sans font-bold text-[10px] w-full"
                                   />
@@ -1861,9 +2711,9 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-blue-500">
-                                  <input 
-                                    type="text" 
-                                    value={inlineEditValues.responsible} 
+                                  <input
+                                    type="text"
+                                    value={inlineEditValues.responsible}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, responsible: e.target.value.toUpperCase()})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -1873,10 +2723,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input 
+                                  <input
                                     type="number"
                                     min="0"
-                                    value={inlineEditValues.physicalAmount} 
+                                    value={inlineEditValues.physicalAmount}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -1886,10 +2736,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input 
+                                  <input
                                     type="number"
                                     min="0"
-                                    value={inlineEditValues.systemAmount} 
+                                    value={inlineEditValues.systemAmount}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, systemAmount: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -1899,10 +2749,10 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                               <td className="px-6 py-4">
                                 <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input 
+                                  <input
                                     type="number"
                                     min="0"
-                                    value={inlineEditValues.systemBalance} 
+                                    value={inlineEditValues.systemBalance}
                                     onFocus={e => e.target.select()}
                                     onChange={e => setInlineEditValues({...inlineEditValues, systemBalance: toNonNegativeNumber(e.target.value)})}
                                     onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
@@ -1916,12 +2766,15 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </div>
                               </td>
                               <td className="px-6 py-4 text-center">
-                                <button 
-                                  onClick={() => setInlineEditValues({...inlineEditValues, status: getNextStatus(inlineEditValues.status!)})}
-                                  className={`p-2 rounded-xl transition-all shadow-lg border ${inlineEditValues.status === 'safe' ? 'bg-rose-500/20 text-rose-500 border-rose-500/20' : inlineEditValues.status === 'transit' ? 'bg-amber-500/20 text-amber-500 border-amber-500/20' : 'bg-emerald-500/20 text-emerald-500 border-emerald-500/20'}`}
+                                <select
+                                  value={inlineEditValues.status || 'safe'}
+                                  onChange={e => setInlineEditValues({...inlineEditValues, status: e.target.value as ClosureCashBoxStatus})}
+                                  className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
                                 >
-                                  <ShieldCheck className="w-4 h-4" />
-                                </button>
+                                  <option value="safe">Tienda</option>
+                                  <option value="transit">Transito</option>
+                                  <option value="bank">Banco</option>
+                                </select>
                               </td>
                               <td className="px-6 py-4 text-right">
                                 <div className="flex justify-end gap-2">
@@ -1943,7 +2796,27 @@ Notas: ${closure.notes || 'N/A'}`;
                                    <div className="w-8 h-8 bg-white/5 rounded-full flex items-center justify-center border border-white/5">
                                       <UserIcon className="w-4 h-4 text-slate-500" />
                                    </div>
-                                   <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
+                                   <div className="flex flex-col gap-2">
+                                     <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
+                                     {(() => {
+                                       const auditInfo = getClosureAuditInfo(closure);
+                                       if (auditInfo.status === 'not_audited') return null;
+
+                                       return (
+                                         <span
+                                           title={auditInfo.detail}
+                                           className={`w-fit inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[8px] font-black uppercase tracking-widest ${auditInfo.className}`}
+                                         >
+                                           {auditInfo.status === 'difference'
+                                             ? <ShieldAlert className="w-3 h-3" />
+                                             : auditInfo.status === 'matched'
+                                               ? <CheckCircle2 className="w-3 h-3" />
+                                               : <FileText className="w-3 h-3" />}
+                                           {auditInfo.label}
+                                         </span>
+                                       );
+                                     })()}
+                                   </div>
                                 </div>
                               </td>
                               <td className="px-6 py-4 text-center font-black text-white font-sans text-sm">
@@ -1958,25 +2831,29 @@ Notas: ${closure.notes || 'N/A'}`;
                                  </div>
                               </td>
                               <td className="px-6 py-4 text-center">
-                                {(() => {
-                                  const displayStatus = closure.id
-                                    ? derivedClosureStatusById[closure.id] || normalizeCashBoxStatus(closure.status)
-                                    : normalizeCashBoxStatus(closure.status);
+                                <div className="flex items-center justify-center gap-1">
+                                  {closureCashBoxStatuses.map(status => {
+                                    const currentStatus = closure.id
+                                      ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
+                                      : normalizeClosureCashBoxStatus(closure.status);
+                                    const statusInfo = getDayStatusInfo(status);
+                                    const StatusIcon = statusInfo.Icon;
+                                    const active = currentStatus === status;
 
-                                  const statusInfo = getDayStatusInfo(displayStatus);
-                                  const StatusIcon = statusInfo.Icon;
-
-                                  return (
-                                    <button
-                                      onClick={() => toggleStatus(closure.id!)}
-                                      title={`Estado calculado: ${statusInfo.label}. Este estado considera los movimientos de caja registrados.`}
-                                      className={`px-4 py-2 rounded-xl border text-[10px] font-black uppercase inline-flex items-center gap-2 mx-auto transition-all ${statusInfo.className}`}
-                                    >
-                                      <StatusIcon className="w-3 h-3" />
-                                      {statusInfo.label}
-                                    </button>
-                                  );
-                                })()}
+                                    return (
+                                      <button
+                                        key={status}
+                                        type="button"
+                                        onClick={() => setClosureStatus(closure.id!, status)}
+                                        title={statusInfo.label}
+                                        className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                                      >
+                                        <StatusIcon className="w-3 h-3" />
+                                        {status === 'safe' ? 'Tienda' : status === 'transit' ? 'Transito' : 'Banco'}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
                               </td>
                               <td className="px-6 py-4 text-right">
                                 <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -2022,47 +2899,47 @@ Notas: ${closure.notes || 'N/A'}`;
                   <h3 className="text-2xl font-black text-white flex items-center gap-3"><Truck className="text-blue-400 w-8 h-8" /> Nuevo Registro de Viaje</h3>
                   <button onClick={() => setIsCreatingTrip(false)} className="p-2 hover:bg-white/5 rounded-full"><X className="w-6 h-6 text-slate-500" /></button>
                 </div>
-                
+
                 <div className="space-y-6">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Fecha Inicio</label>
-                      <input 
-                        type="date" 
-                        value={tripFormValues.startDate} 
-                        onChange={e => setTripFormValues({...tripFormValues, startDate: e.target.value})} 
-                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500" 
+                      <input
+                        type="date"
+                        value={tripFormValues.startDate}
+                        onChange={e => setTripFormValues({...tripFormValues, startDate: e.target.value})}
+                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
                     <div>
                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Fecha Fin</label>
-                      <input 
-                        type="date" 
-                        value={tripFormValues.endDate} 
-                        onChange={e => setTripFormValues({...tripFormValues, endDate: e.target.value})} 
-                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500" 
+                      <input
+                        type="date"
+                        value={tripFormValues.endDate}
+                        onChange={e => setTripFormValues({...tripFormValues, endDate: e.target.value})}
+                        className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     </div>
                   </div>
 
                   <div>
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Nombre / Descripción del Viaje</label>
-                    <input 
-                      type="text" 
-                      value={tripFormValues.description} 
-                      onChange={e => setTripFormValues({...tripFormValues, description: e.target.value})} 
-                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500" 
-                      placeholder="Ej: Viaje Santiago - Semana 42" 
+                    <input
+                      type="text"
+                      value={tripFormValues.description}
+                      onChange={e => setTripFormValues({...tripFormValues, description: e.target.value})}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Ej: Viaje Santiago - Semana 42"
                     />
                   </div>
 
                   <div>
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Observaciones y Detalles</label>
-                    <textarea 
-                      value={tripFormValues.notes} 
-                      onChange={e => setTripFormValues({...tripFormValues, notes: e.target.value})} 
-                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] resize-none" 
-                      placeholder="Agrega aquí cualquier observación relevante sobre este retiro de fondos..." 
+                    <textarea
+                      value={tripFormValues.notes}
+                      onChange={e => setTripFormValues({...tripFormValues, notes: e.target.value})}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] resize-none"
+                      placeholder="Agrega aquí cualquier observación relevante sobre este retiro de fondos..."
                     />
                   </div>
 
@@ -2076,9 +2953,9 @@ Notas: ${closure.notes || 'N/A'}`;
                               ? selectedTripClosures.length
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
-                                return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
-                                  start: startOfDay(parseISO(tripFormValues.startDate)), 
-                                  end: endOfDay(parseISO(tripFormValues.endDate)) 
+                                return isClosureAvailableForTrip(c) && isWithinInterval(d, {
+                                  start: startOfDay(parseISO(tripFormValues.startDate)),
+                                  end: endOfDay(parseISO(tripFormValues.endDate))
                                 });
                               }).length
                           } registros
@@ -2091,9 +2968,9 @@ Notas: ${closure.notes || 'N/A'}`;
                             ? selectedTripClosures.reduce((a,b) => a + b.physicalAmount, 0)
                             : closures.filter(c => {
                                 const d = parseISO(c.date);
-                                return isClosureAvailableForTrip(c) && isWithinInterval(d, { 
-                                  start: startOfDay(parseISO(tripFormValues.startDate)), 
-                                  end: endOfDay(parseISO(tripFormValues.endDate)) 
+                                return isClosureAvailableForTrip(c) && isWithinInterval(d, {
+                                  start: startOfDay(parseISO(tripFormValues.startDate)),
+                                  end: endOfDay(parseISO(tripFormValues.endDate))
                                 });
                               }).reduce((a,b) => a + b.physicalAmount, 0)
                           ).toLocaleString('es-CL')}
@@ -2104,9 +2981,9 @@ Notas: ${closure.notes || 'N/A'}`;
 
                   <div className="flex gap-4 pt-4">
                     <button onClick={() => setIsCreatingTrip(false)} className="flex-1 py-4 text-slate-400 font-black hover:text-white transition-colors">Cancelar</button>
-                    <button 
-                      onClick={handleCreateTrip} 
-                      disabled={!tripFormValues.description || isTripLoading} 
+                    <button
+                      onClick={handleCreateTrip}
+                      disabled={!tripFormValues.description || isTripLoading}
                       className="flex-[2] bg-blue-600 hover:bg-blue-500 text-white py-4 rounded-2xl font-black shadow-xl shadow-blue-500/20 disabled:opacity-50 flex items-center justify-center gap-2 transition-all"
                     >
                       {isTripLoading ? (
@@ -2207,7 +3084,7 @@ Notas: ${closure.notes || 'N/A'}`;
                              </div>
                            </div>
                          </div>
-                         
+
                          <div className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 shadow-xl">
                             <div className="flex justify-between items-center mb-6">
                               <h4 className="text-sm font-black text-white uppercase tracking-widest flex items-center gap-2">
@@ -2215,7 +3092,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                 Observaciones del Viaje
                               </h4>
                               {!isEditingTripNotes ? (
-                                <button 
+                                <button
                                   onClick={() => {
                                     setIsEditingTripNotes(true);
                                     setEditedTripNotes(trip.notes || '');
@@ -2226,13 +3103,13 @@ Notas: ${closure.notes || 'N/A'}`;
                                 </button>
                               ) : (
                                 <div className="flex gap-4">
-                                  <button 
+                                  <button
                                     onClick={() => handleSaveTripNotes(trip.id!)}
                                     className="text-[10px] font-black text-emerald-400 uppercase tracking-widest hover:text-emerald-300 transition-colors"
                                   >
                                     Guardar
                                   </button>
-                                  <button 
+                                  <button
                                     onClick={() => setIsEditingTripNotes(false)}
                                     className="text-[10px] font-black text-rose-400 uppercase tracking-widest hover:text-rose-300 transition-colors"
                                   >
@@ -2319,13 +3196,13 @@ Notas: ${closure.notes || 'N/A'}`;
        <AnimatePresence>
           {isAddingMovement && (
             <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
-              <motion.div initial={{ opacity:0, scale:0.95 }} animate={{ opacity:1, scale:1 }} className="w-full max-w-lg bg-[#1E293B] p-8 rounded-[2.5rem] border border-purple-500/20 shadow-2xl">
+              <motion.div initial={{ opacity:0, scale:0.95 }} animate={{ opacity:1, scale:1 }} className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-[#1E293B] p-8 rounded-[2.5rem] border border-purple-500/20 shadow-2xl">
                 <h3 className="text-xl font-black text-white mb-6 uppercase tracking-tight">Movimiento de Caja</h3>
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-4">
-                    <button onClick={() => setMovementValues(getMovementDefaults('outflow', undefined, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'outflow' ? 'bg-rose-600 text-white shadow-lg shadow-rose-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Gasto</button>
-                    <button onClick={() => setMovementValues(getMovementDefaults('transfer', undefined, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'transfer' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Banco</button>
-                    <button onClick={() => setMovementValues(getMovementDefaults('internal_transfer', undefined, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'internal_transfer' ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Interno</button>
+                    <button onClick={() => setMovementValues(getMovementDefaults('outflow', movementValues.from, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'outflow' ? 'bg-rose-600 text-white shadow-lg shadow-rose-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Gasto</button>
+                    <button onClick={() => setMovementValues(getMovementDefaults('transfer', movementValues.from, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'transfer' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Banco</button>
+                    <button onClick={() => setMovementValues(getMovementDefaults('internal_transfer', movementValues.from, movementValues))} className={`py-4 rounded-2xl font-black text-[10px] uppercase transition-all ${movementValues.type === 'internal_transfer' ? 'bg-amber-600 text-white shadow-lg shadow-amber-500/20' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>Interno</button>
                   </div>
 
                   <div>
@@ -2347,31 +3224,98 @@ Notas: ${closure.notes || 'N/A'}`;
                     </p>
                   </div>
 
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Monto</label>
+                    <input
+                      type="number"
+                      min="0"
+                      inputMode="decimal"
+                      value={movementValues.amount || ''}
+                      onFocus={e => e.target.select()}
+                      onKeyDown={e => ['-', '+', 'e', 'E'].includes(e.key) && e.preventDefault()}
+                      onChange={e => setMovementValues({...movementValues, amount: toNonNegativeNumber(e.target.value)})}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-2xl outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="0"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">
+                      {movementValues.type === 'outflow' ? 'Descripcion inteligente' : 'Descripcion'}
+                    </label>
+                    <input
+                      type="text"
+                      value={movementValues.description}
+                      onChange={e => {
+                        const description = e.target.value;
+                        if (movementValues.type === 'outflow') {
+                          applySmartExpenseDescription(description);
+                        } else {
+                          setMovementValues({...movementValues, description});
+                        }
+                      }}
+                      className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="Ej: Pago de flete, sueldo, internet..."
+                    />
+                    {movementValues.type === 'outflow' && movementValues.description && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <span className="px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-300 text-[10px] font-black uppercase tracking-widest">
+                          {movementValues.category || 'Otros'}
+                        </span>
+                        {movementValues.subcategory && (
+                          <span className="px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-300 text-[10px] font-black uppercase tracking-widest">
+                            {movementValues.subcategory}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   {(movementValues.type === 'transfer' || movementValues.type === 'internal_transfer') && (
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Origen</label>
-                        <select 
-                          value={movementValues.from || ''} 
-                          onChange={e => setMovementValues({...movementValues, from: e.target.value})}
+                        <select
+                          value={movementValues.from || ''}
+                          onChange={e => setMovementValues({
+                            ...movementValues,
+                            from: e.target.value,
+                            to: movementValues.type === 'transfer'
+                              ? 'bank'
+                              : movementValues.to === e.target.value
+                                ? ''
+                                : movementValues.to
+                          })}
                           className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                         >
                           <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                           <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
-                          <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                          {movementValues.type === 'internal_transfer' && (
+                            <>
+                              <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                              <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
+                            </>
+                          )}
                         </select>
                       </div>
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Destino</label>
-                        <select 
-                          value={movementValues.to || ''} 
-                          onChange={e => setMovementValues({...movementValues, to: e.target.value})}
-                          className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
-                        >
-                          <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                          <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
-                          <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
-                        </select>
+                        {movementValues.type === 'transfer' ? (
+                          <div className="w-full px-4 py-3 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl text-emerald-400 text-xs font-black uppercase">
+                            Banco
+                          </div>
+                        ) : (
+                          <select
+                            value={movementValues.to || ''}
+                            onChange={e => setMovementValues({...movementValues, to: e.target.value})}
+                            className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
+                          >
+                            <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
+                            <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
+                            <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
+                          </select>
+                        )}
                       </div>
                     </div>
                   )}
@@ -2381,20 +3325,21 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Pagar desde</label>
-                          <select 
-                            value={movementValues.from || 'safe'} 
+                          <select
+                            value={movementValues.from || 'safe'}
                             onChange={e => setMovementValues({...movementValues, from: e.target.value})}
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
                             <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
                         </div>
                         <div>
                           <div className="flex justify-between mb-2">
                             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Categoría</label>
-                            <button 
+                            <button
                               onClick={() => setIsAddingNewCategory(!isAddingNewCategory)}
                               className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
                             >
@@ -2403,14 +3348,14 @@ Notas: ${closure.notes || 'N/A'}`;
                           </div>
                           {isAddingNewCategory ? (
                             <div className="flex gap-2">
-                              <input 
-                                type="text" 
+                              <input
+                                type="text"
                                 value={newCategoryName}
                                 onChange={e => setNewCategoryName(e.target.value.toUpperCase())}
                                 placeholder="NOMBRE"
                                 className="flex-1 px-3 py-2 bg-white/10 border border-white/5 rounded-xl text-white text-xs font-black outline-none"
                               />
-                              <button 
+                              <button
                                 onClick={handleAddCategory}
                                 className="bg-purple-600 p-2 rounded-xl text-white"
                               >
@@ -2418,12 +3363,12 @@ Notas: ${closure.notes || 'N/A'}`;
                               </button>
                             </div>
                           ) : (
-                            <select 
-                              value={movementValues.category || 'Sueldos'} 
+                            <select
+                              value={movementValues.category || 'Sueldos'}
                               onChange={e => setMovementValues({...movementValues, category: e.target.value})}
                               className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                             >
-                              {categories.map(c => <option key={c} value={c} className="bg-[#0F172A] text-white">{c}</option>)}
+                              {Array.from(new Set([...categories, movementValues.category || ''].filter(Boolean))).map(c => <option key={c} value={c} className="bg-[#0F172A] text-white">{c}</option>)}
                             </select>
                           )}
                         </div>
@@ -2431,7 +3376,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div>
                         <div className="flex justify-between mb-2">
                           <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Subcategoría</label>
-                          <button 
+                          <button
                             onClick={() => setIsAddingNewSubcategory(!isAddingNewSubcategory)}
                             className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
                           >
@@ -2440,14 +3385,14 @@ Notas: ${closure.notes || 'N/A'}`;
                         </div>
                         {isAddingNewSubcategory ? (
                           <div className="flex gap-2">
-                            <input 
-                              type="text" 
+                            <input
+                              type="text"
                               value={newSubcategoryName}
                               onChange={e => setNewSubcategoryName(e.target.value.toUpperCase())}
                               placeholder="SUB NOMBRE"
                               className="flex-1 px-3 py-2 bg-white/10 border border-white/5 rounded-xl text-white text-xs font-black outline-none"
                             />
-                            <button 
+                            <button
                               onClick={handleAddSubcategory}
                               className="bg-purple-600 p-2 rounded-xl text-white"
                             >
@@ -2455,24 +3400,54 @@ Notas: ${closure.notes || 'N/A'}`;
                             </button>
                           </div>
                         ) : (
-                          <select 
-                            value={movementValues.subcategory || ''} 
+                          <select
+                            value={movementValues.subcategory || ''}
                             onChange={e => setMovementValues({...movementValues, subcategory: e.target.value})}
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="" className="bg-[#0F172A] text-slate-500">SIN SUBCATEGORIA</option>
-                            {subcategories.map(s => <option key={s} value={s} className="bg-[#0F172A] text-white">{s}</option>)}
+                            {Array.from(new Set([...subcategories, movementValues.subcategory || ''].filter(Boolean))).map(s => <option key={s} value={s} className="bg-[#0F172A] text-white">{s}</option>)}
                           </select>
                         )}
                       </div>
+
+                      <div>
+                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Etiquetas para reportes</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newExpenseTag}
+                            onChange={e => setNewExpenseTag(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                addExpenseTag();
+                              }
+                            }}
+                            placeholder="Ej: OPERACION, FIJO, BANCO"
+                            className="flex-1 px-4 py-3 bg-white/5 border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
+                          />
+                          <button onClick={addExpenseTag} className="px-4 py-3 bg-purple-600 rounded-2xl text-white">
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {(movementValues.tags || []).map(tag => (
+                            <button
+                              key={tag}
+                              onClick={() => removeExpenseTag(tag)}
+                              className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-slate-300 text-[10px] font-black uppercase tracking-widest hover:border-rose-500/40 hover:text-rose-300 transition-colors"
+                            >
+                              {tag} x
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   )}
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Monto</label><input type="number" min="0" value={movementValues.amount || ''} onFocus={e => e.target.select()} onChange={e => setMovementValues({...movementValues, amount: toNonNegativeNumber(e.target.value)})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-2xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="0" /></div>
-                  <div><label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Descripción</label><input type="text" value={movementValues.description} onChange={e => setMovementValues({...movementValues, description: e.target.value})} className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-purple-500" placeholder="Ej: Pago de flete..." /></div>
-                  
                   {formError && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: -10 }} 
+                    <motion.div
+                      initial={{ opacity: 0, y: -10 }}
                       animate={{ opacity: 1, y: 0 }}
                       className="p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl"
                     >
@@ -2486,6 +3461,7 @@ Notas: ${closure.notes || 'N/A'}`;
                     setNewCategoryName('');
                     setIsAddingNewSubcategory(false);
                     setNewSubcategoryName('');
+                    setNewExpenseTag('');
                   }} className="flex-1 py-4 text-slate-400 font-black">Cancelar</button><button onClick={handleSaveMovement} className="flex-[2] bg-purple-600 text-white py-4 rounded-2xl font-black">Registrar</button></div>
                 </div>
               </motion.div>

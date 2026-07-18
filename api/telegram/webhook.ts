@@ -14,6 +14,13 @@ import {
   isLikelyPerseoReportMessage,
   processTelegramPerseoReportMessage,
 } from "../_lib/telegramPerseoReportProcessor.js";
+import {
+  expenseAssistantMenuKeyboard,
+  personalFinanceBotMenuKeyboard,
+  processExpenseAssistantCallback,
+  processExpenseAssistantMessage,
+  processExpenseAssistantPhoto,
+} from "../_lib/telegramExpenseAssistant.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -53,15 +60,32 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const { telegramSecretToken, telegramAllowedChatId } = getTelegramConfig();
+  const {
+    telegramBotToken,
+    telegramPerseoBotToken,
+    telegramExpenseBotToken,
+    telegramPersonalBotToken,
+    telegramSecretToken,
+    telegramPerseoSecretToken,
+    telegramExpenseSecretToken,
+    telegramPersonalSecretToken,
+    telegramAllowedChatId,
+  } = getTelegramConfig();
 
   const receivedSecret =
     req.headers["x-telegram-bot-api-secret-token"] ||
     req.headers["X-Telegram-Bot-Api-Secret-Token"];
 
+  const acceptedSecretTokens = [
+    telegramSecretToken,
+    telegramPerseoSecretToken,
+    telegramExpenseSecretToken,
+    telegramPersonalSecretToken,
+  ].filter(Boolean).map(String);
+
   if (
-    telegramSecretToken &&
-    String(receivedSecret || "") !== String(telegramSecretToken)
+    acceptedSecretTokens.length > 0 &&
+    !acceptedSecretTokens.includes(String(receivedSecret || ""))
   ) {
     return res.status(401).json({
       ok: false,
@@ -79,6 +103,38 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json({
       ok: false,
       error: "Invalid body",
+    });
+  }
+
+  const isPerseoBotRequest =
+    Boolean(telegramPerseoSecretToken) &&
+    String(receivedSecret || "") === String(telegramPerseoSecretToken);
+  const isExpenseBotRequest =
+    Boolean(telegramExpenseSecretToken) &&
+    String(receivedSecret || "") === String(telegramExpenseSecretToken);
+  const isPersonalBotRequest =
+    Boolean(telegramPersonalSecretToken) &&
+    String(receivedSecret || "") === String(telegramPersonalSecretToken);
+
+  const callbackQuery = body.callback_query;
+
+  if (callbackQuery) {
+    if (isExpenseBotRequest || isPersonalBotRequest) {
+      const result = await processExpenseAssistantCallback({
+        callbackQuery,
+        botToken: isPersonalBotRequest
+          ? telegramPersonalBotToken || telegramExpenseBotToken || telegramBotToken
+          : telegramExpenseBotToken || telegramBotToken,
+        personalOnly: isPersonalBotRequest,
+      });
+
+      return res.status(200).json(result);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "Callback ignored",
     });
   }
 
@@ -116,12 +172,13 @@ export default async function handler(req: any, res: any) {
   const photos = Array.isArray(message.photo) ? message.photo : [];
   const largestPhoto = photos.length > 0 ? getLargestTelegramPhoto(photos) : null;
 
-  if (isLikelyPerseoReportMessage(message)) {
+  if (isPerseoBotRequest || isLikelyPerseoReportMessage(message)) {
     try {
       const result = await processTelegramPerseoReportMessage({
         chatId,
         message,
         largestPhoto,
+        botToken: telegramPerseoBotToken || telegramBotToken,
       });
 
       return res.status(200).json(result);
@@ -133,7 +190,8 @@ export default async function handler(req: any, res: any) {
         [
           "No pude procesar el reporte de Perseo automaticamente.",
           error?.message || String(error),
-        ].join("\n")
+        ].join("\n"),
+        telegramPerseoBotToken || telegramBotToken
       );
 
       return res.status(200).json({
@@ -142,6 +200,57 @@ export default async function handler(req: any, res: any) {
         error: error?.message || String(error),
       });
     }
+  }
+
+  if (isExpenseBotRequest || isPersonalBotRequest) {
+    const activeBotToken = isPersonalBotRequest
+      ? telegramPersonalBotToken || telegramExpenseBotToken || telegramBotToken
+      : telegramExpenseBotToken || telegramBotToken;
+
+    if (largestPhoto?.file_id) {
+      const photoResult = await processExpenseAssistantPhoto({
+        chatId,
+        message,
+        largestPhoto,
+        botToken: activeBotToken,
+        personalOnly: isPersonalBotRequest,
+      });
+
+      if (photoResult.handled) {
+        return res.status(200).json(photoResult);
+      }
+    }
+
+    const assistantResult = await processExpenseAssistantMessage({
+      chatId,
+      message,
+      botToken: activeBotToken,
+      personalOnly: isPersonalBotRequest,
+    });
+
+    if (assistantResult.handled) {
+      return res.status(200).json(assistantResult);
+    }
+
+    await sendTelegramMessage(
+      chatId,
+      [
+        isPersonalBotRequest ? "No identifique un gasto personal." : "No identifique una salida.",
+        "No voy a registrar nada sin una accion clara de gasto.",
+        "Ejemplos:",
+        ...(isPersonalBotRequest
+          ? ["2 en platano", "la colita 2", "tanqueo 20", "farmacia 8.50"]
+          : ["combustible 20 tienda", "taxi 8 banco", "salida proveedor 50 transito", "revisar correos"]),
+      ].join("\n"),
+      activeBotToken,
+      { reply_markup: isPersonalBotRequest ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+    );
+
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "Expense assistant did not understand message",
+    });
   }
 
   if (photos.length === 0) {

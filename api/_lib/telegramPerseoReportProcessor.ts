@@ -42,6 +42,42 @@ function getEcuadorHourFromTelegramMessage(message: any) {
   return Number(hourText);
 }
 
+function getEcuadorDateFromTelegramMessage(message: any) {
+  const unixSeconds = Number(message.date || message.edit_date || 0);
+  const baseDate =
+    Number.isFinite(unixSeconds) && unixSeconds > 0
+      ? new Date(unixSeconds * 1000)
+      : new Date();
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Guayaquil",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(baseDate);
+
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return new Date(Date.UTC(Number(get("year")), Number(get("month")) - 1, Number(get("day")), 12));
+}
+
+function getSenderIdentityText(message: any) {
+  const origin = message.forward_origin || {};
+  const originSender = origin.sender_user || {};
+  const originChat = origin.chat || {};
+
+  return normalizeText([
+    message.from?.username,
+    message.from?.first_name,
+    message.from?.last_name,
+    message.sender_chat?.username,
+    message.sender_chat?.title,
+    originSender.username,
+    originSender.first_name,
+    originSender.last_name,
+    originChat.username,
+    originChat.title,
+  ].filter(Boolean).join(" "));
+}
+
 export function isLikelyPerseoReportMessage(message: any) {
   const isDocument = Boolean(message.document?.file_id);
   const mimeType = normalizeText(message.document?.mime_type);
@@ -101,8 +137,15 @@ export function isLikelyPerseoReportMessage(message: any) {
   const ecuadorHour = getEcuadorHourFromTelegramMessage(message);
   const isNearDailyReportTime =
     ecuadorHour === null || (ecuadorHour >= 20 && ecuadorHour <= 23);
+  const senderIdentity = getSenderIdentityText(message);
+  const isPerseoReportBot =
+    senderIdentity.includes("reporte perseo") ||
+    senderIdentity.includes("reporteperseo") ||
+    senderIdentity.includes("reporte_perseo") ||
+    (senderIdentity.includes("perseo") && senderIdentity.includes("reporte"));
 
   return (
+    (isPerseoReportBot && isNearDailyReportTime) ||
     hasAny(text, strongReportTerms) ||
     (isPdf && hasAny(caption, documentReportTerms)) ||
     (isPdf && hasAny(fileName, ["reporte", ...documentReportTerms])) ||
@@ -151,6 +194,11 @@ async function saveReportAttempt(params: {
               totalRows: params.audit.totalRows,
               updated: params.audit.updated,
               unmatched: params.audit.unmatched,
+              matched: params.audit.matched,
+              differences: params.audit.differences,
+              totalPhysicalAmount: params.audit.totalPhysicalAmount,
+              totalSystemBalance: params.audit.totalSystemBalance,
+              totalDifference: params.audit.totalDifference,
             }
           : null,
         updatedAt: FieldValue.serverTimestamp(),
@@ -167,6 +215,7 @@ async function extractRowsFromReportFile(params: {
   imageBuffer: Buffer;
   mimeType: string;
   caption?: string;
+  fallbackDate: Date;
 }) {
   const { geminiApiKey, geminiModel } = getTelegramConfig();
 
@@ -183,12 +232,14 @@ Objetivo:
 Por cada cajero/responsable/local que aparezca, devuelve una fila con:
 - fecha en formato YYYY-MM-DD
 - responsable o cajero
-- venta_sistema si existe
+- venta_sistema si existe. Usa aqui valores llamados venta, ventas, total venta, total vendido, venta neta, facturado, ingresos o total de ventas.
 - cuadre_sistema, saldo_sistema, efectivo esperado o sistema si existe
 - sistema si solo hay un valor general de sistema
 
 Reglas:
 - No inventes filas.
+- No dejes venta_sistema en null si el reporte muestra una venta/total vendido para ese cajero.
+- No pongas la diferencia en venta_sistema.
 - Si solo existe una columna "sistema", usala como sistema.
 - Si hay totales generales y filas por cajero, prefiere filas por cajero.
 - Devuelve JSON valido.
@@ -227,6 +278,10 @@ ${params.caption || "Sin texto adicional"}
                 responsable: { type: Type.STRING, nullable: true },
                 cajero: { type: Type.STRING, nullable: true },
                 venta_sistema: { type: Type.NUMBER, nullable: true },
+                venta_total: { type: Type.NUMBER, nullable: true },
+                total_venta: { type: Type.NUMBER, nullable: true },
+                total_vendido: { type: Type.NUMBER, nullable: true },
+                facturado: { type: Type.NUMBER, nullable: true },
                 cuadre_sistema: { type: Type.NUMBER, nullable: true },
                 sistema: { type: Type.NUMBER, nullable: true },
               },
@@ -239,24 +294,106 @@ ${params.caption || "Sin texto adicional"}
   });
 
   const parsed = JSON.parse(response.text || "{}");
-  return parsePerseoReport(parsed);
+  return parsePerseoReport(parsed, params.fallbackDate);
 }
 
-async function getReportRowsFromMessage(message: any, largestPhoto?: any) {
+async function extractRowsFromReportText(params: {
+  text: string;
+  fallbackDate: Date;
+}) {
+  const { geminiApiKey, geminiModel } = getTelegramConfig();
+
+  if (!geminiApiKey) {
+    throw new Error("Falta GEMINI_API_KEY en Vercel.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+
+  const prompt = `
+Extrae filas de este reporte de Perseo/cuadre de cierres de caja enviado por Telegram.
+
+Objetivo:
+Por cada cajero/responsable/local que aparezca, devuelve una fila con:
+- fecha en formato YYYY-MM-DD si aparece; si no aparece, deja fecha null.
+- responsable o cajero.
+- venta_sistema si existe. Usa valores llamados venta, ventas, total venta, total vendido, venta neta, facturado, ingresos o total de ventas.
+- cuadre_sistema, saldo_sistema, efectivo esperado o sistema si existe.
+- sistema si solo hay un valor general de sistema.
+
+Reglas:
+- No inventes filas ni montos.
+- No dejes venta_sistema en null si el reporte muestra una venta/total vendido para ese cajero.
+- No pongas la diferencia en venta_sistema.
+- Si solo existe una columna "sistema", usala como sistema.
+- Si hay totales generales y filas por cajero, prefiere filas por cajero.
+- Devuelve JSON valido.
+
+Reporte:
+${params.text}
+`;
+
+  const response = await ai.models.generateContent({
+    model: geminiModel,
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          rows: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                fecha: { type: Type.STRING, nullable: true },
+                responsable: { type: Type.STRING, nullable: true },
+                cajero: { type: Type.STRING, nullable: true },
+                venta_sistema: { type: Type.NUMBER, nullable: true },
+                venta_total: { type: Type.NUMBER, nullable: true },
+                total_venta: { type: Type.NUMBER, nullable: true },
+                total_vendido: { type: Type.NUMBER, nullable: true },
+                facturado: { type: Type.NUMBER, nullable: true },
+                cuadre_sistema: { type: Type.NUMBER, nullable: true },
+                sistema: { type: Type.NUMBER, nullable: true },
+              },
+            },
+          },
+        },
+        required: ["rows"],
+      },
+    },
+  });
+
+  const parsed = JSON.parse(response.text || "{}");
+  return parsePerseoReport(parsed, params.fallbackDate);
+}
+
+async function getReportRowsFromMessage(message: any, largestPhoto?: any, botToken?: string) {
   const directText = getReportText(message);
-  const directRows = parsePerseoReport(directText);
+  const fallbackDate = getEcuadorDateFromTelegramMessage(message);
+  const fileId = largestPhoto?.file_id || message.document?.file_id;
+  const directRows = parsePerseoReport(directText, fallbackDate);
 
   if (directRows.length > 0) {
     return directRows;
   }
 
-  const fileId = largestPhoto?.file_id || message.document?.file_id;
+  if (directText && !fileId) {
+    const aiRows = await extractRowsFromReportText({
+      text: directText,
+      fallbackDate,
+    });
+
+    if (aiRows.length > 0) {
+      return aiRows;
+    }
+  }
 
   if (!fileId) {
     return [];
   }
 
-  const downloaded = await downloadTelegramPhoto(fileId);
+  const downloaded = await downloadTelegramPhoto(fileId, botToken);
   const mimeType = downloaded.mimeType.toLowerCase();
   const fileName = String(message.document?.file_name || "").toLowerCase();
 
@@ -266,7 +403,7 @@ async function getReportRowsFromMessage(message: any, largestPhoto?: any) {
     fileName.endsWith(".csv") ||
     fileName.endsWith(".txt")
   ) {
-    return parsePerseoReport(downloaded.imageBuffer.toString("utf8"));
+    return parsePerseoReport(downloaded.imageBuffer.toString("utf8"), fallbackDate);
   }
 
   if (mimeType.startsWith("image/")) {
@@ -274,6 +411,7 @@ async function getReportRowsFromMessage(message: any, largestPhoto?: any) {
       imageBuffer: downloaded.imageBuffer,
       mimeType,
       caption: directText,
+      fallbackDate,
     });
   }
 
@@ -282,6 +420,7 @@ async function getReportRowsFromMessage(message: any, largestPhoto?: any) {
       imageBuffer: downloaded.imageBuffer,
       mimeType: "application/pdf",
       caption: directText,
+      fallbackDate,
     });
   }
 
@@ -292,6 +431,7 @@ export async function processTelegramPerseoReportMessage(params: {
   chatId: number | string;
   message: any;
   largestPhoto?: any;
+  botToken?: string;
 }) {
   await saveReportAttempt({
     chatId: params.chatId,
@@ -302,7 +442,7 @@ export async function processTelegramPerseoReportMessage(params: {
   let rows: ReturnType<typeof parsePerseoReport>;
 
   try {
-    rows = await getReportRowsFromMessage(params.message, params.largestPhoto);
+    rows = await getReportRowsFromMessage(params.message, params.largestPhoto, params.botToken);
   } catch (error: any) {
     await saveReportAttempt({
       chatId: params.chatId,
@@ -324,7 +464,8 @@ export async function processTelegramPerseoReportMessage(params: {
 
     await sendTelegramMessage(
       params.chatId,
-      "Recibi un posible reporte de Perseo, pero no pude extraer filas validas para cruzar."
+      "Recibi un posible reporte de Perseo, pero no pude extraer filas validas para cruzar.",
+      params.botToken
     );
 
     return {
@@ -361,7 +502,8 @@ export async function processTelegramPerseoReportMessage(params: {
       `Cierres actualizados: ${audit.updated}`,
       `Sin coincidencia/revision: ${audit.unmatched}`,
       `Reporte: ${reportId}`,
-    ].join("\n")
+    ].join("\n"),
+    params.botToken
   );
 
   return {

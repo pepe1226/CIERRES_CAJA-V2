@@ -7,6 +7,8 @@ type PerseoReportRow = {
   businessDate: string;
   responsible: string;
   responsibleKey: string;
+  cashBox: string;
+  cashBoxKey: string;
   systemAmount: number;
   systemBalance: number;
   raw: Record<string, unknown>;
@@ -18,6 +20,9 @@ type AuditResult = {
   closureId?: string;
   reason?: string;
   candidates?: number;
+  physicalAmount?: number;
+  difference?: number;
+  auditStatus?: "matched" | "difference";
 };
 
 function stripAccents(value: string) {
@@ -73,6 +78,31 @@ function businessDateKey(date: Date) {
   ].join("-");
 }
 
+function ecuadorBusinessDateKey(date: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Guayaquil",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+export function getEcuadorBusinessDateKeyFromValue(value: unknown) {
+  const date = parseBusinessDate(value);
+  return Number.isNaN(date.getTime()) ? "" : ecuadorBusinessDateKey(date);
+}
+
+function getEcuadorBusinessDateRange(businessDate: string) {
+  const [year, month, day] = businessDate.split("-").map(Number);
+  const start = new Date(Date.UTC(year, month - 1, day, 5, 0, 0, 0));
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+  return { start, end };
+}
+
 function parseBusinessDate(value: unknown, fallback = new Date()) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
 
@@ -102,6 +132,29 @@ function getFirst(record: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     if (record[key] !== undefined && record[key] !== null && String(record[key]).trim() !== "") {
       return record[key];
+    }
+  }
+
+  return undefined;
+}
+
+function getFirstByHeaderTerms(
+  record: Record<string, unknown>,
+  includeTerms: string[],
+  excludeTerms: string[] = []
+) {
+  const include = includeTerms.map(normalizeHeader);
+  const exclude = excludeTerms.map(normalizeHeader);
+
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+
+    const normalizedKey = normalizeHeader(key);
+    const matchesInclude = include.some((term) => normalizedKey.includes(term));
+    const matchesExclude = exclude.some((term) => normalizedKey.includes(term));
+
+    if (matchesInclude && !matchesExclude) {
+      return value;
     }
   }
 
@@ -203,7 +256,7 @@ export function isPerseoAuthorized(req: any) {
   return bearerToken === expectedSecret || String(headerSecret || "") === expectedSecret;
 }
 
-export function parsePerseoReport(input: unknown) {
+export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
   const rows = normalizeRows(input);
 
   return rows
@@ -227,16 +280,39 @@ export function parsePerseoReport(input: unknown) {
           "vendedor",
         ]) ?? ""
       ).trim();
+      const cashBox = String(
+        getFirst(raw, [
+          "caja",
+          "caja_pdv",
+          "caja_perseo",
+          "nombre_caja",
+          "punto_venta",
+          "pdv",
+        ]) ?? ""
+      ).trim();
 
       const systemAmount = parseMoney(
         getFirst(raw, [
           "venta_sistema",
           "ventas_sistema",
-          "total_sistema",
+          "venta_total",
+          "ventas_total",
           "total_venta",
+          "total_ventas",
+          "total_vendido",
+          "venta_neta",
+          "ventas_netas",
+          "monto_venta",
+          "importe_venta",
+          "ingreso_sistema",
+          "valor_sistema_venta",
           "venta",
-          "sistema",
-        ])
+        ]) ??
+          getFirstByHeaderTerms(
+            raw,
+            ["venta", "ventas", "vendido", "facturado", "total_venta", "ingreso"],
+            ["diferencia", "diff", "saldo", "cuadre", "cierre", "esperado", "efectivo", "fisico", "funda"]
+          )
       );
       const systemBalanceRaw = getFirst(raw, [
         "cuadre_sistema",
@@ -246,45 +322,60 @@ export function parsePerseoReport(input: unknown) {
         "esperado",
         "saldo",
         "sistema",
-      ]);
+      ]) ??
+        getFirstByHeaderTerms(
+          raw,
+          ["cuadre", "saldo", "cierre", "esperado", "efectivo", "sistema"],
+          ["venta", "ventas", "vendido", "facturado", "diferencia", "diff", "fisico", "funda"]
+        );
       const systemBalance = parseMoney(systemBalanceRaw ?? systemAmount);
-      const date = parseBusinessDate(dateValue);
+      const date = parseBusinessDate(dateValue, fallbackDate);
       const responsibleKey = normalizeResponsible(responsible);
+      const cashBoxKey = normalizeResponsible(cashBox);
 
       return {
         date,
         businessDate: businessDateKey(date),
         responsible,
         responsibleKey,
+        cashBox,
+        cashBoxKey,
         systemAmount,
         systemBalance,
         raw,
       };
     })
-    .filter((row) => row.responsibleKey && (row.systemAmount > 0 || row.systemBalance > 0));
+    .filter((row) => (row.responsibleKey || row.cashBoxKey) && (row.systemAmount > 0 || row.systemBalance > 0));
 }
 
 function closureBusinessDate(data: any) {
-  return businessDateKey(parseBusinessDate(data.date));
+  return ecuadorBusinessDateKey(parseBusinessDate(data.date));
 }
 
 function scoreCandidate(row: PerseoReportRow, closure: any) {
   const closureKey = normalizeResponsible(closure.responsible);
+  const keys = [row.responsibleKey, row.cashBoxKey].filter(Boolean);
 
-  if (closureKey === row.responsibleKey) return 100;
-  if (closureKey.includes(row.responsibleKey) || row.responsibleKey.includes(closureKey)) return 80;
+  if (row.responsibleKey && closureKey === row.responsibleKey) return 100;
+  if (row.cashBoxKey && closureKey === row.cashBoxKey) return 95;
 
-  const rowParts = new Set(row.responsibleKey.split(/\s+/).filter((part) => part.length >= 3));
+  const containedKey = keys.find((key) => closureKey.includes(key) || key.includes(closureKey));
+  if (containedKey) return containedKey === row.responsibleKey ? 80 : 75;
+
+  const rowParts = new Set(keys.flatMap((key) => key.split(/\s+/).filter((part) => part.length >= 3)));
   const closureParts = closureKey.split(/\s+/).filter((part) => part.length >= 3);
   const hits = closureParts.filter((part) => rowParts.has(part)).length;
 
   return hits * 20;
 }
 
+function isSameMoney(left: unknown, right: unknown, tolerance: number) {
+  return Math.abs(Number(left || 0) - Number(right || 0)) <= tolerance;
+}
+
 async function getClosuresForDate(businessDate: string) {
   const db = getFirebaseAdminDb();
-  const start = new Date(`${businessDate}T00:00:00.000Z`);
-  const end = new Date(`${businessDate}T23:59:59.999Z`);
+  const { start, end } = getEcuadorBusinessDateRange(businessDate);
 
   const snapshot = await db
     .collection("closures")
@@ -312,6 +403,8 @@ export async function savePerseoReport(params: {
       businessDate: row.businessDate,
       responsible: row.responsible,
       responsibleKey: row.responsibleKey,
+      cashBox: row.cashBox,
+      cashBoxKey: row.cashBoxKey,
       systemAmount: row.systemAmount,
       systemBalance: row.systemBalance,
       raw: row.raw,
@@ -329,6 +422,7 @@ export async function auditClosuresWithPerseoRows(params: {
   const tolerance = Math.max(0, params.tolerance ?? 0.01);
   const results: AuditResult[] = [];
   const closuresByDate = new Map<string, Awaited<ReturnType<typeof getClosuresForDate>>>();
+  const usedClosureIds = new Set<string>();
 
   for (const row of params.rows) {
     if (!closuresByDate.has(row.businessDate)) {
@@ -338,13 +432,46 @@ export async function auditClosuresWithPerseoRows(params: {
     const closures = closuresByDate
       .get(row.businessDate)!
       .filter((closure) => closureBusinessDate(closure.data) === row.businessDate)
+      .filter((closure) => !usedClosureIds.has(closure.id))
       .map((closure) => ({ ...closure, score: scoreCandidate(row, closure.data) }))
       .filter((closure) => closure.score >= 20)
       .sort((a, b) => b.score - a.score);
 
     if (closures.length === 0) {
-      results.push({ row, ok: false, reason: "closure_not_found", candidates: 0 });
-      continue;
+      const remainingClosures = closuresByDate
+        .get(row.businessDate)!
+        .filter((closure) => closureBusinessDate(closure.data) === row.businessDate)
+        .filter((closure) => !usedClosureIds.has(closure.id));
+
+      const amountMatchedClosures = remainingClosures.filter((closure) =>
+        isSameMoney(closure.data.physicalAmount, row.systemBalance, tolerance)
+      );
+
+      if (amountMatchedClosures.length === 1) {
+        closures.push({ ...amountMatchedClosures[0], score: 15 });
+      } else if (amountMatchedClosures.length > 1) {
+        results.push({
+          row,
+          ok: false,
+          reason: "ambiguous_amount_match",
+          candidates: amountMatchedClosures.length,
+        });
+        continue;
+      }
+
+      if (closures.length === 0 && remainingClosures.length !== 1) {
+        results.push({
+          row,
+          ok: false,
+          reason: remainingClosures.length > 1 ? "ambiguous_remaining_closure" : "closure_not_found",
+          candidates: remainingClosures.length,
+        });
+        continue;
+      }
+
+      if (closures.length === 0) {
+        closures.push({ ...remainingClosures[0], score: 10 });
+      }
     }
 
     const best = closures[0];
@@ -372,15 +499,38 @@ export async function auditClosuresWithPerseoRows(params: {
       },
       { merge: true }
     );
+    usedClosureIds.add(best.id);
 
-    results.push({ row, ok: true, closureId: best.id, candidates: closures.length });
+    results.push({
+      row,
+      ok: true,
+      closureId: best.id,
+      candidates: closures.length,
+      physicalAmount,
+      difference,
+      auditStatus,
+    });
   }
+
+  const matchedResults = results.filter((result) => result.ok);
+  const differenceResults = matchedResults.filter((result) => result.auditStatus === "difference");
 
   return {
     ok: true,
     totalRows: params.rows.length,
-    updated: results.filter((result) => result.ok).length,
+    updated: matchedResults.length,
     unmatched: results.filter((result) => !result.ok).length,
+    matched: matchedResults.filter((result) => result.auditStatus === "matched").length,
+    differences: differenceResults.length,
+    totalPhysicalAmount: Number(
+      matchedResults.reduce((sum, result) => sum + Number(result.physicalAmount || 0), 0).toFixed(2)
+    ),
+    totalSystemBalance: Number(
+      matchedResults.reduce((sum, result) => sum + Number(result.row.systemBalance || 0), 0).toFixed(2)
+    ),
+    totalDifference: Number(
+      matchedResults.reduce((sum, result) => sum + Number(result.difference || 0), 0).toFixed(2)
+    ),
     results: results.map((result) => ({
       ok: result.ok,
       closureId: result.closureId,
@@ -388,9 +538,75 @@ export async function auditClosuresWithPerseoRows(params: {
       candidates: result.candidates,
       businessDate: result.row.businessDate,
       responsible: result.row.responsible,
+      cashBox: result.row.cashBox,
       systemAmount: result.row.systemAmount,
       systemBalance: result.row.systemBalance,
+      physicalAmount: result.physicalAmount,
+      difference: result.difference,
+      auditStatus: result.auditStatus,
     })),
+  };
+}
+
+export async function auditSavedPerseoReportsForDate(params: {
+  businessDate: string;
+}) {
+  const db = getFirebaseAdminDb();
+  const reportsSnapshot = await db
+    .collection("perseo_reports")
+    .where("businessDates", "array-contains", params.businessDate)
+    .get();
+
+  const rowsInput: Record<string, unknown>[] = [];
+  const reportIds: string[] = [];
+
+  reportsSnapshot.docs.forEach((doc) => {
+    const data = doc.data();
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+
+    reportIds.push(doc.id);
+
+    rows
+      .filter((row: any) => row?.businessDate === params.businessDate)
+      .forEach((row: any) => {
+        const rowInput: Record<string, unknown> = {
+          ...(row.raw && typeof row.raw === "object" ? row.raw : {}),
+          fecha: row.businessDate,
+          responsable: row.responsible,
+        };
+
+        const systemAmount = parseMoney(row.systemAmount);
+        const systemBalance = parseMoney(row.systemBalance);
+
+        if (systemAmount > 0) rowInput.venta_sistema = systemAmount;
+        if (systemBalance > 0) rowInput.cuadre_sistema = systemBalance;
+
+        rowsInput.push(rowInput);
+      });
+  });
+
+  const rows = parsePerseoReport(rowsInput);
+
+  if (rows.length === 0) {
+    return {
+      ok: true,
+      businessDate: params.businessDate,
+      reportsFound: reportsSnapshot.size,
+      reportIds,
+      updated: 0,
+      reason: "no_saved_rows",
+    };
+  }
+
+  const reportId = `auto:${params.businessDate}:${reportIds.join(",")}`;
+  const audit = await auditClosuresWithPerseoRows({ rows, reportId });
+
+  return {
+    ...audit,
+    businessDate: params.businessDate,
+    reportsFound: reportsSnapshot.size,
+    reportIds,
+    reportId,
   };
 }
 

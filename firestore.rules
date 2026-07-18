@@ -143,6 +143,43 @@ service cloud.firestore {
              (!('createdAt' in data) || data.createdAt is timestamp);
     }
 
+    function isValidPersonalCashBox(data) {
+      return hasRequiredFields(['name', 'type', 'openingBalance', 'color', 'isActive', 'createdBy']) &&
+             hasOnlyAllowedFields(['id', 'name', 'type', 'openingBalance', 'color', 'isActive', 'createdBy', 'createdAt', 'updatedAt', 'sharedWith']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.type in ['cash', 'bank', 'wallet', 'savings', 'other'] &&
+             data.openingBalance is number && data.openingBalance >= 0 &&
+             data.color is string && data.color.size() <= 20 &&
+             data.isActive is bool &&
+             data.createdBy is string &&
+             (!('sharedWith' in data) || data.sharedWith is list) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidPersonalMovement(data) {
+      return hasRequiredFields(['date', 'type', 'amount', 'description', 'category', 'createdBy']) &&
+             hasOnlyAllowedFields(['id', 'date', 'type', 'amount', 'description', 'category', 'tags', 'fromBoxId', 'toBoxId', 'createdBy', 'createdByName', 'source', 'telegramChatId', 'telegramMessageId', 'telegramUserId', 'telegramUserName', 'telegramFirstName', 'createdAt', 'updatedAt']) &&
+             (data.date is timestamp || data.date is string) &&
+             data.type in ['income', 'expense', 'transfer'] &&
+             data.amount is number && data.amount > 0 &&
+             data.description is string && data.description.size() <= 500 &&
+             data.category is string && data.category.size() <= 100 &&
+             data.createdBy is string &&
+             (!('tags' in data) || data.tags is list) &&
+             (!('fromBoxId' in data) || data.fromBoxId == null || data.fromBoxId is string) &&
+             (!('toBoxId' in data) || data.toBoxId == null || data.toBoxId is string) &&
+             (!('createdByName' in data) || data.createdByName == null || data.createdByName is string) &&
+             (!('source' in data) || data.source is string) &&
+             (!('telegramChatId' in data) || data.telegramChatId is string) &&
+             (!('telegramMessageId' in data) || data.telegramMessageId is number) &&
+             (!('telegramUserId' in data) || data.telegramUserId == null || data.telegramUserId is string) &&
+             (!('telegramUserName' in data) || data.telegramUserName == null || data.telegramUserName is string) &&
+             (!('telegramFirstName' in data) || data.telegramFirstName == null || data.telegramFirstName is string) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
     // ===============================================================
     // Rules
     // ===============================================================
@@ -172,6 +209,20 @@ service cloud.firestore {
       allow create: if isAuthenticated() && isValidTrip(request.resource.data) && request.resource.data.createdBy == request.auth.uid;
       allow update: if isAuthenticated() && isValidTrip(request.resource.data) && (isAdmin() || resource.data.createdBy == request.auth.uid);
       allow delete: if isAuthenticated() && isAdmin();
+    }
+
+    match /personalCashBoxes/{boxId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidPersonalCashBox(request.resource.data) && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuthenticated() && isValidPersonalCashBox(request.resource.data) && (isAdmin() || resource.data.createdBy == request.auth.uid);
+      allow delete: if isAuthenticated() && (isAdmin() || resource.data.createdBy == request.auth.uid);
+    }
+
+    match /personalMovements/{movementId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidPersonalMovement(request.resource.data) && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuthenticated() && isValidPersonalMovement(request.resource.data) && (isAdmin() || resource.data.createdBy == request.auth.uid);
+      allow delete: if isAuthenticated() && (isAdmin() || resource.data.createdBy == request.auth.uid);
     }
 
     // Default deny

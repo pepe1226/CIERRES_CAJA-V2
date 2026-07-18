@@ -1,11 +1,12 @@
 import { memo } from 'react';
-import { Calculator, Download, LayoutDashboard, LogOut, Printer, Truck } from 'lucide-react';
+import { Calculator, Download, LayoutDashboard, LogOut, Printer, Truck, Wallet } from 'lucide-react';
 
 type AppHeaderProps = {
   isExporting: boolean;
   onOpenPrint: () => void;
   onExportCsv: () => void;
   onOpenDashboard: () => void;
+  onOpenPersonal: () => void;
   onOpenTrips: () => void;
   onLogout: () => void;
 };
@@ -15,6 +16,7 @@ export const AppHeader = memo(function AppHeader({
   onOpenPrint,
   onExportCsv,
   onOpenDashboard,
+  onOpenPersonal,
   onOpenTrips,
   onLogout
 }: AppHeaderProps) {
@@ -38,6 +40,10 @@ export const AppHeader = memo(function AppHeader({
           <button type="button" onClick={onOpenDashboard} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
             <LayoutDashboard className="w-5 h-5" />
             <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Dashboard</span>
+          </button>
+          <button type="button" onClick={onOpenPersonal} className="p-3 bg-white/5 hover:bg-violet-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
+            <Wallet className="w-5 h-5" />
+            <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Personal</span>
           </button>
           <button type="button" onClick={onOpenTrips} className="p-3 bg-white/5 hover:bg-amber-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
             <Truck className="w-5 h-5" />

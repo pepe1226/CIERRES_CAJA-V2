@@ -21,7 +21,13 @@ export default function handler(_req: any, res: any) {
     ),
     telegram: {
       hasTelegramBotToken: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      hasTelegramPerseoBotToken: Boolean(process.env.TELEGRAM_PERSEO_BOT_TOKEN),
+      hasTelegramExpenseBotToken: Boolean(process.env.TELEGRAM_EXPENSE_BOT_TOKEN),
+      hasTelegramPersonalBotToken: Boolean(process.env.TELEGRAM_PERSONAL_BOT_TOKEN),
       hasTelegramSecretToken: Boolean(process.env.TELEGRAM_SECRET_TOKEN),
+      hasTelegramPerseoSecretToken: Boolean(process.env.TELEGRAM_PERSEO_SECRET_TOKEN),
+      hasTelegramExpenseSecretToken: Boolean(process.env.TELEGRAM_EXPENSE_SECRET_TOKEN),
+      hasTelegramPersonalSecretToken: Boolean(process.env.TELEGRAM_PERSONAL_SECRET_TOKEN),
       hasCronSecret: Boolean(process.env.CRON_SECRET),
       allowedChatId: process.env.TELEGRAM_ALLOWED_CHAT_ID || null,
       telegramCreatedByUid: process.env.TELEGRAM_CREATED_BY_UID || "telegram-bot"
@@ -29,6 +35,14 @@ export default function handler(_req: any, res: any) {
     perseo: {
       hasPerseoImportSecret: Boolean(process.env.PERSEO_IMPORT_SECRET),
       acceptsCronSecretFallback: Boolean(process.env.CRON_SECRET)
+    },
+    gmailExpenses: {
+      hasGmailClientId: Boolean(process.env.GMAIL_CLIENT_ID),
+      hasGmailClientSecret: Boolean(process.env.GMAIL_CLIENT_SECRET),
+      hasGmailRefreshToken: Boolean(process.env.GMAIL_REFRESH_TOKEN),
+      hasGmailExpenseTelegramChatId: Boolean(process.env.GMAIL_EXPENSE_TELEGRAM_CHAT_ID),
+      gmailExpenseQuery: process.env.GMAIL_EXPENSE_QUERY ||
+        'newer_than:30d (pichincha OR "Banco Pichincha" OR "notificaciones pichincha" OR "transaccion" OR "transacción" OR "transferencia" OR "compra" OR "consumo")'
     },
     gemini: {
       hasGeminiApiKey: Boolean(process.env.GEMINI_API_KEY),
