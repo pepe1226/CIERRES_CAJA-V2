@@ -71,3 +71,20 @@ export interface UserProfile {
   displayName?: string;
   role: 'admin' | 'user';
 }
+
+export interface PerseoReportRow {
+  businessDate: string;
+  responsible?: string | null;
+  responsibleKey?: string | null;
+  cashBox?: string | null;
+  cashBoxKey?: string | null;
+  systemAmount?: number;
+  systemBalance?: number;
+}
+
+export interface PerseoReport {
+  id: string;
+  createdAt?: string | null;
+  businessDates: string[];
+  rows: PerseoReportRow[];
+}

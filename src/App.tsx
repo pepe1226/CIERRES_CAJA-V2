@@ -4,7 +4,7 @@
  */
 
 import React, { lazy, Suspense, useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { ShiftClosure, Movement } from './types';
+import { ShiftClosure, Movement, type PerseoReportRow } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
 import {
@@ -74,12 +74,14 @@ import {
   ChevronRight,
   ShieldAlert,
   Eye,
-  Share2
+  Share2,
+  CameraOff
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { PrintPreview } from './components/PrintPreview';
 import { AppHeader } from './components/AppHeader';
 import { LoginScreen } from './components/LoginScreen';
+import { ModuleSidebar, type AppView } from './components/ModuleSidebar';
 import { useAuthProfile } from './hooks/useAuthProfile';
 import { useFinanceData } from './hooks/useFinanceData';
 
@@ -96,11 +98,16 @@ type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmoun
 type CashBoxStatus = 'safe' | 'transit' | 'bank' | 'personal';
 type ClosureCashBoxStatus = Exclude<CashBoxStatus, 'personal'>;
 type DisplayClosureStatus = ClosureCashBoxStatus | 'mixed';
-type ClosureAuditStatus = 'all' | 'matched' | 'difference' | 'pending_report' | 'not_audited';
+type ClosureAuditStatus = 'all' | 'matched' | 'difference' | 'pending_report' | 'missing_photo' | 'not_audited';
 type ClosureLedgerEntry = {
   displayStatus: ClosureCashBoxStatus;
   hasSplitBalance: boolean;
   balances: Record<CashBoxStatus, number>;
+};
+type MissingPerseoClosure = PerseoReportRow & {
+  key: string;
+  reportId: string;
+  responsibleLabel: string;
 };
 
 const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'personal'];
@@ -160,6 +167,40 @@ const normalizeSearchText = (value: unknown) =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
+
+const compactCashierText = (value: unknown) =>
+  normalizeSearchText(value).replace(/[^a-z0-9]+/g, '');
+
+const normalizeCashierName = (value: unknown) => {
+  const compact = compactCashierText(value);
+  if (!compact) return '';
+
+  const definitions: Array<[string, string[]]> = [
+    ['JOHANNA', ['johanna', 'johana', 'joha', 'yoha', 'soha']],
+    ['YULEXI', ['yulexi', 'yulex', 'yule', 'yuli', 'juli', 'yul', 'pdv3esquina']],
+    ['DAYELI', ['dayeli', 'daye', 'dayi', 'dayveli', 'deyli', 'deili', 'daili']],
+    ['ERICK', ['erick', 'eric', 'erik']]
+  ];
+
+  for (const [canonical, aliases] of definitions) {
+    if (aliases.some(alias => {
+      const normalizedAlias = compactCashierText(alias);
+      return compact === normalizedAlias || compact.includes(normalizedAlias) || normalizedAlias.includes(compact);
+    })) return canonical;
+  }
+
+  return String(value || '').trim().toUpperCase();
+};
+
+const normalizePerseoCashBoxKey = (value: unknown) =>
+  normalizeSearchText(value)
+    .replace(/\bcaja\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s+/g, '-');
+
+const moneyText = (value: unknown) =>
+  `$${(Number(value) || 0).toLocaleString('es-CL')}`;
 
 const getCashBoxLabel = (status?: string | null) => {
   const normalized = normalizeCashBoxStatus(status);
@@ -385,12 +426,13 @@ const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColum
 
 function AppContent() {
   const { user, loading } = useAuthProfile();
-  const { closures, movements, trips } = useFinanceData(Boolean(user));
+  const { closures, movements, trips, perseoReports } = useFinanceData(Boolean(user));
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<ClosureColumnKey, string>>(emptyClosureColumnFilters);
-  const [currentView, setCurrentView] = useState<'main' | 'dashboard' | 'personal'>('main');
+  const [currentView, setCurrentView] = useState<AppView>('main');
+  const [isModuleSidebarOpen, setIsModuleSidebarOpen] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const [selectedClosures, setSelectedClosures] = useState<Set<string>>(new Set());
@@ -748,8 +790,13 @@ function AppContent() {
   }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, filterAudit, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
 
   const uniqueResponsibles = useMemo(() => {
-    return Array.from(new Set(closures.map(c => c.responsible))).sort();
-  }, [closures]);
+    const closureResponsibles = closures.map(c => c.responsible);
+    const perseoResponsibles = perseoReports.flatMap(report => report.rows.map(row =>
+      String(row.responsible || row.responsibleKey || row.cashBox || row.cashBoxKey || '').trim().toUpperCase()
+    ));
+
+    return Array.from(new Set([...closureResponsibles, ...perseoResponsibles].filter(Boolean))).sort();
+  }, [closures, perseoReports]);
 
   const selectedTripClosures = useMemo(() =>
     closures.filter(c => c.id && selectedClosures.has(c.id) && isClosureAvailableForTrip(c)),
@@ -779,6 +826,125 @@ function AppContent() {
     return 'mixed';
   };
 
+  const latestPerseoRowsByDate = useMemo(() => {
+    const rowsByDate = new Map<string, { createdAt: string; reportId: string; rows: PerseoReportRow[] }>();
+
+    perseoReports.forEach(report => {
+      const groupedRows = report.rows.reduce<Record<string, PerseoReportRow[]>>((result, row) => {
+        const businessDate = String(row.businessDate || '').trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) return result;
+        if (!result[businessDate]) result[businessDate] = [];
+        result[businessDate].push(row);
+        return result;
+      }, {});
+
+      Object.entries(groupedRows).forEach(([businessDate, rows]) => {
+        const createdAt = String(report.createdAt || '');
+        const existing = rowsByDate.get(businessDate);
+        if (!existing || createdAt.localeCompare(existing.createdAt) > 0) {
+          rowsByDate.set(businessDate, { createdAt, reportId: report.id, rows });
+        }
+      });
+    });
+
+    return rowsByDate;
+  }, [perseoReports]);
+
+  const perseoDailyTotalsByDate = useMemo(() =>
+    Array.from(latestPerseoRowsByDate.entries()).reduce<Record<string, { systemAmount: number; systemBalance: number }>>((result, [day, report]) => {
+      result[day] = report.rows.reduce((totals, row) => ({
+        systemAmount: totals.systemAmount + (Number(row.systemAmount) || 0),
+        systemBalance: totals.systemBalance + (Number(row.systemBalance) || 0)
+      }), { systemAmount: 0, systemBalance: 0 });
+      return result;
+    }, {}),
+  [latestPerseoRowsByDate]);
+
+  const missingPerseoClosuresByDate = useMemo(() => {
+    const coveredRowKeys = new Set<string>();
+    const fallbackPhotoCountByDayCashier: Record<string, number> = {};
+
+    closures.forEach(closure => {
+      const isTelegramPhoto = closure.source === 'telegram' || Boolean(closure.telegramFileId);
+      if (!isTelegramPhoto) return;
+
+      const day = format(parseISO(closure.date), 'yyyy-MM-dd');
+      const raw = closure.perseoRaw as Record<string, unknown> | undefined;
+      const cashier = normalizeCashierName(raw?.responsable || raw?.cajero || closure.responsible);
+      const cashBox = normalizePerseoCashBoxKey(raw?.caja);
+      let hasDirectMatchKey = false;
+
+      if (cashBox) {
+        coveredRowKeys.add(`${day}|${cashier}|${cashBox}`);
+        hasDirectMatchKey = true;
+      }
+      if (Number(closure.systemBalance) > 0) {
+        coveredRowKeys.add(`${day}|${cashier}|amount-${Number(closure.systemBalance).toFixed(2)}`);
+        hasDirectMatchKey = true;
+      }
+
+      if (!hasDirectMatchKey) {
+        const cashierKey = `${day}|${cashier}`;
+        fallbackPhotoCountByDayCashier[cashierKey] = (fallbackPhotoCountByDayCashier[cashierKey] || 0) + 1;
+      }
+    });
+
+    const reportRows = Array.from(latestPerseoRowsByDate.entries()).flatMap(([businessDate, report]) =>
+      report.rows.map(row => {
+        const responsibleLabel = String(row.responsible || row.responsibleKey || row.cashBox || row.cashBoxKey || 'SIN RESPONSABLE').trim().toUpperCase();
+        const responsibleKey = normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox);
+        const hasSystemValue = (Number(row.systemAmount) || 0) > 0 || Math.abs(Number(row.systemBalance) || 0) > 0.009;
+        if (!responsibleKey || !hasSystemValue) return null;
+
+        const cashBoxKey = normalizePerseoCashBoxKey(row.cashBox || row.cashBoxKey || 'sin-caja');
+        const amountKey = `${businessDate}|${responsibleKey}|amount-${Number(row.systemBalance || 0).toFixed(2)}`;
+        const key = `${businessDate}|${responsibleKey}|${cashBoxKey}`;
+        if (coveredRowKeys.has(key) || coveredRowKeys.has(amountKey)) return null;
+
+        return {
+          ...row,
+          key,
+          reportId: report.reportId,
+          businessDate,
+          responsibleLabel,
+          responsibleKey,
+          cashBoxKey
+        } as MissingPerseoClosure;
+      }).filter(Boolean) as MissingPerseoClosure[]
+    );
+
+    const consolidatedRows = Object.values(reportRows.reduce<Record<string, MissingPerseoClosure>>((result, row) => {
+      const existing = result[row.key];
+      if (!existing) {
+        result[row.key] = { ...row };
+      } else {
+        existing.systemAmount = (Number(existing.systemAmount) || 0) + (Number(row.systemAmount) || 0);
+        existing.systemBalance = (Number(existing.systemBalance) || 0) + (Number(row.systemBalance) || 0);
+      }
+      return result;
+    }, {}));
+
+    const rowsByCashier = consolidatedRows.reduce<Record<string, MissingPerseoClosure[]>>((result, row) => {
+      const key = `${row.businessDate}|${normalizeCashierName(row.responsibleLabel)}`;
+      if (!result[key]) result[key] = [];
+      result[key].push(row);
+      return result;
+    }, {});
+
+    const missingRows = Object.entries(rowsByCashier).flatMap(([cashierKey, rows]) => {
+      const coveredCount = fallbackPhotoCountByDayCashier[cashierKey] || 0;
+      return rows
+        .sort((a, b) => Math.abs(Number(b.systemBalance) || 0) - Math.abs(Number(a.systemBalance) || 0))
+        .slice(coveredCount);
+    });
+
+    return missingRows.reduce<Record<string, MissingPerseoClosure[]>>((result, row) => {
+      if (!result[row.businessDate]) result[row.businessDate] = [];
+      result[row.businessDate].push(row);
+      return result;
+    }, {});
+  }, [closures, latestPerseoRowsByDate]);
+
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
     filteredClosures.forEach(c => {
@@ -787,23 +953,66 @@ function AppContent() {
       groups[day].push(c);
     });
 
+    Object.keys(missingPerseoClosuresByDate).forEach(day => {
+      const date = parseISO(`${day}T12:00:00`);
+      const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(date, {
+        start: startOfDay(parseISO(filterStartDate)),
+        end: endOfDay(parseISO(filterEndDate))
+      });
+      const rows = missingPerseoClosuresByDate[day] || [];
+      const matchesResponsible = filterResponsible === 'all' || rows.some(row =>
+        normalizeCashierName(row.responsibleLabel) === normalizeCashierName(filterResponsible)
+      );
+      const normalizedSearch = normalizeSearchText(debouncedSearchTerm);
+      const matchesSearch = !normalizedSearch || rows.some(row =>
+        [row.businessDate, row.responsibleLabel, row.cashBox, row.systemAmount, row.systemBalance]
+          .some(value => normalizeSearchText(value).includes(normalizedSearch))
+      );
+      const matchesAudit = filterAudit === 'all' || filterAudit === 'missing_photo';
+
+      if (matchesDate && matchesResponsible && matchesSearch && matchesAudit && filterStatus === 'all' && !groups[day]) {
+        groups[day] = [];
+      }
+    });
+
     return Object.entries(groups)
       .sort(([a], [b]) => b.localeCompare(a))
       .map(([date, items]) => {
         const sortedItems = [...items].sort((a,b) => b.date.localeCompare(a.date));
+        const missingRows = filterAudit === 'all' || filterAudit === 'missing_photo'
+          ? missingPerseoClosuresByDate[date] || []
+          : [];
+        const perseoTotals = perseoDailyTotalsByDate[date];
 
         const totals = sortedItems.reduce((acc, curr) => ({
           physicalAmount: acc.physicalAmount + curr.physicalAmount,
-          systemAmount: acc.systemAmount + curr.systemAmount,
-          systemBalance: acc.systemBalance + curr.systemBalance,
-          difference: acc.difference + curr.difference
-        }), { physicalAmount: 0, systemAmount: 0, systemBalance: 0, difference: 0 });
+          systemAmount: perseoTotals ? acc.systemAmount : acc.systemAmount + curr.systemAmount,
+          systemBalance: perseoTotals ? acc.systemBalance : acc.systemBalance + curr.systemBalance,
+          difference: 0
+        }), {
+          physicalAmount: 0,
+          systemAmount: perseoTotals?.systemAmount || 0,
+          systemBalance: perseoTotals?.systemBalance || 0,
+          difference: 0
+        });
+        totals.difference = Number((totals.physicalAmount - totals.systemBalance).toFixed(2));
 
         const status = getDayStatusFromItems(sortedItems);
 
-        return { date, items: sortedItems, totals, status };
+        return { date, items: sortedItems, missingRows, totals, status };
       });
-  }, [filteredClosures, derivedClosureStatusById, closureLedgerById]);
+  }, [filteredClosures, missingPerseoClosuresByDate, perseoDailyTotalsByDate, filterDateRangeType, filterStartDate, filterEndDate, filterResponsible, debouncedSearchTerm, filterAudit, filterStatus, derivedClosureStatusById, closureLedgerById]);
+
+  const reconciliationSummary = useMemo(() => groupedClosures.reduce((summary, group) => {
+    summary.missingPhoto += group.missingRows.length;
+    group.items.forEach(closure => {
+      const status = getClosureAuditInfo(closure).status;
+      if (status === 'matched') summary.matched += 1;
+      if (status === 'difference') summary.differences += 1;
+      if (status === 'pending_report') summary.missingPerseo += 1;
+    });
+    return summary;
+  }, { matched: 0, differences: 0, missingPerseo: 0, missingPhoto: 0 }), [groupedClosures]);
 
 
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
@@ -1875,15 +2084,21 @@ Notas: ${closure.notes || 'N/A'}`;
       <div className={`min-h-screen bg-[#0F172A] text-slate-200 pb-20 select-none ${showPrintPreview ? 'hidden' : 'block'} print:hidden`}>
         <AppHeader
           isExporting={isExporting}
+          onToggleMenu={() => setIsModuleSidebarOpen(true)}
           onOpenPrint={() => setShowPrintPreview(true)}
           onExportCsv={handleExportCSV}
-          onOpenDashboard={() => setCurrentView('dashboard')}
-          onOpenPersonal={() => setCurrentView('personal')}
-          onOpenTrips={() => setViewingTripId('LIST')}
           onLogout={logOut}
         />
 
-        <main className="w-full px-4 py-10">
+        <ModuleSidebar
+          open={isModuleSidebarOpen}
+          activeView={currentView}
+          onClose={() => setIsModuleSidebarOpen(false)}
+          onNavigate={setCurrentView}
+          onOpenTrips={() => setViewingTripId('LIST')}
+        />
+
+        <main className="w-full px-4 py-10 lg:pl-[304px]">
           {/* Success Feedback Notification */}
           {showSuccess && (
             <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] animate-in fade-in zoom-in slide-in-from-top-4 duration-300">
@@ -2409,6 +2624,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 <option value="all">Toda Auditoría</option>
                 <option value="difference">Con Diferencia</option>
                 <option value="pending_report">Falta Venta Sistema</option>
+                <option value="missing_photo">Falta Foto / Corte</option>
                 <option value="matched">Auditado OK</option>
                 <option value="not_audited">Sin Auditoría</option>
               </select>
@@ -2482,6 +2698,35 @@ Notas: ${closure.notes || 'N/A'}`;
               <button onClick={() => openMovementForm('internal_transfer')} className="bg-purple-600 hover:bg-purple-500 text-white px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-purple-500/20 shadow-lg"><ArrowRightLeft className="w-5 h-5" /> Traspaso Interno</button>
             </div>
           </div>
+
+          <section className="mb-8 border-y border-white/10 bg-[#111C2E] px-4 py-5 text-left sm:px-6">
+            <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+              <div className="border-l-4 border-emerald-500 pl-4">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Cruces OK</p>
+                <p className="mt-1 text-2xl font-black text-emerald-400">{reconciliationSummary.matched}</p>
+              </div>
+              <div className="border-l-4 border-rose-500 pl-4">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Con diferencia</p>
+                <p className="mt-1 text-2xl font-black text-rose-400">{reconciliationSummary.differences}</p>
+              </div>
+              <div className="border-l-4 border-amber-400 pl-4">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Foto sin Perseo</p>
+                <p className="mt-1 text-2xl font-black text-amber-300">{reconciliationSummary.missingPerseo}</p>
+              </div>
+              <div className="border-l-4 border-orange-500 pl-4">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Venta sin foto</p>
+                <p className="mt-1 text-2xl font-black text-orange-400">{reconciliationSummary.missingPhoto}</p>
+              </div>
+            </div>
+            {reconciliationSummary.missingPhoto > 0 && (
+              <div className="mt-5 flex items-center gap-3 border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-orange-200">
+                <CameraOff className="h-5 w-5 shrink-0 text-orange-400" />
+                <p className="text-xs font-bold">
+                  Hay {reconciliationSummary.missingPhoto} {reconciliationSummary.missingPhoto === 1 ? 'venta de Perseo sin foto/corte' : 'ventas de Perseo sin foto/corte'}. Expande el dia para revisar cajero y saldo esperado.
+                </p>
+              </div>
+            )}
+          </section>
 
           <div className="bg-[#1E293B] rounded-[2.5rem] shadow-2xl border border-white/5 overflow-hidden">
             <div className="overflow-x-auto text-left">
@@ -2653,6 +2898,12 @@ Notas: ${closure.notes || 'N/A'}`;
                                 <div>
                                   <div className="font-black text-white text-sm">{format(parseISO(group.date), 'EEEE, dd MMMM', { locale: es })}</div>
                                   <div className="text-[10px] font-black text-blue-500 uppercase tracking-widest">{group.items.length} Registros</div>
+                                  {group.missingRows.length > 0 && (
+                                    <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-orange-400">
+                                      <CameraOff className="h-3 w-3" />
+                                      {group.missingRows.length} {group.missingRows.length === 1 ? 'venta sin foto' : 'ventas sin foto'}
+                                    </div>
+                                  )}
                                 </div>
                              </div>
                            </td>
@@ -2865,6 +3116,41 @@ Notas: ${closure.notes || 'N/A'}`;
                               </td>
                             </tr>
                           )
+                        ))}
+                        {expandedDays[group.date] && group.missingRows.map(row => (
+                          <tr key={`missing-photo-${row.key}`} className="border-b border-orange-500/20 bg-orange-500/[0.06]">
+                            <td className="px-6 py-4">
+                              <div className="flex flex-col">
+                                <span className="text-sm font-black text-orange-200">{format(parseISO(`${row.businessDate}T12:00:00`), 'dd MMM', { locale: es })}</span>
+                                <span className="mt-1 inline-flex w-fit items-center gap-1 border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[9px] font-black uppercase tracking-widest text-orange-400">
+                                  <CameraOff className="h-3 w-3" /> Sin foto
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="flex items-center gap-3">
+                                <div className="flex h-8 w-8 items-center justify-center rounded-full border border-orange-500/20 bg-orange-500/10">
+                                  <UserIcon className="h-4 w-4 text-orange-400" />
+                                </div>
+                                <div>
+                                  <p className="text-xs font-black uppercase tracking-wider text-slate-100">{row.responsibleLabel}</p>
+                                  <p className="mt-1 text-[9px] font-black uppercase tracking-widest text-orange-400">Falta foto / corte</p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 text-center text-[10px] font-black uppercase tracking-widest text-orange-300">Pendiente</td>
+                            <td className="px-6 py-4 text-center text-sm font-black text-slate-300">{moneyText(row.systemAmount)}</td>
+                            <td className="px-6 py-4 text-center text-sm font-black text-white">{moneyText(row.systemBalance)}</td>
+                            <td className="px-6 py-4 text-center">
+                              <span className="inline-flex border border-orange-500/30 bg-orange-500/10 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-orange-300">Falta revisar</span>
+                            </td>
+                            <td className="px-6 py-4 text-center">
+                              <span className="inline-flex items-center gap-1 border border-blue-500/20 bg-blue-500/10 px-3 py-2 text-[9px] font-black uppercase tracking-widest text-blue-300">
+                                <FileText className="h-3 w-3" /> Perseo
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-right text-[9px] font-black uppercase tracking-widest text-slate-500">Reporte</td>
+                          </tr>
                         ))}
                      </React.Fragment>
                    ))}
