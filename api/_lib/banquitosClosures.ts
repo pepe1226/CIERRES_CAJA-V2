@@ -61,11 +61,21 @@ const roundMoney = (value: unknown) => {
 
 const STORE_CLOSURES_CACHE_MS = 15_000;
 const STORE_CLOSURES_STALE_MS = 10 * 60_000;
+const STORE_CLOSURES_QUOTA_BACKOFF_MS = 5 * 60_000;
 let storeClosuresCache: {
   loadedAt: number;
   closures: Array<Record<string, unknown>>;
 } | null = null;
 let storeClosuresRequest: Promise<Array<Record<string, unknown>>> | null = null;
+let storeClosuresQuotaBackoffUntil = 0;
+
+const isQuotaExceededError = (error: any) => {
+  const message = String(error?.message || "");
+  return error?.code === 8
+    || String(error?.code || "").includes("resource-exhausted")
+    || message.includes("RESOURCE_EXHAUSTED")
+    || message.includes("Quota exceeded");
+};
 
 const isAuthorizedIntegration = (req: any) => {
   const configuredSecret = String(process.env.BANQUITOS_INTEGRATION_SECRET || "");
@@ -211,13 +221,26 @@ const getAvailableStoreClosures = async (
   ) {
     return { closures: storeClosuresCache.closures, cached: true, stale: false };
   }
+  if (now < storeClosuresQuotaBackoffUntil) {
+    if (storeClosuresCache) {
+      return { closures: storeClosuresCache.closures, cached: true, stale: true };
+    }
+    throw Object.assign(
+      new Error("Cierres alcanzo temporalmente el limite de consultas. Reintenta en unos minutos."),
+      { statusCode: 429, code: "resource-exhausted" },
+    );
+  }
 
   try {
     storeClosuresRequest ||= loadAvailableStoreClosures(database);
     const closures = await storeClosuresRequest;
     storeClosuresCache = { loadedAt: Date.now(), closures };
+    storeClosuresQuotaBackoffUntil = 0;
     return { closures, cached: false, stale: false };
   } catch (error) {
+    if (isQuotaExceededError(error)) {
+      storeClosuresQuotaBackoffUntil = Date.now() + STORE_CLOSURES_QUOTA_BACKOFF_MS;
+    }
     if (
       storeClosuresCache
       && now - storeClosuresCache.loadedAt < STORE_CLOSURES_STALE_MS
@@ -445,10 +468,7 @@ export async function handleBanquitosClosures(req: any, res: any) {
   } catch (error) {
     console.error("Error listando cortes disponibles para Banquitos:", error);
     const errorText = String((error as any)?.message || "");
-    const isQuotaError = (error as any)?.code === 8
-      || String((error as any)?.code || "").includes("resource-exhausted")
-      || errorText.includes("RESOURCE_EXHAUSTED")
-      || errorText.includes("Quota exceeded");
+    const isQuotaError = isQuotaExceededError(error);
     const statusCode = isQuotaError ? 429 : Number((error as any)?.statusCode) || 500;
     return res.status(statusCode).json({
       ok: false,
