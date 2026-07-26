@@ -61,7 +61,7 @@ const roundMoney = (value: unknown) => {
 
 const STORE_CLOSURES_CACHE_MS = 15_000;
 const STORE_CLOSURES_STALE_MS = 10 * 60_000;
-const STORE_CLOSURES_QUOTA_BACKOFF_MS = 5 * 60_000;
+const STORE_CLOSURES_QUOTA_BACKOFF_MS = 30 * 60_000;
 let storeClosuresCache: {
   loadedAt: number;
   closures: Array<Record<string, unknown>>;
