@@ -217,6 +217,15 @@ export default async function handler(req: any, res: any) {
         withSafeBalance: safeBalanceClosures.length,
         safeOnly: safeOnlyClosures.length,
         safeOnlyWithoutTrip: safeOnlyClosures.filter((closure) => !closure.tripId).length,
+        recentClosures: closures.slice(0, 20).map((closure) => ({
+          id: closure.id,
+          date: closure.date,
+          responsible: closure.responsible,
+          amount: closure.physicalAmount,
+          storedStatus: closure.status,
+          hasTrip: Boolean(closure.tripId),
+          balances: balances.get(closure.id),
+        })),
       },
     });
   } catch (error) {
