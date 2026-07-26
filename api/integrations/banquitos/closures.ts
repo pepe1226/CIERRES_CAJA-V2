@@ -187,6 +187,22 @@ export default async function handler(req: any, res: any) {
         source: closure.source,
       }))
       .sort((left, right) => right.date.localeCompare(left.date));
+    const originalStatusCounts = closures.reduce<Record<CashLocation, number>>(
+      (counts, closure) => {
+        counts[closure.status] += 1;
+        return counts;
+      },
+      { safe: 0, transit: 0, bank: 0, personal: 0 },
+    );
+    const safeBalanceClosures = closures.filter(
+      (closure) => (balances.get(closure.id)?.safe || 0) > 0.009,
+    );
+    const safeOnlyClosures = safeBalanceClosures.filter((closure) => {
+      const closureBalance = balances.get(closure.id);
+      return closureBalance && CASH_LOCATIONS
+        .filter((location) => location !== "safe")
+        .every((location) => closureBalance[location] <= 0.009);
+    });
 
     res.setHeader("Cache-Control", "private, no-store");
     return res.status(200).json({
@@ -194,6 +210,14 @@ export default async function handler(req: any, res: any) {
       source: "cierres-caja-v2",
       generatedAt: new Date().toISOString(),
       closures: availableClosures,
+      diagnostics: {
+        totalClosures: closures.length,
+        withTrip: closures.filter((closure) => Boolean(closure.tripId)).length,
+        originalStatusCounts,
+        withSafeBalance: safeBalanceClosures.length,
+        safeOnly: safeOnlyClosures.length,
+        safeOnlyWithoutTrip: safeOnlyClosures.filter((closure) => !closure.tripId).length,
+      },
     });
   } catch (error) {
     console.error("Error listando cortes disponibles para Banquitos:", error);
