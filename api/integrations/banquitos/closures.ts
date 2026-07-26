@@ -79,7 +79,12 @@ const buildStoreBalances = (closures: ClosureRecord[], transfers: TransferRecord
   [...transfers]
     .sort((left, right) => left.date.localeCompare(right.date))
     .forEach((transfer) => {
-      if (transfer.from === transfer.to || transfer.amount <= 0) return;
+      if (
+        transfer.from === "personal"
+        || transfer.to === "personal"
+        || transfer.from === transfer.to
+        || transfer.amount <= 0
+      ) return;
 
       let remainingAmount = transfer.amount;
       const transferTime = new Date(transfer.date).getTime();
