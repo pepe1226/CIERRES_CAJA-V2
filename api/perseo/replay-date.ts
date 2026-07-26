@@ -64,7 +64,6 @@ export default async function handler(req: any, res: any) {
 
         if (systemAmount > 0) rowInput.venta_sistema = systemAmount;
         if (systemBalance > 0) rowInput.cuadre_sistema = systemBalance;
-
         rowsInput.push(rowInput);
       });
   });

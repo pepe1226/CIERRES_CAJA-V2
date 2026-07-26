@@ -158,6 +158,48 @@ function getReportText(message: any) {
   return String(message.text || message.caption || "").trim();
 }
 
+function formatMoney(value: unknown) {
+  const number = Number(value || 0);
+  return Number.isFinite(number)
+    ? number.toLocaleString("es-EC", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : "0.00";
+}
+
+function formatInventorySummary(audit: any, reportId: string) {
+  const priorities = Array.isArray(audit?.results) ? audit.results.slice(0, 3) : [];
+  const priorityLines = priorities.map((item: any, index: number) => {
+    const title = String(item.responsible || item.cashBox || "SIN NOMBRE").toUpperCase();
+    const stock = item.physicalAmount ?? item.systemAmount ?? 0;
+    const system = item.systemBalance ?? item.systemAmount ?? 0;
+    const difference = Number(item.difference || 0);
+    const cover = item.coverageDays ?? item.coverage ?? null;
+    const coverText = cover === null || cover === undefined ? "" : ` | Cobertura ${formatMoney(cover)} dias`;
+    const diffText = difference !== 0 ? ` | Dif ${difference > 0 ? "+" : ""}${formatMoney(difference)}` : "";
+
+    return `${index + 1}. ${title}\nStock ${formatMoney(stock)} | Sistema ${formatMoney(system)}${diffText}${coverText}`;
+  });
+
+  const header = [
+    "INFALTABLES",
+    `Actualizado: ${new Date().toISOString().slice(0, 19).replace("T", " ")}`,
+    `Reportes cruzados: ${audit?.updated || 0}`,
+    `Sin match: ${audit?.unmatched || 0}`,
+    `Diferencias: ${audit?.differences || 0}`,
+  ];
+
+  return [
+    ...header,
+    "",
+    "Prioritarios:",
+    ...priorityLines,
+    "",
+    `Reporte: ${reportId}`,
+  ].join("\n");
+}
+
 function getAttemptId(chatId: number | string, messageId: number | string) {
   return `telegram_${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_")}_${messageId}`;
 }
@@ -233,13 +275,18 @@ Por cada cajero/responsable/local que aparezca, devuelve una fila con:
 - fecha en formato YYYY-MM-DD
 - responsable o cajero
 - venta_sistema si existe. Usa aqui valores llamados venta, ventas, total venta, total vendido, venta neta, facturado, ingresos o total de ventas.
-- cuadre_sistema, saldo_sistema, efectivo esperado o sistema si existe
+- saldo_esperado_caja si existe. Usa aqui la columna Esperado, efectivo esperado, saldo a dejar, debe quedar o saldo neto de caja.
+- transferido_compra_pdv si existe como columna/celda explicita. Usa aqui Transf. COMPRA PDV, Transf. PDV o transferencias enviadas a COMPRA PDV.
+- reportado si existe. Reportado es el efectivo declarado/cierre reportado, no lo uses como saldo_esperado_caja.
+- cuadre_sistema debe ser el mismo valor de saldo_esperado_caja.
 - sistema si solo hay un valor general de sistema
 
 Reglas:
 - No inventes filas.
+- No calcules transferido_compra_pdv por diferencia entre venta_sistema y saldo_esperado_caja; si no aparece explicito, dejalo null.
 - No dejes venta_sistema en null si el reporte muestra una venta/total vendido para ese cajero.
 - No pongas la diferencia en venta_sistema.
+- No pongas Reportado en cuadre_sistema si existe una columna Esperado.
 - Si solo existe una columna "sistema", usala como sistema.
 - Si hay totales generales y filas por cajero, prefiere filas por cajero.
 - Devuelve JSON valido.
@@ -282,6 +329,14 @@ ${params.caption || "Sin texto adicional"}
                 total_venta: { type: Type.NUMBER, nullable: true },
                 total_vendido: { type: Type.NUMBER, nullable: true },
                 facturado: { type: Type.NUMBER, nullable: true },
+                saldo_esperado_caja: { type: Type.NUMBER, nullable: true },
+                esperado: { type: Type.NUMBER, nullable: true },
+                efectivo_esperado_movcaja: { type: Type.NUMBER, nullable: true },
+                transferido_compra_pdv: { type: Type.NUMBER, nullable: true },
+                transf_compra_pdv: { type: Type.NUMBER, nullable: true },
+                transf_pdv: { type: Type.NUMBER, nullable: true },
+                transferencia_compra_pdv: { type: Type.NUMBER, nullable: true },
+                reportado: { type: Type.NUMBER, nullable: true },
                 cuadre_sistema: { type: Type.NUMBER, nullable: true },
                 sistema: { type: Type.NUMBER, nullable: true },
               },
@@ -317,13 +372,18 @@ Por cada cajero/responsable/local que aparezca, devuelve una fila con:
 - fecha en formato YYYY-MM-DD si aparece; si no aparece, deja fecha null.
 - responsable o cajero.
 - venta_sistema si existe. Usa valores llamados venta, ventas, total venta, total vendido, venta neta, facturado, ingresos o total de ventas.
-- cuadre_sistema, saldo_sistema, efectivo esperado o sistema si existe.
+- saldo_esperado_caja si existe. Usa la columna Esperado, efectivo esperado, saldo a dejar, debe quedar o saldo neto de caja.
+- transferido_compra_pdv si existe como columna/celda explicita. Usa Transf. COMPRA PDV, Transf. PDV o transferencias enviadas a COMPRA PDV.
+- reportado si existe. Reportado es el efectivo declarado/cierre reportado, no lo uses como saldo_esperado_caja.
+- cuadre_sistema debe ser el mismo valor de saldo_esperado_caja.
 - sistema si solo hay un valor general de sistema.
 
 Reglas:
 - No inventes filas ni montos.
+- No calcules transferido_compra_pdv por diferencia entre venta_sistema y saldo_esperado_caja; si no aparece explicito, dejalo null.
 - No dejes venta_sistema en null si el reporte muestra una venta/total vendido para ese cajero.
 - No pongas la diferencia en venta_sistema.
+- No pongas Reportado en cuadre_sistema si existe una columna Esperado.
 - Si solo existe una columna "sistema", usala como sistema.
 - Si hay totales generales y filas por cajero, prefiere filas por cajero.
 - Devuelve JSON valido.
@@ -353,6 +413,14 @@ ${params.text}
                 total_venta: { type: Type.NUMBER, nullable: true },
                 total_vendido: { type: Type.NUMBER, nullable: true },
                 facturado: { type: Type.NUMBER, nullable: true },
+                saldo_esperado_caja: { type: Type.NUMBER, nullable: true },
+                esperado: { type: Type.NUMBER, nullable: true },
+                efectivo_esperado_movcaja: { type: Type.NUMBER, nullable: true },
+                transferido_compra_pdv: { type: Type.NUMBER, nullable: true },
+                transf_compra_pdv: { type: Type.NUMBER, nullable: true },
+                transf_pdv: { type: Type.NUMBER, nullable: true },
+                transferencia_compra_pdv: { type: Type.NUMBER, nullable: true },
+                reportado: { type: Type.NUMBER, nullable: true },
                 cuadre_sistema: { type: Type.NUMBER, nullable: true },
                 sistema: { type: Type.NUMBER, nullable: true },
               },
@@ -496,13 +564,7 @@ export async function processTelegramPerseoReportMessage(params: {
 
   await sendTelegramMessage(
     params.chatId,
-    [
-      "Reporte Perseo procesado.",
-      `Filas: ${audit.totalRows}`,
-      `Cierres actualizados: ${audit.updated}`,
-      `Sin coincidencia/revision: ${audit.unmatched}`,
-      `Reporte: ${reportId}`,
-    ].join("\n"),
+    formatInventorySummary(audit, reportId),
     params.botToken
   );
 

@@ -1,4 +1,5 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { normalizeCashierName } from "./cashierNames.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import { getTelegramConfig } from "./telegramMovement.js";
 
@@ -11,6 +12,8 @@ type PerseoReportRow = {
   cashBoxKey: string;
   systemAmount: number;
   systemBalance: number;
+  reportedAmount: number;
+  transferAmount: number;
   raw: Record<string, unknown>;
 };
 
@@ -41,9 +44,15 @@ function normalizeHeader(value: unknown) {
 }
 
 function normalizeResponsible(value: unknown) {
-  return normalizeText(value)
-    .replace(/^(responsable|cajero|caja|sr|sra)\s+/i, "")
-    .trim();
+  return normalizeCashierName(
+    normalizeText(value)
+      .replace(/^(responsable|cajero|caja|sr|sra)\s+/i, "")
+      .trim()
+  );
+}
+
+function isKnownCashierKey(value: string) {
+  return ["JOHANNA", "YULEXI", "DAYELI", "ERICK"].includes(value);
 }
 
 function parseMoney(value: unknown) {
@@ -156,6 +165,44 @@ function getFirstByHeaderTerms(
     if (matchesInclude && !matchesExclude) {
       return value;
     }
+  }
+
+  return undefined;
+}
+
+function getExplicitTransferAmountValue(record: Record<string, unknown>) {
+  const direct = getFirst(record, [
+    "transferido_compra_pdv",
+    "transf_compra_pdv",
+    "transf_pdv",
+    "transfer_pdv",
+    "transferencia_compra_pdv",
+    "transferencias_compra_pdv",
+    "transferencias_pdv",
+    "enviado_compra_pdv",
+    "compra_pdv",
+  ]);
+
+  if (direct !== undefined) return direct;
+
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined || value === null || String(value).trim() === "") continue;
+
+    const normalizedKey = normalizeHeader(key);
+    const hasTransferTerm =
+      normalizedKey.includes("transf") ||
+      normalizedKey.includes("transfer") ||
+      normalizedKey.includes("transferido") ||
+      normalizedKey.includes("transferencia");
+    const hasPdvContext = normalizedKey.includes("pdv") || normalizedKey.includes("compra");
+    const isWrongField =
+      normalizedKey.includes("venta") ||
+      normalizedKey.includes("saldo") ||
+      normalizedKey.includes("reportado") ||
+      normalizedKey.includes("fisico") ||
+      normalizedKey.includes("diferencia");
+
+    if (hasTransferTerm && hasPdvContext && !isWrongField) return value;
   }
 
   return undefined;
@@ -314,12 +361,24 @@ export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
             ["diferencia", "diff", "saldo", "cuadre", "cierre", "esperado", "efectivo", "fisico", "funda"]
           )
       );
-      const systemBalanceRaw = getFirst(raw, [
+      const expectedBalanceRaw = getFirst(raw, [
+        "saldo_esperado_caja",
+        "efectivo_esperado_movcaja",
+        "efectivo_esperado",
+        "esperado",
+        "saldo_a_dejar",
+        "saldo_debe_dejar",
+        "debe_dejar",
+        "debe_quedar",
+        "saldo_en_caja",
+        "saldo_cajero",
+        "neto_caja",
+        "total_esperado",
+      ]);
+      const systemBalanceRaw = expectedBalanceRaw ?? getFirst(raw, [
         "cuadre_sistema",
         "saldo_sistema",
         "cierre_sistema",
-        "efectivo_esperado",
-        "esperado",
         "saldo",
         "sistema",
       ]) ??
@@ -329,20 +388,42 @@ export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
           ["venta", "ventas", "vendido", "facturado", "diferencia", "diff", "fisico", "funda"]
         );
       const systemBalance = parseMoney(systemBalanceRaw ?? systemAmount);
+      const reportedAmount = parseMoney(
+        getFirst(raw, [
+          "reportado",
+          "efectivo_reportado",
+          "cierre_reportado",
+          "fisico_reportado",
+          "totalefectivo",
+          "total_reportado",
+        ])
+      );
+      const transferAmount = parseMoney(getExplicitTransferAmountValue(raw));
       const date = parseBusinessDate(dateValue, fallbackDate);
-      const responsibleKey = normalizeResponsible(responsible);
       const cashBoxKey = normalizeResponsible(cashBox);
+      const responsibleKey = normalizeResponsible(responsible);
+      const effectiveResponsible = isKnownCashierKey(cashBoxKey) ? cashBoxKey : responsible;
+      const effectiveResponsibleKey = isKnownCashierKey(cashBoxKey) ? cashBoxKey : responsibleKey;
+      const normalizedRaw = isKnownCashierKey(cashBoxKey)
+        ? {
+            ...raw,
+            responsable: effectiveResponsible,
+            cajero: effectiveResponsible,
+          }
+        : raw;
 
       return {
         date,
         businessDate: businessDateKey(date),
-        responsible,
-        responsibleKey,
+        responsible: effectiveResponsible,
+        responsibleKey: effectiveResponsibleKey,
         cashBox,
         cashBoxKey,
         systemAmount,
         systemBalance,
-        raw,
+        reportedAmount,
+        transferAmount,
+        raw: normalizedRaw,
       };
     })
     .filter((row) => (row.responsibleKey || row.cashBoxKey) && (row.systemAmount > 0 || row.systemBalance > 0));
@@ -352,21 +433,47 @@ function closureBusinessDate(data: any) {
   return ecuadorBusinessDateKey(parseBusinessDate(data.date));
 }
 
-function scoreCandidate(row: PerseoReportRow, closure: any) {
+function amountMatchScore(row: PerseoReportRow, closure: any, tolerance: number) {
+  const physicalAmount = Number(closure.physicalAmount || 0);
+  const candidates = [row.systemBalance, row.reportedAmount, row.systemAmount]
+    .map((value) => Number(value || 0))
+    .filter((value) => value > 0);
+
+  if (physicalAmount <= 0 || candidates.length === 0) return 0;
+
+  const delta = Math.min(...candidates.map((value) => Math.abs(physicalAmount - value)));
+  const effectiveTolerance = Math.max(tolerance, 0.10);
+
+  if (delta <= effectiveTolerance) return 160;
+  if (delta <= 0.25) return 120;
+  if (delta <= 1) return 80;
+  return 0;
+}
+
+function scoreCandidate(row: PerseoReportRow, closure: any, tolerance: number) {
   const closureKey = normalizeResponsible(closure.responsible);
   const keys = [row.responsibleKey, row.cashBoxKey].filter(Boolean);
+  const amountScore = amountMatchScore(row, closure, tolerance);
+  let nameScore = 0;
 
-  if (row.responsibleKey && closureKey === row.responsibleKey) return 100;
-  if (row.cashBoxKey && closureKey === row.cashBoxKey) return 95;
+  if (row.responsibleKey && closureKey === row.responsibleKey) nameScore = 90;
+  else if (row.cashBoxKey && closureKey === row.cashBoxKey) nameScore = 80;
+  else {
+    const containedKey = keys.find((key) => closureKey.includes(key) || key.includes(closureKey));
+    if (containedKey) nameScore = containedKey === row.responsibleKey ? 60 : 50;
+    else {
+      const rowParts = new Set(keys.flatMap((key) => key.split(/\s+/).filter((part) => part.length >= 3)));
+      const closureParts = closureKey.split(/\s+/).filter((part) => part.length >= 3);
+      const hits = closureParts.filter((part) => rowParts.has(part)).length;
+      nameScore = hits * 20;
+    }
+  }
 
-  const containedKey = keys.find((key) => closureKey.includes(key) || key.includes(closureKey));
-  if (containedKey) return containedKey === row.responsibleKey ? 80 : 75;
+  return nameScore + amountScore;
+}
 
-  const rowParts = new Set(keys.flatMap((key) => key.split(/\s+/).filter((part) => part.length >= 3)));
-  const closureParts = closureKey.split(/\s+/).filter((part) => part.length >= 3);
-  const hits = closureParts.filter((part) => rowParts.has(part)).length;
-
-  return hits * 20;
+function rowHasNamedCashier(row: PerseoReportRow) {
+  return [row.responsibleKey, row.cashBoxKey].some(isKnownCashierKey);
 }
 
 function isSameMoney(left: unknown, right: unknown, tolerance: number) {
@@ -390,6 +497,7 @@ export async function savePerseoReport(params: {
   source?: string;
   rows: PerseoReportRow[];
   rawInput?: unknown;
+  dailySystemAmountByDate?: Record<string, number>;
 }) {
   const db = getFirebaseAdminDb();
   const reportRef = db.collection("perseo_reports").doc();
@@ -399,6 +507,7 @@ export async function savePerseoReport(params: {
     source: params.source || "api",
     rowCount: params.rows.length,
     businessDates: Array.from(new Set(params.rows.map((row) => row.businessDate))).sort(),
+    dailySystemAmountByDate: params.dailySystemAmountByDate || null,
     rows: params.rows.map((row) => ({
       businessDate: row.businessDate,
       responsible: row.responsible,
@@ -407,6 +516,8 @@ export async function savePerseoReport(params: {
       cashBoxKey: row.cashBoxKey,
       systemAmount: row.systemAmount,
       systemBalance: row.systemBalance,
+      reportedAmount: row.reportedAmount,
+      transferAmount: row.transferAmount,
       raw: row.raw,
     })),
   });
@@ -419,7 +530,7 @@ export async function auditClosuresWithPerseoRows(params: {
   reportId?: string;
   tolerance?: number;
 }) {
-  const tolerance = Math.max(0, params.tolerance ?? 0.01);
+  const tolerance = Math.max(0, params.tolerance ?? 0.10);
   const results: AuditResult[] = [];
   const closuresByDate = new Map<string, Awaited<ReturnType<typeof getClosuresForDate>>>();
   const usedClosureIds = new Set<string>();
@@ -433,7 +544,7 @@ export async function auditClosuresWithPerseoRows(params: {
       .get(row.businessDate)!
       .filter((closure) => closureBusinessDate(closure.data) === row.businessDate)
       .filter((closure) => !usedClosureIds.has(closure.id))
-      .map((closure) => ({ ...closure, score: scoreCandidate(row, closure.data) }))
+      .map((closure) => ({ ...closure, score: scoreCandidate(row, closure.data, tolerance) }))
       .filter((closure) => closure.score >= 20)
       .sort((a, b) => b.score - a.score);
 
@@ -459,18 +570,18 @@ export async function auditClosuresWithPerseoRows(params: {
         continue;
       }
 
-      if (closures.length === 0 && remainingClosures.length !== 1) {
+      if (closures.length === 0) {
         results.push({
           row,
           ok: false,
-          reason: remainingClosures.length > 1 ? "ambiguous_remaining_closure" : "closure_not_found",
+          reason: rowHasNamedCashier(row)
+            ? "cashier_closure_not_found"
+            : remainingClosures.length > 1
+            ? "ambiguous_remaining_closure"
+            : "closure_not_found",
           candidates: remainingClosures.length,
         });
         continue;
-      }
-
-      if (closures.length === 0) {
-        closures.push({ ...remainingClosures[0], score: 10 });
       }
     }
 
@@ -579,7 +690,12 @@ export async function auditSavedPerseoReportsForDate(params: {
         const systemBalance = parseMoney(row.systemBalance);
 
         if (systemAmount > 0) rowInput.venta_sistema = systemAmount;
-        if (systemBalance > 0) rowInput.cuadre_sistema = systemBalance;
+        if (systemBalance > 0) {
+          rowInput.saldo_esperado_caja = systemBalance;
+          rowInput.cuadre_sistema = systemBalance;
+        }
+        if (parseMoney(row.reportedAmount) > 0) rowInput.reportado = row.reportedAmount;
+        if (parseMoney(row.transferAmount) !== 0) rowInput.transferido_compra_pdv = row.transferAmount;
 
         rowsInput.push(rowInput);
       });

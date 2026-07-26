@@ -4,12 +4,16 @@ export interface ShiftClosure {
   responsible: string;
   systemAmount: number;
   systemBalance: number;
+  reportedAmount?: number;
+  transferAmount?: number;
   physicalAmount: number;
   difference: number;
   notes?: string;
   createdBy: string;
-  status?: 'safe' | 'transit' | 'bank';
+  status?: 'safe' | 'transit' | 'bank' | 'banquitos';
   tripId?: string;
+  cashBoxBalances?: Partial<Record<'safe' | 'transit' | 'bank' | 'banquitos', number>>;
+  cashBoxBalancesUpdatedAt?: string;
   systemSource?: 'perseo' | 'manual' | string;
   perseoReportId?: string | null;
   perseoMatchedAt?: string;
@@ -47,6 +51,11 @@ export interface Movement {
   createdBy: string;
   from?: string;
   to?: string;
+  closureId?: string;
+  employeeId?: string;
+  employeeName?: string;
+  payrollKind?: 'advance' | 'salary' | 'bonus' | 'loan' | 'discount' | 'settlement' | string;
+  payrollPeriod?: string;
 
   // Campos opcionales creados por el webhook de Telegram en Vercel.
   source?: 'telegram' | string;
@@ -70,4 +79,20 @@ export interface UserProfile {
   email: string;
   displayName?: string;
   role: 'admin' | 'user';
+}
+
+export interface InventoryItem {
+  id: string;
+  sku?: string;
+  name: string;
+  stock: number;
+  sold90d?: number;
+  coverageDays?: number | null;
+  lastCost?: number | null;
+  supplier?: string | null;
+  warehouse?: string | null;
+  status?: 'critical' | 'low' | 'watch' | 'ok' | string;
+  priorityReason?: string | null;
+  updatedAt?: string;
+  snapshotId?: string | null;
 }

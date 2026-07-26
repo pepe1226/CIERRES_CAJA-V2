@@ -1,13 +1,16 @@
 import {
   getLargestTelegramPhoto,
   getTelegramMessageKey,
+  markPendingStatus,
   processTelegramPhotoMessage,
   savePendingTelegramPhoto,
 } from "../_lib/telegramPhotoProcessor.js";
 import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import {
+  answerTelegramCallbackQuery,
   getFriendlyGeminiErrorMessage,
   getTelegramConfig,
+  isTemporaryGeminiError,
   sendTelegramMessage,
 } from "../_lib/telegramMovement.js";
 import {
@@ -26,6 +29,102 @@ function getBody(req: any) {
   if (!req.body) return {};
   if (typeof req.body === "string") return JSON.parse(req.body);
   return req.body;
+}
+
+async function processPendingPhotoFromCallback(callbackQuery: any) {
+  const data = String(callbackQuery.data || "");
+  const pendingId = data.replace(/^pending:retry:/, "");
+  const chatId = callbackQuery.message?.chat?.id;
+
+  await answerTelegramCallbackQuery({
+    callbackQueryId: callbackQuery.id,
+    text: "Reintentando foto pendiente...",
+  });
+
+  if (!pendingId || !chatId) {
+    return { ok: false, handled: true, error: "Falta codigo pendiente o chat." };
+  }
+
+  const db = getFirebaseAdminDb();
+  const pendingRef = db.collection("telegram_pending_photos").doc(pendingId);
+  const pendingDoc = await pendingRef.get();
+
+  if (!pendingDoc.exists) {
+    await sendTelegramMessage(chatId, `No encontre el pendiente ${pendingId}.`);
+    return { ok: false, handled: true, pendingId, error: "pending-not-found" };
+  }
+
+  const pending = pendingDoc.data() || {};
+  const message = pending.rawMessage;
+  const largestPhoto = {
+    file_id: pending.photo?.fileId,
+    file_unique_id: pending.photo?.fileUniqueId,
+    file_size: pending.photo?.fileSize,
+    width: pending.photo?.width,
+    height: pending.photo?.height,
+  };
+
+  if (!message || !largestPhoto.file_id) {
+    await markPendingStatus({
+      pendingId,
+      status: "needs_review",
+      error: "Pendiente sin rawMessage o file_id. No se puede reintentar desde Telegram.",
+    });
+    await sendTelegramMessage(chatId, `No pude reintentar ${pendingId}: falta informacion de la foto.`);
+    return { ok: false, handled: true, pendingId, error: "missing-pending-data" };
+  }
+
+  try {
+    await markPendingStatus({ pendingId, status: "processing" });
+
+    const result = await processTelegramPhotoMessage({
+      chatId,
+      message,
+      largestPhoto,
+      sendSuccessMessage: true,
+      extractionAttempts: 3,
+    });
+
+    await markPendingStatus({
+      pendingId,
+      status: "completed",
+      closureId: result.closureId || result.existingClosureId,
+    });
+
+    return { ok: true, handled: true, pendingId, result };
+  } catch (error: any) {
+    await savePendingTelegramPhoto({
+      chatId,
+      message,
+      largestPhoto,
+      error,
+      source: "retry",
+    });
+
+    await markPendingStatus({
+      pendingId,
+      status: isTemporaryGeminiError(error) ? "pending" : "needs_review",
+      error,
+    });
+
+    await sendTelegramMessage(
+      chatId,
+      [
+        getFriendlyGeminiErrorMessage(error),
+        `Sigue pendiente: ${pendingId}`,
+      ].join("\n"),
+      undefined,
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "Reintentar ahora", callback_data: `pending:retry:${pendingId}` },
+          ]],
+        },
+      }
+    );
+
+    return { ok: false, handled: true, pendingId, error: error?.message || String(error) };
+  }
 }
 
 async function saveIgnoredTelegramDocument(message: any, chatId: number | string) {
@@ -70,11 +169,15 @@ export default async function handler(req: any, res: any) {
     telegramExpenseSecretToken,
     telegramPersonalSecretToken,
     telegramAllowedChatId,
+    telegramPersonalAllowedChatId,
   } = getTelegramConfig();
 
   const receivedSecret =
     req.headers["x-telegram-bot-api-secret-token"] ||
     req.headers["X-Telegram-Bot-Api-Secret-Token"];
+  const forcedBot = String(req.query?.bot || "").toLowerCase();
+  const forcePersonalWebhook = forcedBot === "personal";
+  const forceExpenseWebhook = forcedBot === "expense";
 
   const acceptedSecretTokens = [
     telegramSecretToken,
@@ -115,17 +218,31 @@ export default async function handler(req: any, res: any) {
   const isPersonalBotRequest =
     Boolean(telegramPersonalSecretToken) &&
     String(receivedSecret || "") === String(telegramPersonalSecretToken);
+  const activePersonalBotRequest = forcePersonalWebhook || isPersonalBotRequest;
+  const activeExpenseBotRequest = forceExpenseWebhook ? false : isExpenseBotRequest;
+  const activePerseoBotRequest = forcePersonalWebhook ? false : isPerseoBotRequest;
+
+  const allowedChatId = activePersonalBotRequest
+    ? telegramPersonalAllowedChatId || telegramAllowedChatId
+    : telegramAllowedChatId;
 
   const callbackQuery = body.callback_query;
 
   if (callbackQuery) {
-    if (isExpenseBotRequest || isPersonalBotRequest) {
+    const callbackData = String(callbackQuery.data || "");
+
+    if (callbackData.startsWith("pending:retry:")) {
+      const result = await processPendingPhotoFromCallback(callbackQuery);
+      return res.status(200).json(result);
+    }
+
+    if (activeExpenseBotRequest || activePersonalBotRequest) {
       const result = await processExpenseAssistantCallback({
         callbackQuery,
-        botToken: isPersonalBotRequest
-          ? telegramPersonalBotToken || telegramExpenseBotToken || telegramBotToken
+        botToken: activePersonalBotRequest
+          ? telegramPersonalBotToken || telegramBotToken
           : telegramExpenseBotToken || telegramBotToken,
-        personalOnly: isPersonalBotRequest,
+        personalOnly: activePersonalBotRequest,
       });
 
       return res.status(200).json(result);
@@ -159,8 +276,8 @@ export default async function handler(req: any, res: any) {
   }
 
   if (
-    telegramAllowedChatId &&
-    String(chatId) !== String(telegramAllowedChatId)
+    allowedChatId &&
+    String(chatId) !== String(allowedChatId)
   ) {
     return res.status(200).json({
       ok: true,
@@ -172,7 +289,7 @@ export default async function handler(req: any, res: any) {
   const photos = Array.isArray(message.photo) ? message.photo : [];
   const largestPhoto = photos.length > 0 ? getLargestTelegramPhoto(photos) : null;
 
-  if (isPerseoBotRequest || isLikelyPerseoReportMessage(message)) {
+  if (activePerseoBotRequest || (!activePersonalBotRequest && isLikelyPerseoReportMessage(message))) {
     try {
       const result = await processTelegramPerseoReportMessage({
         chatId,
@@ -202,9 +319,9 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  if (isExpenseBotRequest || isPersonalBotRequest) {
-    const activeBotToken = isPersonalBotRequest
-      ? telegramPersonalBotToken || telegramExpenseBotToken || telegramBotToken
+  if (activeExpenseBotRequest || activePersonalBotRequest) {
+    const activeBotToken = activePersonalBotRequest
+      ? telegramPersonalBotToken || telegramBotToken
       : telegramExpenseBotToken || telegramBotToken;
 
     if (largestPhoto?.file_id) {
@@ -213,7 +330,7 @@ export default async function handler(req: any, res: any) {
         message,
         largestPhoto,
         botToken: activeBotToken,
-        personalOnly: isPersonalBotRequest,
+        personalOnly: activePersonalBotRequest,
       });
 
       if (photoResult.handled) {
@@ -225,7 +342,7 @@ export default async function handler(req: any, res: any) {
       chatId,
       message,
       botToken: activeBotToken,
-      personalOnly: isPersonalBotRequest,
+      personalOnly: activePersonalBotRequest,
     });
 
     if (assistantResult.handled) {
@@ -235,15 +352,15 @@ export default async function handler(req: any, res: any) {
     await sendTelegramMessage(
       chatId,
       [
-        isPersonalBotRequest ? "No identifique un gasto personal." : "No identifique una salida.",
+        activePersonalBotRequest ? "No identifique un gasto personal." : "No identifique una salida.",
         "No voy a registrar nada sin una accion clara de gasto.",
         "Ejemplos:",
-        ...(isPersonalBotRequest
+        ...(activePersonalBotRequest
           ? ["2 en platano", "la colita 2", "tanqueo 20", "farmacia 8.50"]
           : ["combustible 20 tienda", "taxi 8 banco", "salida proveedor 50 transito", "revisar correos"]),
       ].join("\n"),
       activeBotToken,
-      { reply_markup: isPersonalBotRequest ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
+      { reply_markup: activePersonalBotRequest ? personalFinanceBotMenuKeyboard() : expenseAssistantMenuKeyboard() }
     );
 
     return res.status(200).json({
@@ -297,9 +414,17 @@ export default async function handler(req: any, res: any) {
       chatId,
       [
         getFriendlyGeminiErrorMessage(error),
-        "No se creó ningún registro incompleto.",
-        `Código pendiente: ${pending.pendingId}`,
-      ].join("\n")
+        "No se cre? ning?n registro incompleto.",
+        `C?digo pendiente: ${pending.pendingId}`,
+      ].join("\n"),
+      undefined,
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "Reintentar ahora", callback_data: `pending:retry:${pending.pendingId}` },
+          ]],
+        },
+      }
     );
 
     return res.status(200).json({

@@ -151,10 +151,10 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     const parsedEnd = parseISO(endDate);
 
     if (Number.isNaN(parsedStart.getTime()) || Number.isNaN(parsedEnd.getTime())) {
-      return 'Seleccione un rango de fechas válido';
+      return 'Seleccione un rango de fechas valido';
     }
 
-    return `${format(parsedStart, 'dd/MM/yyyy')} — ${format(parsedEnd, 'dd/MM/yyyy')}`;
+    return `${format(parsedStart, 'dd/MM/yyyy')} - ${format(parsedEnd, 'dd/MM/yyyy')}`;
   }, [startDate, endDate, dateRangeType]);
 
   const periodTitle = useMemo(() => {
@@ -166,7 +166,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     return 'Periodo especifico';
   }, [dateRangeType]);
 
-  // 1. Gastos por Categoría (Outflows)
+  // 1. Gastos por Categoria (Outflows)
   const expensesByCategory = useMemo(() => {
     const data: Record<string, number> = {};
     filteredMovements
@@ -233,7 +233,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
       .slice(-15);
   }, [filteredMovements]);
 
-  // 2. Ingresos por Día (Últimos 30 días)
+  // 2. Ingresos por Dia (Ultimos 30 dias)
   const dailyIncome = useMemo(() => {
     const data: Record<string, number> = {};
     filteredClosures.forEach(c => {
@@ -243,7 +243,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
     
     return Object.entries(data)
       .map(([name, income]) => ({ name, income }))
-      .slice(-15); // Mostrar últimos 15 días con datos
+      .slice(-15); // Mostrar ultimos 15 dias con datos
   }, [filteredClosures]);
 
   // 3. Ingresos por Mes
@@ -309,7 +309,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
             </button>
             <div>
               <h1 className="text-3xl font-black tracking-tight">Dashboard de Reportes</h1>
-              <p className="text-slate-400">Análisis detallado de ingresos y gastos.</p>
+              <p className="text-slate-400">Analisis detallado de ingresos y gastos.</p>
             </div>
           </div>
           
@@ -334,7 +334,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
             <div className="px-5 py-5 bg-white">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className="text-xs font-bold text-slate-500 uppercase">Gastos totales <span className="text-amber-400">★</span></p>
+                  <p className="text-xs font-bold text-slate-500 uppercase">Gastos totales <span className="text-amber-400">*</span></p>
                   <p className="text-[11px] font-black text-blue-600 uppercase tracking-widest">{periodTitle}</p>
                   <div className="flex items-center gap-2 mt-1">
                     <p className="text-3xl font-black tracking-tight">${totalExpenses.toLocaleString('es-CL')}</p>
@@ -520,7 +520,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                 }}
                 className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
               />
-              <span className="text-slate-600 px-1">—</span>
+              <span className="text-slate-600 px-1">-</span>
               <input
                 type="date"
                 value={endDate}
@@ -541,7 +541,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               <BarChart3 className="w-10 h-10 text-slate-500" />
             </div>
             <h3 className="text-2xl font-black text-white mb-2">Sin datos suficientes</h3>
-            <p className="text-slate-400">Registra cierres y movimientos para ver las estadísticas aquí.</p>
+            <p className="text-slate-400">Registra cierres y movimientos para ver las estadisticas aqui.</p>
           </div>
         ) : filteredClosures.length === 0 && filteredMovements.length === 0 ? (
           <div className="bg-[#1E293B]/50 backdrop-blur-xl border border-white/10 rounded-[2.5rem] p-20 text-center">
@@ -553,7 +553,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {/* Gastos por Categoría */}
+            {/* Gastos por Categoria */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -563,7 +563,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                 <div className="p-2 bg-rose-500/10 rounded-xl">
                   <PieChartIcon className="w-5 h-5 text-rose-400" />
                 </div>
-                <h3 className="text-xl font-black">Gastos por Categoría</h3>
+                <h3 className="text-xl font-black">Gastos por Categoria</h3>
               </div>
               <div className="h-[300px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
@@ -617,7 +617,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               </div>
             </motion.div>
 
-            {/* Gastos por Subcategoría */}
+            {/* Gastos por Subcategoria */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -628,7 +628,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                 <div className="p-2 bg-purple-500/10 rounded-xl">
                   <Tag className="w-5 h-5 text-purple-400" />
                 </div>
-                <h3 className="text-xl font-black">Gastos por Subcategoría</h3>
+                <h3 className="text-xl font-black">Gastos por Subcategoria</h3>
               </div>
               <div className="h-[300px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
@@ -700,7 +700,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               <div className="p-2 bg-rose-500/10 rounded-xl">
                 <TrendingDown className="w-5 h-5 text-rose-400" />
               </div>
-              <h3 className="text-xl font-black">Gastos Diarios (Histórico)</h3>
+              <h3 className="text-xl font-black">Gastos Diarios (Historico)</h3>
             </div>
             <div className="h-[350px] w-full">
               <ResponsiveContainer width="100%" height="100%">
@@ -766,7 +766,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               <div className="p-2 bg-emerald-500/10 rounded-xl">
                 <TrendingUp className="w-5 h-5 text-emerald-400" />
               </div>
-              <h3 className="text-xl font-black">Ingresos Diarios (Últimos 15 días con actividad)</h3>
+              <h3 className="text-xl font-black">Ingresos Diarios (Ultimos 15 dias con actividad)</h3>
             </div>
             <div className="h-[350px] w-full">
               <ResponsiveContainer width="100%" height="100%">
@@ -888,7 +888,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                         </h3>
                         <div className="h-px bg-white/5 flex-1" />
                         <span className="text-[10px] font-black text-rose-500/50 bg-rose-500/5 px-3 py-1 rounded-full">
-                          TOTAL DÍA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
+                          TOTAL DIA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
                         </span>
                       </div>
                       
@@ -904,7 +904,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                                 <div>
                                   <div className="flex items-center gap-2 mb-1">
                                     <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                                      {format(parseISO(m.date), 'HH:mm')} • {m.category || 'GENERAL'}
+                                      {format(parseISO(m.date), 'HH:mm')} - {m.category || 'GENERAL'}
                                     </span>
                                     {m.from && (
                                       <span className="text-[9px] bg-white/10 text-slate-400 px-2 py-0.5 rounded-lg font-black tracking-widest uppercase">
@@ -947,7 +947,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               </div>
               
               <div className="p-6 border-t border-white/5 bg-white/[0.02] flex justify-between items-center px-10">
-                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Resumen Histórico</span>
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Resumen Historico</span>
                 <span className="text-xl font-black font-mono text-rose-500">
                   -${filteredMovements.filter(m => m.type === 'outflow').reduce((s, m) => s + m.amount,0).toLocaleString('es-CL')}
                 </span>

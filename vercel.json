@@ -10,11 +10,11 @@
   "crons": [
     {
       "path": "/api/telegram/retry-pending",
-      "schedule": "0 8 * * *"
+      "schedule": "0 9 * * *"
     },
     {
       "path": "/api/gmail/scan",
-      "schedule": "30 1 * * *"
+      "schedule": "0 2 * * *"
     }
   ],
   "rewrites": [
@@ -33,6 +33,10 @@
     {
       "source": "/gmail/scan",
       "destination": "/api/gmail/scan"
+    },
+    {
+      "source": "/api/integrations/banquitos/closures",
+      "destination": "/api/inventory-admin?integration=banquitos-closures"
     },
     {
       "source": "/perseo/import-report",

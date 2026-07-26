@@ -8,9 +8,15 @@ export default async function handler(req: any, res: any) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
-  const { telegramPersonalBotToken, telegramPersonalSecretToken } = getTelegramConfig();
+  const {
+    telegramPersonalBotToken,
+    telegramPersonalSecretToken,
+  } = getTelegramConfig();
 
-  if (!telegramPersonalBotToken || !telegramPersonalSecretToken) {
+  const botToken = telegramPersonalBotToken;
+  const secretToken = telegramPersonalSecretToken;
+
+  if (!botToken || !secretToken) {
     return res.status(400).json({
       ok: false,
       error: "Falta TELEGRAM_PERSONAL_BOT_TOKEN o TELEGRAM_PERSONAL_SECRET_TOKEN en Vercel.",
@@ -19,16 +25,16 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "");
   const protocol = req.headers["x-forwarded-proto"] || "https";
-  const webhookUrl = `${protocol}://${host}/api/telegram/webhook`;
+  const webhookUrl = `${protocol}://${host}/api/telegram/webhook?bot=personal`;
 
-  const response = await fetch(`https://api.telegram.org/bot${telegramPersonalBotToken}/setWebhook`, {
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       url: webhookUrl,
-      secret_token: telegramPersonalSecretToken,
+      secret_token: secretToken,
       allowed_updates: ["message", "edited_message", "callback_query"],
       drop_pending_updates: false,
     }),
@@ -38,6 +44,7 @@ export default async function handler(req: any, res: any) {
 
   return res.status(response.ok && data.ok ? 200 : 502).json({
     ok: Boolean(response.ok && data.ok),
+    target: "personal",
     webhookUrl,
     telegramOk: Boolean(data.ok),
     description: data.description || null,

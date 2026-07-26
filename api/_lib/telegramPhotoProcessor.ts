@@ -1,5 +1,6 @@
 import { FieldValue } from "firebase-admin/firestore";
 import { auditSavedPerseoReportsForDate, getEcuadorBusinessDateKeyFromValue } from "./perseoAudit.js";
+import { canonicalizeCashierName } from "./cashierNames.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
   buildMovementFromExtraction,
@@ -62,7 +63,8 @@ function cleanResponsible(value: any): string {
     .replace(/^SRA\.?\s*/i, "")
     .trim();
 
-  return (text || "SIN RESPONSABLE").toUpperCase().slice(0, 80);
+  const canonical = canonicalizeCashierName(text || "SIN RESPONSABLE");
+  return (canonical.canonical || "SIN RESPONSABLE").toUpperCase().slice(0, 80);
 }
 
 function normalizeDuplicateText(value: any): string {
@@ -120,6 +122,18 @@ function buildDuplicateKey(params: {
   return `${dateKey}_${amountInCents}_${responsibleKey}_${userKey}`;
 }
 
+function buildClosureIdentityKey(params: {
+  date: any;
+  responsible: string;
+  createdBy: string;
+}) {
+  const dateKey = timestampToBusinessDateKey(params.date);
+  const responsibleKey = normalizeDuplicateText(params.responsible);
+  const userKey = normalizeDuplicateText(params.createdBy);
+
+  return `${dateKey}_${responsibleKey}_${userKey}`;
+}
+
 function getTelegramFallbackDate(message: any) {
   const unixSeconds = Number(message?.date || 0);
 
@@ -128,6 +142,18 @@ function getTelegramFallbackDate(message: any) {
   }
 
   return new Date(unixSeconds * 1000);
+}
+
+function formatEcuadorBusinessDate(value: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Guayaquil",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function formatMoney(value: any) {
@@ -195,6 +221,76 @@ async function replyDuplicate(params: {
       params.reason,
     ].join("\n")
   );
+}
+
+async function findPotentialClosureDuplicate(params: {
+  date: any;
+  amount: number;
+  responsible: string;
+  createdBy: string;
+}) {
+  const businessDate = getEcuadorBusinessDateKeyFromValue(params.date);
+  if (!businessDate || params.amount <= 0) return null;
+
+  const db = getFirebaseAdminDb();
+  const dayStart = new Date(`${businessDate}T00:00:00.000Z`);
+  const dayEnd = new Date(`${businessDate}T23:59:59.999Z`);
+  const canonicalResponsible = canonicalizeCashierName(params.responsible).canonical;
+
+  const snapshot = await db
+    .collection("closures")
+    .where("date", ">=", dayStart)
+    .where("date", "<=", dayEnd)
+    .get();
+
+  const sameCashierClosures = snapshot.docs
+    .map((doc) => ({ id: doc.id, data: doc.data() }))
+    .filter((doc) => {
+      const data = doc.data;
+      const sameCreator = String(data.createdBy || "") === String(params.createdBy || "");
+      const sameResponsible =
+        canonicalizeCashierName(data.responsible || "").canonical === canonicalResponsible;
+
+      return sameCreator && sameResponsible;
+    })
+    .sort((a, b) => {
+      const aHasPerseo = a.data.systemSource === "perseo" || a.data.perseoReportId ? 1 : 0;
+      const bHasPerseo = b.data.systemSource === "perseo" || b.data.perseoReportId ? 1 : 0;
+      if (aHasPerseo !== bHasPerseo) return bHasPerseo - aHasPerseo;
+
+      const aCreated = typeof a.data.createdAt?.toMillis === "function" ? a.data.createdAt.toMillis() : 0;
+      const bCreated = typeof b.data.createdAt?.toMillis === "function" ? b.data.createdAt.toMillis() : 0;
+      return aCreated - bCreated;
+    });
+
+  const matched = sameCashierClosures.find((doc) => {
+    const data = doc.data;
+    const sameAmount = Math.abs(Number(data.physicalAmount || 0) - Number(params.amount || 0)) <= 0.01;
+
+    return sameAmount;
+  });
+
+  if (matched) {
+    return { id: matched.id, data: matched.data, duplicateType: "same-day-cashier-amount" };
+  }
+
+  if (sameCashierClosures.length > 0) {
+    const nearest = sameCashierClosures
+      .map((doc) => ({
+        ...doc,
+        amountDifference: Math.abs(Number(doc.data.physicalAmount || 0) - Number(params.amount || 0)),
+      }))
+      .sort((a, b) => a.amountDifference - b.amountDifference)[0];
+
+    return {
+      id: nearest.id,
+      data: nearest.data,
+      duplicateType: nearest.amountDifference <= 1 ? "same-day-cashier-near-amount" : "same-day-cashier",
+      amountDifference: nearest.amountDifference,
+    };
+  }
+
+  return null;
 }
 
 export function getTelegramMessageKey(chatId: number | string, messageId: number | string) {
@@ -347,17 +443,19 @@ export async function processTelegramPhotoMessage(params: {
 
   const downloaded = await downloadTelegramPhoto(params.largestPhoto.file_id);
 
+  const telegramFallbackDate = getTelegramFallbackDate(params.message);
   const extraction = await extractFinancialDataFromImage({
     imageBuffer: downloaded.imageBuffer,
     mimeType: downloaded.mimeType,
     caption: params.message.caption || "",
+    referenceDate: formatEcuadorBusinessDate(telegramFallbackDate),
     maxAttempts: params.extractionAttempts ?? 3,
     baseDelayMs: 1500,
   });
 
   const parsedMovement = buildMovementFromExtraction(
     extraction,
-    getTelegramFallbackDate(params.message)
+    telegramFallbackDate
   );
 
   const firestoreMovement = removeUndefinedDeep({
@@ -404,8 +502,74 @@ export async function processTelegramPhotoMessage(params: {
     createdBy,
   });
 
-  const closureId = `telegram_${duplicateKey}`;
+  const duplicateIdentityKey = buildClosureIdentityKey({
+    date: firestoreMovement.date,
+    responsible,
+    createdBy,
+  });
+
+  const closureId = `telegram_${duplicateIdentityKey}`;
   const closureRef = db.collection("closures").doc(closureId);
+  const potentialDuplicate = await findPotentialClosureDuplicate({
+    date: firestoreMovement.date,
+    amount,
+    responsible,
+    createdBy,
+  });
+
+  if (potentialDuplicate) {
+    await telegramMessageRef.set(
+      {
+        createdAt: FieldValue.serverTimestamp(),
+        chatId: String(params.chatId),
+        messageId: params.message.message_id,
+        duplicate: true,
+        duplicateType: potentialDuplicate.duplicateType || "same-day-cashier",
+        existingClosureId: potentialDuplicate.id,
+        attemptedAmount: amount,
+        existingAmount: Number(potentialDuplicate.data.physicalAmount || 0),
+        duplicateKey,
+        duplicateIdentityKey,
+        telegramFileUniqueId,
+      },
+      { merge: true }
+    );
+
+    await db.collection("telegram_duplicate_closure_attempts").doc(telegramMessageKey).set(
+      removeUndefinedDeep({
+        createdAt: FieldValue.serverTimestamp(),
+        chatId: String(params.chatId),
+        messageId: params.message.message_id,
+        duplicateType: potentialDuplicate.duplicateType || "same-day-cashier",
+        existingClosureId: potentialDuplicate.id,
+        duplicateKey,
+        duplicateIdentityKey,
+        responsible,
+        attemptedAmount: amount,
+        existingAmount: Number(potentialDuplicate.data.physicalAmount || 0),
+        amountDifference: potentialDuplicate.amountDifference,
+        telegramFileUniqueId,
+        telegramRawExtraction: raw,
+      }),
+      { merge: true }
+    );
+
+    await replyDuplicate({
+      chatId: params.chatId,
+      responsible,
+      amount,
+      reason: "Ya existe un cierre para ese cajero en el mismo dia. No cree otro corte; deje este intento guardado para revision.",
+    });
+
+    return {
+      ok: true,
+      duplicate: true,
+      duplicateType: potentialDuplicate.duplicateType || "same-day-cashier",
+      existingClosureId: potentialDuplicate.id,
+      duplicateKey,
+      duplicateIdentityKey,
+    };
+  }
 
   const transactionResult = await db.runTransaction(async (transaction: any) => {
     const processedMessageDoc = await transaction.get(telegramMessageRef);
@@ -430,6 +594,7 @@ export async function processTelegramPhotoMessage(params: {
           duplicateType: "business-duplicate",
           closureId,
           duplicateKey,
+          duplicateIdentityKey,
           telegramFileUniqueId,
         },
         { merge: true }
@@ -453,8 +618,9 @@ export async function processTelegramPhotoMessage(params: {
       difference: amount,
       status: "safe",
       duplicateKey,
+      duplicateIdentityKey,
       source: "telegram",
-      note: firestoreMovement.description || "",
+      notes: firestoreMovement.description || "",
       telegramChatId: String(params.chatId),
       telegramMessageId: params.message.message_id,
       telegramUserId: params.message.from?.id ? String(params.message.from.id) : null,
@@ -479,6 +645,7 @@ export async function processTelegramPhotoMessage(params: {
         duplicate: false,
         closureId,
         duplicateKey,
+        duplicateIdentityKey,
         telegramFileUniqueId,
       },
       { merge: true }
@@ -519,16 +686,32 @@ export async function processTelegramPhotoMessage(params: {
     : "CONFIRMADO";
 
   if (params.sendSuccessMessage !== false) {
+    const savedBusinessDate = timestampToBusinessDateKey(firestoreMovement.date);
+    const dateCorrectionMessage = firestoreMovement.telegramDateAdjusted
+      ? `Fecha OCR ${firestoreMovement.telegramOriginalDate} corregida automaticamente a ${savedBusinessDate}.`
+      : null;
+
     await sendTelegramMessage(
       params.chatId,
       [
         "Registro creado desde foto.",
         `Tipo: ${tipoTexto}`,
+        `Fecha: ${savedBusinessDate}`,
         `Responsable: ${responsible}`,
         `Monto: USD ${formatMoney(amount)}`,
         `Estado: ${estadoTexto}`,
-      ].join("\n")
+        dateCorrectionMessage,
+      ].filter(Boolean).join("\n")
     );
+  }
+
+  const businessDate = getEcuadorBusinessDateKeyFromValue(firestoreMovement.date);
+  if (businessDate) {
+    try {
+      await auditSavedPerseoReportsForDate({ businessDate });
+    } catch (error) {
+      console.error(`No se pudo cruzar Perseo automaticamente para ${businessDate}:`, error);
+    }
   }
 
   return {
@@ -538,6 +721,7 @@ export async function processTelegramPhotoMessage(params: {
     amount,
     responsible,
     duplicateKey,
+    duplicateIdentityKey,
     review: firestoreMovement.telegramRequiresReview,
   };
 }

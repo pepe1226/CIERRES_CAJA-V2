@@ -2,6 +2,21 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { getFirebaseAdminDb } from "./_lib/firebaseAdmin.js";
 
+const defaultPersonalCategories = [
+  "Alimentacion",
+  "Entretenimiento",
+  "Salud",
+  "Transporte",
+  "Servicios",
+  "Casa",
+  "Familia",
+  "Educacion",
+  "Transferencia familiar",
+  "Otros",
+];
+
+const PERSONAL_MAIN_BOX_ID = "personal-main-box";
+
 async function verifyUser(req: any) {
   const header = String(req.headers.authorization || "");
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -19,24 +34,37 @@ function serializeDate(value: any) {
 
 async function listData() {
   const db = getFirebaseAdminDb();
-  const [boxesSnapshot, movementsSnapshot] = await Promise.all([
+  const [boxesSnapshot, movementsSnapshot, categoriesSnapshot] = await Promise.all([
     db.collection("personalCashBoxes").orderBy("name", "asc").get(),
     db.collection("personalMovements").orderBy("date", "desc").limit(500).get(),
+    db.collection("personalExpenseCategories").orderBy("name", "asc").get(),
   ]);
 
+  const movementCategories = movementsSnapshot.docs
+    .map((doc) => String(doc.data().category || "").trim())
+    .filter(Boolean);
+  const savedCategories = categoriesSnapshot.docs
+    .map((doc) => String(doc.data().name || "").trim())
+    .filter(Boolean);
+  const categories = Array.from(new Set([...defaultPersonalCategories, ...savedCategories, ...movementCategories]));
+
+  const allBoxes = boxesSnapshot.docs.map((doc) => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      name: data.name || "Caja personal",
+      type: data.type || "cash",
+      openingBalance: Number(data.openingBalance || 0),
+      color: data.color || "#8B5CF6",
+      isActive: data.isActive !== false,
+      createdBy: data.createdBy || "",
+    };
+  });
+  const primaryBox = allBoxes.find((box) => box.id === PERSONAL_MAIN_BOX_ID) || allBoxes[0] || null;
+
   return {
-    boxes: boxesSnapshot.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.name || "Caja personal",
-        type: data.type || "cash",
-        openingBalance: Number(data.openingBalance || 0),
-        color: data.color || "#8B5CF6",
-        isActive: data.isActive !== false,
-        createdBy: data.createdBy || "",
-      };
-    }),
+    categories,
+    boxes: primaryBox ? [primaryBox] : [],
     movements: movementsSnapshot.docs.map((doc) => {
       const data = doc.data();
       return {
@@ -46,6 +74,7 @@ async function listData() {
         amount: Number(data.amount || 0),
         description: data.description || "",
         category: data.category || "Otros",
+        subcategory: data.subcategory || null,
         tags: Array.isArray(data.tags) ? data.tags : [],
         fromBoxId: data.fromBoxId || null,
         toBoxId: data.toBoxId || null,
@@ -77,7 +106,8 @@ export default async function handler(req: any, res: any) {
         const name = String(body.name || "").trim().toUpperCase();
         if (!name) return res.status(400).json({ error: "Falta nombre de caja." });
 
-        const ref = await db.collection("personalCashBoxes").add({
+        const ref = db.collection("personalCashBoxes").doc(PERSONAL_MAIN_BOX_ID);
+        await ref.set({
           name,
           type: ["cash", "bank", "wallet", "savings", "other"].includes(body.type) ? body.type : "cash",
           openingBalance: Math.max(0, Number(body.openingBalance || 0)),
@@ -85,6 +115,7 @@ export default async function handler(req: any, res: any) {
           isActive: true,
           createdBy: user.uid,
           createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
         });
 
         return res.status(200).json({ id: ref.id, ...(await listData()) });
@@ -105,6 +136,7 @@ export default async function handler(req: any, res: any) {
           amount,
           description: description.slice(0, 500),
           category: String(body.category || (type === "income" ? "Ingreso personal" : type === "transfer" ? "Transferencia" : "Otros")).slice(0, 100),
+          subcategory: body.subcategory ? String(body.subcategory).slice(0, 100) : null,
           tags: Array.isArray(body.tags) ? body.tags.map(String).slice(0, 8) : [],
           fromBoxId: type === "income" ? null : body.fromBoxId || null,
           toBoxId: type === "expense" ? null : body.toBoxId || null,
@@ -115,6 +147,38 @@ export default async function handler(req: any, res: any) {
         });
 
         return res.status(200).json({ id: ref.id, ...(await listData()) });
+      }
+
+      if (body.kind === "category") {
+        const name = String(body.name || "").replace(/\s+/g, " ").trim().slice(0, 60);
+        if (!name) return res.status(400).json({ error: "Falta nombre de categoria." });
+
+        const ref = db.collection("personalExpenseCategories").doc(
+          name
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^\w\s-]+/g, "")
+            .replace(/\s+/g, "-")
+        );
+
+        await ref.set(
+          {
+            name,
+            normalizedName: name
+              .toLowerCase()
+              .normalize("NFD")
+              .replace(/[\u0300-\u036f]/g, "")
+              .replace(/\s+/g, " "),
+            createdBy: user.uid,
+            source: "app",
+            createdAt: FieldValue.serverTimestamp(),
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        return res.status(200).json({ ...(await listData()) });
       }
 
       return res.status(400).json({ error: "Operacion no soportada." });

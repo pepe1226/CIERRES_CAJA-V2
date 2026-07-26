@@ -81,16 +81,25 @@ import {
   ChevronRight,
   ShieldAlert,
   Eye,
-  Share2
+  Share2,
+  Users,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Home,
+  Boxes
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Dashboard } from './components/Dashboard';
 import { PersonalFinance } from './components/PersonalFinance';
+import { PayrollModule } from './components/PayrollModule';
+import { InventoryModule } from './components/InventoryModule';
+import { BusinessCreditsModule } from './components/BusinessCreditsModule';
 
 
 type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
+type ClosureTableColumnKey = ClosureColumnKey | 'transferAmount' | 'reportedAmount' | 'actions';
 
-type CashBoxStatus = 'safe' | 'transit' | 'bank' | 'personal';
+type CashBoxStatus = 'safe' | 'transit' | 'bank' | 'personal' | 'banquitos';
 type ClosureCashBoxStatus = Exclude<CashBoxStatus, 'personal'>;
 type DisplayClosureStatus = ClosureCashBoxStatus | 'mixed';
 type ClosureAuditStatus = 'all' | 'matched' | 'difference' | 'pending_report' | 'not_audited';
@@ -99,10 +108,44 @@ type ClosureLedgerEntry = {
   hasSplitBalance: boolean;
   balances: Record<CashBoxStatus, number>;
 };
+type AdminModule = {
+  id: 'main' | 'dashboard' | 'inventory' | 'personal' | 'payroll' | 'trips' | 'credits';
+  title: string;
+  subtitle: string;
+  group: 'General' | 'Finanzas' | 'Operacion' | 'Administracion' | 'Personal';
+  Icon: typeof Home;
+  accent: string;
+  iconColor: string;
+  action: () => void;
+};
+type PerseoReportRow = {
+  businessDate: string;
+  responsible?: string | null;
+  responsibleKey?: string | null;
+  cashBox?: string | null;
+  cashBoxKey?: string | null;
+  systemAmount?: number;
+  systemBalance?: number;
+  reportedAmount?: number;
+  transferAmount?: number;
+  raw?: Record<string, unknown>;
+};
+type PerseoReport = {
+  id: string;
+  createdAt?: string | null;
+  businessDates: string[];
+  dailySystemAmountByDate?: Record<string, number> | null;
+  rows: PerseoReportRow[];
+};
+type MissingPerseoClosure = PerseoReportRow & {
+  key: string;
+  reportId: string;
+  responsibleLabel: string;
+};
 
-const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'personal'];
-const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank'];
-const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank'];
+const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos', 'personal'];
+const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
+const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 
 const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
   const normalized = String(status || '')
@@ -113,6 +156,7 @@ const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
 
   if (['bank', 'banco', 'en banco'].includes(normalized)) return 'bank';
   if (['transit', 'transito', 'en transito', 'camino', 'viaje'].includes(normalized)) return 'transit';
+  if (['banquitos', 'banquitos tmch', 'en banquitos'].includes(normalized)) return 'banquitos';
   if (['personal', 'caja personal', 'mi caja', 'caja mia', 'gasto personal', 'gastos personales', 'finanzas personales'].includes(normalized)) return 'personal';
   return 'safe';
 };
@@ -151,17 +195,163 @@ const emptyClosureColumnFilters: Record<ClosureColumnKey, string> = {
   notes: ''
 };
 
+const defaultClosureTableColumnOrder: ClosureTableColumnKey[] = [
+  'date',
+  'responsible',
+  'physicalAmount',
+  'systemBalance',
+  'transferAmount',
+  'systemAmount',
+  'reportedAmount',
+  'difference',
+  'status',
+  'actions'
+];
+
+const fixedClosureTableTrailingColumns: ClosureTableColumnKey[] = ['status', 'actions'];
+const closureMatchTolerance = 0.1001;
+
+const normalizeClosureTableColumnOrder = (value: unknown): ClosureTableColumnKey[] => {
+  if (!Array.isArray(value)) return defaultClosureTableColumnOrder;
+  const allowed = new Set<ClosureTableColumnKey>(defaultClosureTableColumnOrder);
+  const fixed = new Set<ClosureTableColumnKey>(fixedClosureTableTrailingColumns);
+  const ordered = value.filter((column): column is ClosureTableColumnKey =>
+    allowed.has(column as ClosureTableColumnKey) && !fixed.has(column as ClosureTableColumnKey)
+  );
+  const missing = defaultClosureTableColumnOrder.filter(column => !ordered.includes(column) && !fixed.has(column));
+  return [...ordered, ...missing, ...fixedClosureTableTrailingColumns];
+};
+
 const normalizeSearchText = (value: unknown) =>
-  String(value ?? '')
+  String(value || '')
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim();
 
+const compactCashierText = (value: unknown) =>
+  normalizeSearchText(value).replace(/[^a-z0-9]+/g, '');
+
+const normalizeCashierName = (value: unknown) => {
+  const compact = compactCashierText(value);
+  if (!compact) return '';
+
+  const definitions: Array<[string, string[]]> = [
+    ['JOHANNA', ['johanna', 'johana', 'joha', 'yoha', 'soha']],
+    ['YULEXI', ['yulexi', 'yulex', 'yule', 'yuli', 'juli', 'yul', 'pdv3esquina']],
+    ['DAYELI', ['dayeli', 'daye', 'dayi', 'dayveli', 'deyli', 'deili', 'daili']],
+    ['ERICK', ['erick', 'eric', 'erik']],
+  ];
+
+  for (const [canonical, aliases] of definitions) {
+    if (aliases.some(alias => {
+      const aliasCompact = compactCashierText(alias);
+      return compact === aliasCompact || compact.includes(aliasCompact) || aliasCompact.includes(compact);
+    })) {
+      return canonical;
+    }
+  }
+
+  return String(value || '').trim().toUpperCase();
+};
+
+const normalizePerseoCashBoxKey = (value: unknown) =>
+  normalizeSearchText(value)
+    .replace(/\bcaja\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s+/g, '-');
+
+const moneyText = (value: unknown) =>
+  `$${(Number(value) || 0).toLocaleString('es-CL')}`;
+
+const transferPdvAmount = (value: unknown) =>
+  Math.abs(Number(value) || 0);
+
+const normalizeReportHeader = (value: unknown) =>
+  String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const parseReportMoney = (value: unknown) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const text = String(value ?? '').replace(/\s/g, '').replace(/[^\d,.-]/g, '');
+  if (!text) return 0;
+
+  const comma = text.lastIndexOf(',');
+  const dot = text.lastIndexOf('.');
+  const decimalSeparator = comma > dot ? ',' : '.';
+  const normalized = decimalSeparator === ','
+    ? text.replace(/\./g, '').replace(',', '.')
+    : text.replace(/,/g, '');
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getExplicitPerseoTransferAmount = (row: PerseoReportRow) => {
+  const stored = transferPdvAmount(row.transferAmount);
+  if (stored > 0.009) return stored;
+
+  const raw = row.raw && typeof row.raw === 'object' ? row.raw : null;
+  if (!raw) return 0;
+
+  const directKeys = [
+    'transferido_compra_pdv',
+    'transf_compra_pdv',
+    'transf_pdv',
+    'transfer_pdv',
+    'transferencia_compra_pdv',
+    'transferencias_compra_pdv',
+    'transferencias_pdv',
+    'enviado_compra_pdv',
+    'compra_pdv',
+  ];
+
+  for (const key of directKeys) {
+    const value = raw[key];
+    const amount = transferPdvAmount(parseReportMoney(value));
+    if (amount > 0.009) return amount;
+  }
+
+  for (const [key, value] of Object.entries(raw)) {
+    const normalizedKey = normalizeReportHeader(key);
+    const hasTransferTerm =
+      normalizedKey.includes('transf') ||
+      normalizedKey.includes('transfer') ||
+      normalizedKey.includes('transferido') ||
+      normalizedKey.includes('transferencia');
+    const hasPdvContext = normalizedKey.includes('pdv') || normalizedKey.includes('compra');
+    const isWrongField =
+      normalizedKey.includes('venta') ||
+      normalizedKey.includes('saldo') ||
+      normalizedKey.includes('reportado') ||
+      normalizedKey.includes('fisico') ||
+      normalizedKey.includes('diferencia');
+
+    if (!hasTransferTerm || !hasPdvContext || isWrongField) continue;
+
+    const amount = transferPdvAmount(parseReportMoney(value));
+    if (amount > 0.009) return amount;
+  }
+
+  return 0;
+};
+
+const createPerseoRowKey = (businessDate: string, row: PerseoReportRow, index: number) => {
+  const responsibleKey = normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox);
+  const cashBoxKey = normalizePerseoCashBoxKey(row.cashBox || row.cashBoxKey || 'sin-caja');
+  const balance = Number(row.systemBalance || 0).toFixed(2);
+  return `${businessDate}|${responsibleKey}|${cashBoxKey}|${balance}|${index}`;
+};
+
 const getCashBoxLabel = (status?: string | null) => {
   const normalized = normalizeCashBoxStatus(status);
   if (normalized === 'transit') return 'En Transito';
   if (normalized === 'bank') return 'En Banco';
+  if (normalized === 'banquitos') return 'En Banquitos';
   if (normalized === 'personal') return 'Caja Personal';
   return 'En Tienda';
 };
@@ -176,7 +366,7 @@ const getClosureAuditInfo = (closure: ShiftClosure) => {
   if (hasPerseoReport) {
     const isDifference =
       closure.perseoAuditStatus === 'difference' ||
-      Math.abs(difference) > 0.009;
+      Math.abs(difference) > closureMatchTolerance;
 
     return {
       status: isDifference ? 'difference' : 'matched',
@@ -199,7 +389,7 @@ const getClosureAuditInfo = (closure: ShiftClosure) => {
 
   return {
     status: 'not_audited',
-    label: 'Sin auditoría',
+    label: 'Sin auditoria',
     detail: 'Cierre manual o sin venta de sistema asociada',
     className: 'bg-slate-500/10 text-slate-500 border-slate-500/20'
   } as const;
@@ -333,7 +523,7 @@ const getMovementDefaults = (
   };
 };
 
-const getClosureSearchValues = (closure: ShiftClosure) => {
+const getClosureSearchValues = (closure: ShiftClosure, displayStatus?: ClosureCashBoxStatus) => {
   const parsedDate = parseISO(closure.date);
   const dateValues = Number.isNaN(parsedDate.getTime())
     ? [closure.date]
@@ -352,15 +542,19 @@ const getClosureSearchValues = (closure: ShiftClosure) => {
     closure.systemAmount,
     closure.systemBalance,
     closure.difference,
-    closure.status,
-    getClosureStatusLabel(closure.status),
+    displayStatus || closure.status,
+    getClosureStatusLabel(displayStatus || closure.status),
     closure.notes,
     closure.tripId,
     closure.id
   ];
 };
 
-const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColumnKey) => {
+const getClosureColumnSearchValue = (
+  closure: ShiftClosure,
+  column: ClosureColumnKey,
+  displayStatus?: ClosureCashBoxStatus
+) => {
   const parsedDate = parseISO(closure.date);
   const dateValue = Number.isNaN(parsedDate.getTime())
     ? closure.date
@@ -373,7 +567,7 @@ const getClosureColumnSearchValue = (closure: ShiftClosure, column: ClosureColum
     systemAmount: closure.systemAmount,
     systemBalance: closure.systemBalance,
     difference: closure.difference,
-    status: `${closure.status || ''} ${getClosureStatusLabel(closure.status)}`,
+    status: `${displayStatus || closure.status || ''} ${getClosureStatusLabel(displayStatus || closure.status)}`,
     notes: closure.notes || ''
   };
 
@@ -384,12 +578,24 @@ function AppContent() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [closures, setClosures] = useState<ShiftClosure[]>([]);
+  const [perseoReports, setPerseoReports] = useState<PerseoReport[]>([]);
   const [movements, setMovements] = useState<Movement[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<ClosureColumnKey, string>>(emptyClosureColumnFilters);
-  const [currentView, setCurrentView] = useState<'main' | 'dashboard' | 'personal'>('main');
+  const [closureTableColumnOrder, setClosureTableColumnOrder] = useState<ClosureTableColumnKey[]>(() => {
+    if (typeof window === 'undefined') return defaultClosureTableColumnOrder;
+    try {
+      const stored = window.localStorage.getItem('closureTableColumnOrder');
+      return normalizeClosureTableColumnOrder(stored ? JSON.parse(stored) : null);
+    } catch {
+      return defaultClosureTableColumnOrder;
+    }
+  });
+  const [draggedClosureColumn, setDraggedClosureColumn] = useState<ClosureTableColumnKey | null>(null);
+  const [currentView, setCurrentView] = useState<'main' | 'dashboard' | 'personal' | 'payroll' | 'inventory' | 'credits'>('main');
+  const [isModuleSidebarOpen, setIsModuleSidebarOpen] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   const [trips, setTrips] = useState<CollectionTrip[]>([]);
@@ -487,6 +693,14 @@ function AppContent() {
       setTimeout(() => dateInputRef.current?.focus(), 100);
     }
   }, [isInlineAdding]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('closureTableColumnOrder', JSON.stringify(closureTableColumnOrder));
+    } catch {
+      // localStorage can be unavailable in restricted browser modes.
+    }
+  }, [closureTableColumnOrder]);
   const [inlineAddValues, setInlineAddValues] = useState<Partial<ShiftClosure>>({
     date: new Date().toISOString(),
     responsible: '',
@@ -521,6 +735,80 @@ function AppContent() {
   const [historyView, setHistoryView] = useState<{ type: string; title: string } | null>(null);
   const reportRef = useRef<HTMLDivElement>(null);
 
+  const adminModules: AdminModule[] = [
+    {
+      id: 'main',
+      title: 'Inicio',
+      subtitle: 'Centro de modulos',
+      Icon: Home,
+      group: 'General',
+      accent: 'from-slate-500/20 to-slate-400/10',
+      iconColor: 'text-slate-200',
+      action: () => setCurrentView('main'),
+    },
+    {
+      id: 'dashboard',
+      title: 'Analitica',
+      subtitle: 'Indicadores y resumen',
+      Icon: LayoutDashboard,
+      group: 'Finanzas',
+      accent: 'from-violet-500/20 to-fuchsia-500/10',
+      iconColor: 'text-violet-300',
+      action: () => setCurrentView('dashboard'),
+    },
+    {
+      id: 'credits',
+      title: 'Creditos',
+      subtitle: 'Prestamos, cuotas y saldo',
+      Icon: CreditCard,
+      group: 'Finanzas',
+      accent: 'from-amber-500/20 to-yellow-500/10',
+      iconColor: 'text-amber-300',
+      action: () => setCurrentView('credits'),
+    },
+    {
+      id: 'inventory',
+      title: 'Inventario',
+      subtitle: 'Stock y cobertura desde Perseo',
+      Icon: Boxes,
+      group: 'Operacion',
+      accent: 'from-cyan-500/20 to-sky-500/10',
+      iconColor: 'text-cyan-300',
+      action: () => setCurrentView('inventory'),
+    },
+    {
+      id: 'personal',
+      title: 'Finanzas Personales',
+      subtitle: 'Cajas y movimientos propios',
+      Icon: Wallet,
+      group: 'Personal',
+      accent: 'from-sky-500/20 to-blue-500/10',
+      iconColor: 'text-sky-300',
+      action: () => setCurrentView('personal'),
+    },
+    {
+      id: 'payroll',
+      title: 'Sueldos',
+      subtitle: 'Sueldos, anticipos y pagos',
+      Icon: Users,
+      group: 'Administracion',
+      accent: 'from-emerald-500/20 to-cyan-500/10',
+      iconColor: 'text-emerald-300',
+      action: () => setCurrentView('payroll'),
+    },
+    {
+      id: 'trips',
+      title: 'Recolecciones',
+      subtitle: 'Viajes y traslados',
+      Icon: Truck,
+      group: 'Operacion',
+      accent: 'from-amber-500/20 to-orange-500/10',
+      iconColor: 'text-amber-300',
+      action: () => setViewingTripId('LIST'),
+    },
+  ];
+
+  const activeModuleId = currentView === 'main' ? 'main' : currentView;
   useEffect(() => {
   const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
     try {
@@ -567,13 +855,34 @@ function AppContent() {
 
     const qClosures = query(collection(db, 'closures'), orderBy('date', 'desc'));
     const unsubscribeClosures = onSnapshot(qClosures, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({
-        ...doc.data(),
-        id: doc.id,
-        date: (doc.data().date as Timestamp).toDate().toISOString()
-      })) as ShiftClosure[];
+      const data = snapshot.docs.map(snapshotDoc => {
+        const raw = snapshotDoc.data();
+        return {
+          ...raw,
+          id: snapshotDoc.id,
+          date: (raw.date as Timestamp).toDate().toISOString(),
+          cashBoxBalancesUpdatedAt: raw.cashBoxBalancesUpdatedAt?.toDate
+            ? raw.cashBoxBalancesUpdatedAt.toDate().toISOString()
+            : undefined
+        };
+      }) as ShiftClosure[];
       setClosures(data);
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'closures'));
+
+    const qPerseoReports = query(collection(db, 'perseo_reports'), orderBy('createdAt', 'desc'));
+    const unsubscribePerseoReports = onSnapshot(qPerseoReports, (snapshot) => {
+      const data = snapshot.docs.map(reportDoc => {
+        const raw = reportDoc.data();
+        return {
+          id: reportDoc.id,
+          createdAt: raw.createdAt?.toDate ? raw.createdAt.toDate().toISOString() : null,
+          businessDates: Array.isArray(raw.businessDates) ? raw.businessDates : [],
+          dailySystemAmountByDate: raw.dailySystemAmountByDate || null,
+          rows: Array.isArray(raw.rows) ? raw.rows : [],
+        } as PerseoReport;
+      });
+      setPerseoReports(data);
+    }, (err) => handleFirestoreError(err, OperationType.LIST, 'perseo_reports'));
 
     const qMovements = query(collection(db, 'movements'), orderBy('date', 'desc'));
     const unsubscribeMovements = onSnapshot(qMovements, (snapshot) => {
@@ -609,6 +918,7 @@ function AppContent() {
 
     return () => {
       unsubscribeClosures();
+      unsubscribePerseoReports();
       unsubscribeMovements();
       unsubscribeTrips();
     };
@@ -652,19 +962,22 @@ function AppContent() {
   const getNextStatus = (currentStatus: string) => {
     if (currentStatus === 'safe') return 'transit';
     if (currentStatus === 'transit') return 'bank';
+    if (currentStatus === 'bank') return 'banquitos';
     return 'safe';
   };
 
   const handleExportCSV = async () => {
     setIsExporting(true);
     try {
-      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'Físico', 'Diferencia', 'Estado', 'Auditoría', 'Notas'].join(';');
+      const headers = ['Fecha', 'Responsable', 'Fisico', 'Saldo Esperado', 'Transf. PDV', 'Venta Sistema', 'Reportado', 'Diferencia', 'Estado', 'Auditoria', 'Notas'].join(';');
       const rows = closures.map(c => [
         format(parseISO(c.date), 'dd/MM/yyyy HH:mm'),
         c.responsible,
-        c.systemAmount,
-        c.systemBalance,
         c.physicalAmount,
+        c.systemBalance,
+        transferPdvAmount(c.transferAmount),
+        c.systemAmount,
+        Number(c.reportedAmount) || 0,
         c.difference,
         getClosureDisplayStatus(c),
         getClosureAuditInfo(c).label,
@@ -689,24 +1002,41 @@ function AppContent() {
 
   const closureLedgerById = useMemo(() => {
     const balances: Record<string, Record<CashBoxStatus, number>> = {};
+    const balanceBaselineByClosureId: Record<string, number> = {};
 
     closures.forEach(closure => {
       if (!closure.id) return;
 
-      balances[closure.id] = {
-        safe: 0,
-        transit: 0,
-        bank: 0,
-        personal: 0
-      };
-
       const initialStatus = normalizeClosureCashBoxStatus(closure.status);
-      balances[closure.id][initialStatus] = Number(closure.physicalAmount) || 0;
+      const persistedBalances = closure.cashBoxBalances;
+      const hasPersistedBalances = persistedBalances && typeof persistedBalances === 'object';
+
+      balances[closure.id] = hasPersistedBalances
+        ? {
+            safe: Math.max(0, Number(persistedBalances.safe) || 0),
+            transit: Math.max(0, Number(persistedBalances.transit) || 0),
+            bank: Math.max(0, Number(persistedBalances.bank) || 0),
+            banquitos: Math.max(0, Number(persistedBalances.banquitos) || 0),
+            personal: 0
+          }
+        : {
+            safe: initialStatus === 'safe' ? Number(closure.physicalAmount) || 0 : 0,
+            transit: initialStatus === 'transit' ? Number(closure.physicalAmount) || 0 : 0,
+            bank: initialStatus === 'bank' ? Number(closure.physicalAmount) || 0 : 0,
+            banquitos: initialStatus === 'banquitos' ? Number(closure.physicalAmount) || 0 : 0,
+            personal: 0
+          };
+
+      const baselineTime = closure.cashBoxBalancesUpdatedAt
+        ? new Date(closure.cashBoxBalancesUpdatedAt).getTime()
+        : Number.NaN;
+      balanceBaselineByClosureId[closure.id] = Number.isNaN(baselineTime) ? 0 : baselineTime;
     });
 
     const orderedTransfers = [...movements]
       .filter(movement =>
         (movement.type === 'transfer' || movement.type === 'internal_transfer') &&
+        movement.source !== 'status_control' &&
         movement.from &&
         movement.to
       )
@@ -727,14 +1057,16 @@ function AppContent() {
       const candidateClosures = [...closures]
         .filter(closure => {
           if (!closure.id) return false;
+          if (movement.closureId && movement.closureId !== closure.id) return false;
 
           const closureTime = new Date(closure.date).getTime();
+          const baselineTime = balanceBaselineByClosureId[closure.id] || 0;
 
           if (Number.isNaN(movementTime) || Number.isNaN(closureTime)) return true;
 
-          return closureTime <= movementTime;
+          return closureTime <= movementTime && movementTime > baselineTime;
         })
-        // Al mover dinero físicamente, normalmente se toma primero lo más reciente disponible.
+        // Al mover dinero fisicamente, normalmente se toma primero lo mas reciente disponible.
         .sort((a, b) => b.date.localeCompare(a.date));
 
       for (const closure of candidateClosures) {
@@ -808,11 +1140,11 @@ function AppContent() {
 
       const matchesStatus = filterStatus === 'all' || derivedStatus === filterStatus;
       const matchesResponsible = filterResponsible === 'all' || c.responsible === filterResponsible;
-      const matchesSearch = !normalizedGlobalSearch || getClosureSearchValues(c).some(value =>
+      const matchesSearch = !normalizedGlobalSearch || getClosureSearchValues(c, derivedStatus).some(value =>
         normalizeSearchText(value).includes(normalizedGlobalSearch)
       );
       const matchesColumnFilters = activeColumnFilters.every(([column, value]) =>
-        normalizeSearchText(getClosureColumnSearchValue(c, column)).includes(value)
+        normalizeSearchText(getClosureColumnSearchValue(c, column, derivedStatus)).includes(value)
       );
       const matchesHideCollected = !hideCollected || !c.tripId;
       const matchesOnlyStoreClosures = !showOnlyStoreClosures || isClosureAvailableForTrip(c);
@@ -847,13 +1179,241 @@ function AppContent() {
     const allSafe = normalizedStatuses.every(status => status === 'safe');
     const allTransit = normalizedStatuses.every(status => status === 'transit');
     const allBank = normalizedStatuses.every(status => status === 'bank');
+    const allBanquitos = normalizedStatuses.every(status => status === 'banquitos');
 
+    if (allBanquitos) return 'banquitos';
     if (allBank) return 'bank';
     if (allTransit) return 'transit';
     if (allSafe && !hasSplitClosure) return 'safe';
 
     return 'mixed';
   };
+
+  const latestPerseoRowsByDate = useMemo(() => {
+    const rowsByDate = new Map<string, { createdAt: string; reportId: string; rows: PerseoReportRow[]; dailySystemAmount?: number }>();
+
+    perseoReports.forEach(report => {
+      const createdAt = String(report.createdAt || '');
+      const groupedRows = (report.rows || []).reduce<Record<string, PerseoReportRow[]>>((result, row) => {
+        const businessDate = String(row.businessDate || '').trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) return result;
+        if (!result[businessDate]) result[businessDate] = [];
+        result[businessDate].push(row);
+        return result;
+      }, {});
+
+      Object.entries(groupedRows).forEach(([businessDate, rows]) => {
+        const existing = rowsByDate.get(businessDate);
+        if (!existing || createdAt.localeCompare(existing.createdAt) > 0) {
+          rowsByDate.set(businessDate, {
+            createdAt,
+            reportId: report.id,
+            rows,
+            dailySystemAmount: Number(report.dailySystemAmountByDate?.[businessDate]) || undefined,
+          });
+        }
+      });
+    });
+
+    return rowsByDate;
+  }, [perseoReports]);
+
+  const perseoDailyTotalsByDate = useMemo(() => {
+    return Array.from(latestPerseoRowsByDate.entries()).reduce<Record<string, { systemAmount: number; systemBalance: number; reportedAmount: number; transferAmount: number; reportId: string }>>((result, [day, report]) => {
+      result[day] = report.rows.reduce((acc, row) => ({
+        systemAmount: acc.systemAmount + (Number(row.systemAmount) || 0),
+        systemBalance: acc.systemBalance + (Number(row.systemBalance) || 0),
+        reportedAmount: acc.reportedAmount + (Number(row.reportedAmount) || 0),
+        transferAmount: acc.transferAmount + getExplicitPerseoTransferAmount(row),
+        reportId: report.reportId,
+      }), { systemAmount: 0, systemBalance: 0, reportedAmount: 0, transferAmount: 0, reportId: report.reportId });
+      return result;
+    }, {});
+  }, [latestPerseoRowsByDate]);
+
+  const perseoClosureMatchById = useMemo(() => {
+    const matches: Record<string, { key: string; reportId: string; row: PerseoReportRow }> = {};
+    const usedRows = new Set<string>();
+
+    const closuresByDate = closures.reduce<Record<string, ShiftClosure[]>>((result, closure) => {
+      if (!closure.id) return result;
+      const day = format(parseISO(closure.date), 'yyyy-MM-dd');
+      if (!result[day]) result[day] = [];
+      result[day].push(closure);
+      return result;
+    }, {});
+
+    Object.entries(closuresByDate).forEach(([day, dayClosures]) => {
+      const report = latestPerseoRowsByDate.get(day);
+      if (!report) return;
+
+      const candidateRows = report.rows.map((row, index) => ({
+        row,
+        index,
+        key: createPerseoRowKey(day, row, index),
+        cashier: normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox),
+        cashBox: normalizePerseoCashBoxKey(row.cashBox || row.cashBoxKey || 'sin-caja'),
+        balance: Number(row.systemBalance) || 0,
+      }));
+
+      [...dayClosures]
+        .sort((a, b) => Math.abs(Number(b.physicalAmount) || 0) - Math.abs(Number(a.physicalAmount) || 0))
+        .forEach(closure => {
+          if (!closure.id) return;
+
+          const perseoRaw = closure.perseoRaw as Record<string, unknown> | undefined;
+          const cashier = normalizeCashierName(perseoRaw?.responsable || perseoRaw?.cajero || closure.responsible);
+          const cashBox = normalizePerseoCashBoxKey(perseoRaw?.caja);
+          const physicalAmount = Number(closure.physicalAmount) || 0;
+          const storedSystemBalance = Number(closure.systemBalance) || 0;
+
+          let best = candidateRows
+            .filter(candidate => !usedRows.has(candidate.key) && candidate.cashier === cashier)
+            .map(candidate => {
+              const physicalDistance = Math.abs(physicalAmount - candidate.balance);
+              const storedDistance = Math.abs(storedSystemBalance - candidate.balance);
+              const cashBoxBonus = cashBox && cashBox === candidate.cashBox ? -0.05 : 0;
+              const score = physicalDistance <= closureMatchTolerance
+                ? physicalDistance + cashBoxBonus
+                : storedDistance <= 0.009 || cashBoxBonus < 0
+                  ? 100 + storedDistance + cashBoxBonus
+                  : 1000 + physicalDistance;
+
+              return { ...candidate, physicalDistance, storedDistance, score };
+            })
+            .sort((a, b) => a.score - b.score)[0];
+
+          let isConfidentMatch = Boolean(best) && (
+            best.physicalDistance <= closureMatchTolerance ||
+            best.storedDistance <= 0.009 ||
+            Boolean(cashBox && cashBox === best.cashBox)
+          );
+
+          if (!isConfidentMatch) {
+            const amountOnlyMatches = candidateRows
+              .filter(candidate => !usedRows.has(candidate.key))
+              .map(candidate => ({
+                ...candidate,
+                physicalDistance: Math.abs(physicalAmount - candidate.balance),
+                storedDistance: Math.abs(storedSystemBalance - candidate.balance),
+                score: Math.abs(physicalAmount - candidate.balance),
+              }))
+              .filter(candidate => candidate.physicalDistance <= closureMatchTolerance)
+              .sort((a, b) => a.score - b.score);
+
+            const first = amountOnlyMatches[0];
+            const second = amountOnlyMatches[1];
+            if (first && (!second || Math.abs(first.score - second.score) > 0.009)) {
+              best = first;
+              isConfidentMatch = true;
+            }
+          }
+
+          if (!isConfidentMatch) return;
+
+          usedRows.add(best.key);
+          matches[closure.id] = {
+            key: best.key,
+            reportId: report.reportId,
+            row: best.row,
+          };
+        });
+    });
+
+    return matches;
+  }, [closures, latestPerseoRowsByDate]);
+
+  const missingPerseoClosuresByDate = useMemo(() => {
+    const coveredRowKeys = new Set<string>();
+    Object.values(perseoClosureMatchById).forEach(match => coveredRowKeys.add(match.key));
+
+    closures.forEach(closure => {
+      const day = format(parseISO(closure.date), 'yyyy-MM-dd');
+      const perseoRaw = closure.perseoRaw as Record<string, unknown> | undefined;
+      const cashier = normalizeCashierName(perseoRaw?.responsable || perseoRaw?.cajero || closure.responsible);
+      const cashBox = normalizePerseoCashBoxKey(perseoRaw?.caja);
+      if (cashBox) {
+        const report = latestPerseoRowsByDate.get(day);
+        const rowIndex = report?.rows.findIndex(row =>
+          normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox) === cashier &&
+          normalizePerseoCashBoxKey(row.cashBox || row.cashBoxKey || 'sin-caja') === cashBox
+        );
+        if (report && rowIndex !== undefined && rowIndex >= 0) {
+          coveredRowKeys.add(createPerseoRowKey(day, report.rows[rowIndex], rowIndex));
+        }
+      }
+      if (Number(closure.systemBalance) > 0) {
+        const report = latestPerseoRowsByDate.get(day);
+        const rowIndex = report?.rows.findIndex(row =>
+          normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox) === cashier &&
+          Math.abs((Number(row.systemBalance) || 0) - (Number(closure.systemBalance) || 0)) <= 0.009
+        );
+        if (report && rowIndex !== undefined && rowIndex >= 0) {
+          coveredRowKeys.add(createPerseoRowKey(day, report.rows[rowIndex], rowIndex));
+        }
+      }
+    });
+
+    const reportRows = Array.from(latestPerseoRowsByDate.entries()).flatMap(([businessDate, report]) => {
+      return report.rows
+        .map((row, index) => {
+        const responsibleLabel = String(row.responsible || row.responsibleKey || row.cashBox || row.cashBoxKey || 'SIN RESPONSABLE').trim().toUpperCase();
+        const responsibleKey = normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox);
+        const hasSystemValue = (Number(row.systemAmount) || 0) > 0 || Math.abs(Number(row.systemBalance) || 0) > 0.009;
+          if (!responsibleKey || !hasSystemValue) return null;
+
+          const cashBoxKey = normalizePerseoCashBoxKey(row.cashBox || row.cashBoxKey || 'sin-caja');
+          const key = createPerseoRowKey(businessDate, row, index);
+          if (coveredRowKeys.has(key)) return null;
+          return {
+            ...row,
+            key,
+            reportId: report.reportId,
+            businessDate,
+            responsibleLabel,
+            responsibleKey,
+            cashBoxKey,
+          } as MissingPerseoClosure;
+        })
+        .filter(Boolean) as MissingPerseoClosure[];
+    });
+
+    const consolidatedReportRows = Object.values(reportRows.reduce<Record<string, MissingPerseoClosure>>((result, row) => {
+      const existing = result[row.key];
+      if (!existing) {
+        result[row.key] = row;
+        return result;
+      }
+
+      existing.systemAmount = (Number(existing.systemAmount) || 0) + (Number(row.systemAmount) || 0);
+      existing.systemBalance = (Number(existing.systemBalance) || 0) + (Number(row.systemBalance) || 0);
+      existing.reportedAmount = (Number(existing.reportedAmount) || 0) + (Number(row.reportedAmount) || 0);
+      existing.transferAmount = transferPdvAmount(existing.transferAmount) + getExplicitPerseoTransferAmount(row);
+      return result;
+    }, {}));
+
+    const rowsByCashier = consolidatedReportRows
+      .filter(row => !coveredRowKeys.has(row.key))
+      .reduce<Record<string, MissingPerseoClosure[]>>((result, row) => {
+        const key = `${row.businessDate}|${normalizeCashierName(row.responsibleKey || row.responsibleLabel)}`;
+        if (!result[key]) result[key] = [];
+        result[key].push(row);
+        return result;
+      }, {});
+
+    const missingRows = Object.entries(rowsByCashier).flatMap(([cashierKey, rows]) => {
+      void cashierKey;
+      return rows
+        .sort((a, b) => Math.abs(Number(b.systemBalance) || 0) - Math.abs(Number(a.systemBalance) || 0))
+    });
+
+    return missingRows.reduce<Record<string, MissingPerseoClosure[]>>((result, row) => {
+      const day = row.businessDate;
+      if (!result[day]) result[day] = [];
+      result[day].push(row);
+      return result;
+    }, {});
+  }, [closures, latestPerseoRowsByDate, perseoClosureMatchById]);
 
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
@@ -863,44 +1423,105 @@ function AppContent() {
       groups[day].push(c);
     });
 
+    Object.keys(missingPerseoClosuresByDate).forEach(day => {
+      const dayDate = parseISO(`${day}T12:00:00.000Z`);
+      const start = startOfDay(parseISO(filterStartDate));
+      const end = endOfDay(parseISO(filterEndDate));
+      const matchesDate = filterDateRangeType === 'siempre' || isWithinInterval(dayDate, { start, end });
+      if (!matchesDate) return;
+
+      const rows = missingPerseoClosuresByDate[day] || [];
+      const matchesResponsible = filterResponsible === 'all' || rows.some(row => normalizeCashierName(row.responsibleLabel) === normalizeCashierName(filterResponsible));
+      const matchesSearch = !debouncedSearchTerm || rows.some(row =>
+        [
+          row.businessDate,
+          row.responsibleLabel,
+          row.cashBox,
+          row.systemAmount,
+          row.systemBalance,
+          row.reportedAmount,
+          row.transferAmount,
+        ].some(value => normalizeSearchText(value).includes(normalizeSearchText(debouncedSearchTerm)))
+      );
+      const matchesAudit = filterAudit === 'all' || filterAudit === 'pending_report';
+      const matchesStatus = filterStatus === 'all';
+
+      if (matchesResponsible && matchesSearch && matchesAudit && matchesStatus && !groups[day]) {
+        groups[day] = [];
+      }
+    });
+
     return Object.entries(groups)
       .sort(([a], [b]) => b.localeCompare(a))
       .map(([date, items]) => {
         const sortedItems = [...items].sort((a,b) => b.date.localeCompare(a.date));
+        let missingRows = missingPerseoClosuresByDate[date] || [];
+        const perseoDailyTotals = perseoDailyTotalsByDate[date] || null;
 
         const totals = sortedItems.reduce((acc, curr) => ({
           physicalAmount: acc.physicalAmount + curr.physicalAmount,
-          systemAmount: acc.systemAmount + curr.systemAmount,
-          systemBalance: acc.systemBalance + curr.systemBalance,
-          difference: acc.difference + curr.difference
-        }), { physicalAmount: 0, systemAmount: 0, systemBalance: 0, difference: 0 });
+          systemAmount: perseoDailyTotals ? acc.systemAmount : acc.systemAmount + curr.systemAmount,
+          transferAmount: perseoDailyTotals ? acc.transferAmount : acc.transferAmount + transferPdvAmount(curr.transferAmount),
+          systemBalance: perseoDailyTotals ? acc.systemBalance : acc.systemBalance + curr.systemBalance,
+          reportedAmount: perseoDailyTotals ? acc.reportedAmount : acc.reportedAmount + (Number(curr.reportedAmount) || 0),
+          difference: 0
+        }), {
+          physicalAmount: 0,
+          systemAmount: perseoDailyTotals?.systemAmount || 0,
+          transferAmount: perseoDailyTotals?.transferAmount || 0,
+          systemBalance: perseoDailyTotals?.systemBalance || 0,
+          reportedAmount: perseoDailyTotals?.reportedAmount || 0,
+          difference: 0
+        });
+        totals.difference = Number((totals.physicalAmount - totals.systemBalance).toFixed(2));
+
+        if (
+          missingRows.length > 0 &&
+          sortedItems.length > 0 &&
+          perseoDailyTotals &&
+          Math.abs(totals.difference) <= closureMatchTolerance * Math.max(1, sortedItems.length)
+        ) {
+          missingRows = [];
+        }
 
         const status = getDayStatusFromItems(sortedItems);
 
-        return { date, items: sortedItems, totals, status };
+        return { date, items: sortedItems, missingRows, totals, status };
       });
-  }, [filteredClosures, derivedClosureStatusById, closureLedgerById]);
+  }, [filteredClosures, derivedClosureStatusById, closureLedgerById, missingPerseoClosuresByDate, perseoDailyTotalsByDate, filterStartDate, filterEndDate, filterDateRangeType, filterResponsible, debouncedSearchTerm, filterAudit, filterStatus]);
 
 
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
-    const closuresInBox = status === 'personal'
+    const closureMoney = status === 'personal'
       ? 0
-      : closures
-        .filter(c => closureStatusMatches(c.status, status))
-        .reduce((acc, curr) => acc + curr.physicalAmount, 0);
-    const movementsIn = movements
-      .filter(m => cashBoxValueMatches(m.to, status))
-      .reduce((acc, curr) => acc + curr.amount, 0);
-    const movementsOut = movements
-      .filter(m => cashBoxValueMatches(m.from, status))
-      .reduce((acc, curr) => acc + curr.amount, 0);
+      : Object.values(closureLedgerById).reduce((acc, ledger) => acc + (Number(ledger.balances[status]) || 0), 0);
 
-    return closuresInBox + movementsIn - movementsOut;
-  }, [closures, movements]);
+    const movementAdjustments = movements.reduce((acc, movement) => {
+      const movementType = movement.type;
+      const from = movement.from ? normalizeCashBoxStatus(movement.from) : null;
+      const to = movement.to ? normalizeCashBoxStatus(movement.to) : null;
+      const amount = Number(movement.amount) || 0;
+
+      if (amount <= 0) return acc;
+
+      if (movementType === 'transfer' || movementType === 'internal_transfer') {
+        // Transfers between business boxes are already allocated through closureLedgerById.
+        if (from !== 'personal' && to !== 'personal') return acc;
+      }
+
+      let next = acc;
+      if (to && cashBoxValueMatches(to, status)) next += amount;
+      if (from && cashBoxValueMatches(from, status)) next -= amount;
+      return next;
+    }, 0);
+
+    return Number((closureMoney + movementAdjustments).toFixed(2));
+  }, [closureLedgerById, movements]);
 
   const accumulatedSafeTotal = useMemo(() => getAccumulatedBoxTotal('safe'), [getAccumulatedBoxTotal]);
   const accumulatedTransitTotal = useMemo(() => getAccumulatedBoxTotal('transit'), [getAccumulatedBoxTotal]);
   const accumulatedBankTotal = useMemo(() => getAccumulatedBoxTotal('bank'), [getAccumulatedBoxTotal]);
+  const accumulatedBanquitosTotal = useMemo(() => getAccumulatedBoxTotal('banquitos'), [getAccumulatedBoxTotal]);
   const accumulatedPersonalTotal = useMemo(() => getAccumulatedBoxTotal('personal'), [getAccumulatedBoxTotal]);
 
   const applyOutflowPeriod = useCallback((period: 'este_mes' | 'mes_pasado' | 'anio_actual' | 'siempre' | 'custom') => {
@@ -962,9 +1583,10 @@ function AppContent() {
     const normalizedBox = normalizeCashBoxStatus(box);
     if (normalizedBox === 'transit') return accumulatedTransitTotal;
     if (normalizedBox === 'bank') return accumulatedBankTotal;
+    if (normalizedBox === 'banquitos') return accumulatedBanquitosTotal;
     if (normalizedBox === 'personal') return accumulatedPersonalTotal;
     return accumulatedSafeTotal;
-  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal, accumulatedPersonalTotal]);
+  }, [accumulatedSafeTotal, accumulatedTransitTotal, accumulatedBankTotal, accumulatedBanquitosTotal, accumulatedPersonalTotal]);
 
   const getAvailableSourceBalance = useCallback((box?: string | null) => {
     let available = getBoxBalance(box);
@@ -1067,6 +1689,35 @@ function AppContent() {
     setSelectedClosures(newSelected);
   };
 
+  const getClosureTargetBalances = useCallback((
+    closure: ShiftClosure,
+    status: ClosureCashBoxStatus
+  ) => {
+    const ledger = closure.id ? closureLedgerById[closure.id] : undefined;
+    const currentBalances = ledger?.balances || {
+      safe: normalizeClosureCashBoxStatus(closure.status) === 'safe' ? Number(closure.physicalAmount) || 0 : 0,
+      transit: normalizeClosureCashBoxStatus(closure.status) === 'transit' ? Number(closure.physicalAmount) || 0 : 0,
+      bank: normalizeClosureCashBoxStatus(closure.status) === 'bank' ? Number(closure.physicalAmount) || 0 : 0,
+      banquitos: normalizeClosureCashBoxStatus(closure.status) === 'banquitos' ? Number(closure.physicalAmount) || 0 : 0,
+      personal: 0
+    };
+    const totalBalance = closureCashBoxStatuses.reduce(
+      (sum, sourceStatus) => sum + Math.max(0, Number(currentBalances[sourceStatus]) || 0),
+      0
+    );
+
+    return {
+      currentBalances,
+      totalBalance,
+      targetBalances: {
+        safe: status === 'safe' ? totalBalance : 0,
+        transit: status === 'transit' ? totalBalance : 0,
+        bank: status === 'bank' ? totalBalance : 0,
+        banquitos: status === 'banquitos' ? totalBalance : 0
+      }
+    };
+  }, [closureLedgerById]);
+
   const handleCreateTrip = async () => {
     if (!user || !tripFormValues.description) return;
 
@@ -1094,7 +1745,6 @@ function AppContent() {
     try {
       const tripRef = await addDoc(collection(db, 'trips'), {
         startDate: Timestamp.fromDate(new Date(tripFormValues.startDate)),
-        endDate: Timestamp.fromDate(new Date(tripFormValues.endDate)),
         description: tripFormValues.description,
         notes: tripFormValues.notes || '',
         status: 'in_transit',
@@ -1102,14 +1752,7 @@ function AppContent() {
         totalAmount: totalAmount
       });
 
-      for (const c of selectedList) {
-        if (c.id) {
-          await updateDoc(doc(db, 'closures', c.id), {
-            tripId: tripRef.id,
-            status: 'transit'
-          });
-        }
-      }
+      await persistClosureStatusChanges(selectedList, 'transit', tripRef.id);
 
       setIsCreatingTrip(false);
       setSelectedClosures(new Set());
@@ -1135,11 +1778,7 @@ function AppContent() {
       });
 
       const tripClosures = closures.filter(c => c.tripId === tripId);
-      for (const c of tripClosures) {
-        if (c.id) {
-          await updateDoc(doc(db, 'closures', c.id), { status: 'bank' });
-        }
-      }
+      await persistClosureStatusChanges(tripClosures, 'bank', tripId);
     } catch (err) {
        handleFirestoreError(err, OperationType.UPDATE, `trips/${tripId}`);
     }
@@ -1151,17 +1790,10 @@ function AppContent() {
       alert('No se puede eliminar un viaje ya depositado. El dinero ya fue marcado como banco.');
       return;
     }
-    if (!window.confirm('¿Eliminar este viaje? Los cierres marcados volverán a estar disponibles.')) return;
+    if (!window.confirm('Eliminar este viaje? Los cierres marcados volveran a estar disponibles.')) return;
     try {
       const tripClosures = closures.filter(c => c.tripId === tripId);
-      for (const c of tripClosures) {
-        if (c.id) {
-          await updateDoc(doc(db, 'closures', c.id), {
-            tripId: null,
-            status: 'safe'
-          });
-        }
-      }
+      await persistClosureStatusChanges(tripClosures, 'safe', null);
       await deleteDoc(doc(db, 'trips', tripId));
       if (viewingTripId === tripId) setViewingTripId(null);
     } catch (err) {
@@ -1323,8 +1955,8 @@ function AppContent() {
           systemBalance: values.systemBalance === undefined ? undefined : toNonNegativeNumber(values.systemBalance)
         };
         const diff = calculateClosureDifference({
-          physicalAmount: sanitizedValues.physicalAmount ?? original.physicalAmount,
-          systemBalance: sanitizedValues.systemBalance ?? original.systemBalance
+          physicalAmount: sanitizedValues.physicalAmount || original.physicalAmount,
+          systemBalance: sanitizedValues.systemBalance || original.systemBalance
         });
         await updateDoc(doc(db, 'closures', id), {
           ...sanitizedValues,
@@ -1355,7 +1987,7 @@ function AppContent() {
   };
 
   const handleDelete = async (id: string) => {
-    if (window.confirm('¿Estás seguro de eliminar este registro?')) {
+    if (window.confirm('Estas seguro de eliminar este registro?')) {
       try {
         await deleteDoc(doc(db, 'closures', id));
         setDeleteConfirmId(null);
@@ -1418,7 +2050,7 @@ function AppContent() {
     }
 
     if (!movementValues.description.trim()) {
-      setFormError('INGRESE UNA DESCRIPCIÓN');
+      setFormError('INGRESE UNA DESCRIPCION');
       return;
     }
 
@@ -1428,7 +2060,7 @@ function AppContent() {
         return;
       }
       if (normalizedFrom === 'bank') {
-        setFormError('PARA ENVIAR A BANCO, EL ORIGEN DEBE SER TIENDA O TRÁNSITO');
+        setFormError('PARA ENVIAR A BANCO, EL ORIGEN DEBE SER TIENDA O TRANSITO');
         return;
       }
     }
@@ -1507,7 +2139,7 @@ function AppContent() {
   };
 
   const handleDeleteMovement = async (id: string) => {
-    if (window.confirm('¿Eliminar este movimiento?')) {
+    if (window.confirm('Eliminar este movimiento?')) {
       try {
         await deleteDoc(doc(db, 'movements', id));
       } catch (err) {
@@ -1534,32 +2166,71 @@ function AppContent() {
     }
   };
 
+  const persistClosureStatusChanges = async (
+    items: ShiftClosure[],
+    status: ClosureCashBoxStatus,
+    tripId: string | null = null
+  ) => {
+    if (!user || items.length === 0) return;
+
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser) throw new Error('La sesion de Firebase no esta disponible.');
+    const token = await firebaseUser.getIdToken();
+    const response = await fetch('/api/perseo/audit-closures', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        action: 'closure_status',
+        status,
+        tripId,
+        items: items
+          .filter(closure => Boolean(closure.id))
+          .map(closure => {
+            const { currentBalances } = getClosureTargetBalances(closure, status);
+            return {
+              id: closure.id,
+              cashBoxBalances: {
+                safe: Math.max(0, Number(currentBalances.safe) || 0),
+                transit: Math.max(0, Number(currentBalances.transit) || 0),
+                bank: Math.max(0, Number(currentBalances.bank) || 0),
+                banquitos: Math.max(0, Number(currentBalances.banquitos) || 0)
+              }
+            };
+          })
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || 'No se pudo guardar el cambio de estado.');
+    }
+  };
+
   const toggleStatus = async (id: string) => {
-    if (!user) return;
-
     const closure = closures.find(c => c.id === id);
-
     if (!closure) return;
 
     const currentStatus = derivedClosureStatusById[id] || normalizeClosureCashBoxStatus(closure.status);
     const nextStatus = getNextStatus(currentStatus);
-
     playSound(nextStatus);
 
     try {
-      await updateDoc(doc(db, 'closures', id), { status: nextStatus });
+      await persistClosureStatusChanges([closure], nextStatus);
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
     }
   };
 
   const setClosureStatus = async (id: string, status: ClosureCashBoxStatus) => {
-    if (!user) return;
+    const closure = closures.find(c => c.id === id);
+    if (!closure) return;
 
     playSound(status);
 
     try {
-      await updateDoc(doc(db, 'closures', id), { status });
+      await persistClosureStatusChanges([closure], status);
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
     }
@@ -1572,7 +2243,7 @@ function AppContent() {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
     const currentStatus = getDayStatusFromItems(items);
     if (currentStatus === 'mixed') {
-      alert('Este día tiene cierres en estado mixto. Ajusta cada movimiento parcial antes de cambiar todo el día.');
+      alert('Este dia tiene cierres en estado mixto. Ajusta cada movimiento parcial antes de cambiar todo el dia.');
       return;
     }
     const nextStatus = getNextStatus(currentStatus);
@@ -1580,9 +2251,7 @@ function AppContent() {
     playSound(nextStatus);
 
     try {
-      for (const item of items) {
-        await updateDoc(doc(db, 'closures', item.id!), { status: nextStatus });
-      }
+      await persistClosureStatusChanges(items, nextStatus);
     } catch (err) {
       console.error('Day status toggle error:', err);
     }
@@ -1595,15 +2264,21 @@ function AppContent() {
     playSound(status);
 
     try {
-      for (const item of items) {
-        await updateDoc(doc(db, 'closures', item.id!), { status });
-      }
+      await persistClosureStatusChanges(items, status);
     } catch (err) {
       console.error('Day status update error:', err);
     }
   };
 
   const getDayStatusInfo = (status: DisplayClosureStatus | undefined) => {
+    if (status === 'banquitos') {
+      return {
+        label: 'En Banquitos',
+        Icon: DollarSign,
+        className: 'bg-blue-500/10 border-blue-500/20 text-blue-400'
+      };
+    }
+
     if (status === 'bank') {
       return {
         label: 'En Banco',
@@ -1614,7 +2289,7 @@ function AppContent() {
 
     if (status === 'transit') {
       return {
-        label: 'En Tránsito',
+        label: 'En Transito',
         Icon: Truck,
         className: 'bg-amber-500/10 border-amber-500/20 text-amber-400'
       };
@@ -1659,7 +2334,7 @@ function AppContent() {
   const copyToClipboard = (closure: ShiftClosure) => {
     const text = `Cierre ${format(parseISO(closure.date), 'dd/MM/yyyy HH:mm')}
 Responsable: ${closure.responsible}
-Físico: $${closure.physicalAmount.toLocaleString('es-CL')}
+Fisico: $${closure.physicalAmount.toLocaleString('es-CL')}
 Diferencia: $${closure.difference.toLocaleString('es-CL')}
 Notas: ${closure.notes || 'N/A'}`;
     navigator.clipboard.writeText(text);
@@ -1691,7 +2366,7 @@ Notas: ${closure.notes || 'N/A'}`;
     const alignClass = alignment === 'center' ? 'justify-center text-center' : 'justify-start text-left';
 
     return (
-      <div className="space-y-3">
+      <div className="space-y-2">
         <div className={`flex items-center gap-2 ${alignClass}`}>
           {icon}
           <span>{label}</span>
@@ -1721,11 +2396,628 @@ Notas: ${closure.notes || 'N/A'}`;
             value={columnFilters[column]}
             onChange={e => updateColumnFilter(column, e.target.value)}
             placeholder={`Filtrar ${label.toLowerCase()}...`}
-            className="w-full min-w-[140px] bg-[#0F172A] border border-blue-500/30 rounded-xl px-3 py-2 text-[11px] font-bold text-white placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-blue-500/30 normal-case tracking-normal"
+            className="w-full min-w-[110px] bg-[#0F172A] border border-blue-500/30 rounded-lg px-2.5 py-1.5 text-[10px] font-bold text-white placeholder:text-slate-600 outline-none focus:ring-2 focus:ring-blue-500/30 normal-case tracking-normal"
           />
         )}
       </div>
     );
+  };
+
+  const closureTableColumns: Record<ClosureTableColumnKey, {
+    label: string;
+    icon: React.ReactNode;
+    align: 'left' | 'center' | 'right';
+    widthClass: string;
+    filterable?: boolean;
+  }> = {
+    date: { label: 'Fecha y Hora', icon: <Calendar className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[145px]', filterable: true },
+    responsible: { label: 'Responsable', icon: <UserIcon className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[180px]', filterable: true },
+    physicalAmount: { label: '$ Fisico', icon: <Banknote className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]', filterable: true },
+    systemBalance: { label: 'Saldo Esperado', icon: <Wallet className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[135px]', filterable: true },
+    transferAmount: { label: 'Transf. PDV', icon: <ArrowRightLeft className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]' },
+    systemAmount: { label: 'Venta Sistema', icon: <Calculator className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[135px]', filterable: true },
+    reportedAmount: { label: 'Reportado', icon: <FileText className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]' },
+    difference: { label: 'Diferencia', icon: <AlertCircle className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]', filterable: true },
+    status: { label: 'Estado', icon: <ShieldCheck className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[155px]', filterable: true },
+    actions: { label: 'Acciones', icon: <Edit2 className="w-3 h-3" />, align: 'right', widthClass: 'min-w-[105px]' },
+    notes: { label: 'Notas', icon: <MessageSquare className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[150px]', filterable: true },
+  };
+
+  const moveClosureColumn = (from: ClosureTableColumnKey, to: ClosureTableColumnKey) => {
+    if (from === to) return;
+    if (fixedClosureTableTrailingColumns.includes(from) || fixedClosureTableTrailingColumns.includes(to)) return;
+    setClosureTableColumnOrder(prev => {
+      const next = [...prev];
+      const fromIndex = next.indexOf(from);
+      const toIndex = next.indexOf(to);
+      if (fromIndex < 0 || toIndex < 0) return prev;
+      const [removed] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, removed);
+      return next;
+    });
+  };
+
+  const renderDraggableClosureHeader = (column: ClosureTableColumnKey) => {
+    const config = closureTableColumns[column];
+    const alignClass = config.align === 'right' ? 'text-right' : config.align === 'center' ? 'text-center' : 'text-left';
+    const isDragging = draggedClosureColumn === column;
+    const isFilterable = config.filterable && column in emptyClosureColumnFilters;
+    const canDrag = !fixedClosureTableTrailingColumns.includes(column);
+
+    return (
+      <th
+        key={column}
+        draggable={canDrag}
+        onDragStart={() => {
+          if (canDrag) setDraggedClosureColumn(column);
+        }}
+        onDragOver={e => {
+          if (canDrag) e.preventDefault();
+        }}
+        onDrop={e => {
+          e.preventDefault();
+          if (canDrag && draggedClosureColumn) moveClosureColumn(draggedClosureColumn, column);
+          setDraggedClosureColumn(null);
+        }}
+        onDragEnd={() => setDraggedClosureColumn(null)}
+        className={`px-3 py-3 text-[9px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 ${alignClass} ${config.widthClass} select-none ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${isDragging ? 'bg-blue-500/10 text-blue-300' : ''}`}
+        title={canDrag ? 'Arrastra para mover esta columna' : 'Columna fija'}
+      >
+        {isFilterable
+          ? renderColumnHeader(column as ClosureColumnKey, config.label, config.icon, config.align === 'left' ? 'left' : 'center')
+          : (
+            <div className={`flex items-center gap-2 ${config.align === 'right' ? 'justify-end' : config.align === 'center' ? 'justify-center' : 'justify-start'}`}>
+              {config.icon}
+              <span>{config.label}</span>
+            </div>
+          )}
+      </th>
+    );
+  };
+
+  const cellClass = (column: ClosureTableColumnKey, extra = '') => {
+    const align = closureTableColumns[column].align;
+    const alignClass = align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left';
+    return `px-3 py-2.5 ${alignClass} ${extra}`;
+  };
+
+  const amountCellClass = 'font-black text-slate-500 font-sans text-xs whitespace-nowrap';
+  const inputShellClass = 'flex items-center bg-[#1E293B] border border-white/10 rounded-lg px-2 py-1.5 focus-within:border-blue-500';
+  const statusButtonLabel = (status: ClosureCashBoxStatus) =>
+    status === 'safe'
+      ? 'Tienda'
+      : status === 'transit'
+        ? 'Transito'
+        : status === 'bank'
+          ? 'Banco'
+          : 'Banquitos';
+
+  const renderDifferenceBadge = (value: number | undefined, pending = false) => {
+    if (pending) {
+      return (
+        <div className="inline-flex px-2.5 py-1 rounded-full text-[9px] font-black border bg-amber-500/10 text-amber-400 border-amber-500/20 whitespace-nowrap">
+          Falta revisar
+        </div>
+      );
+    }
+
+    const difference = Number(value) || 0;
+    return (
+      <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[9px] font-black border whitespace-nowrap ${difference < 0 ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'}`}>
+        {difference >= 0 ? <AlertCircle className="w-3 h-3 mr-1" /> : <ShieldAlert className="w-3 h-3 mr-1" />}
+        {difference >= 0 ? '+' : ''}{difference.toLocaleString('es-CL')}
+      </div>
+    );
+  };
+
+  const renderTransferValue = (transferValue: unknown, systemAmount: unknown, systemBalance: unknown) => {
+    const transfer = transferPdvAmount(transferValue);
+    const expectedDelta = Math.max(0, Number(((Number(systemAmount) || 0) - (Number(systemBalance) || 0)).toFixed(2)));
+    const missingExplicitTransfer = transfer <= 0.009 && expectedDelta > closureMatchTolerance;
+
+    return (
+      <div className="inline-flex flex-col items-center gap-1">
+        <span>{moneyText(transfer)}</span>
+        {missingExplicitTransfer && (
+          <span
+            title="Venta Sistema es mayor que Saldo Esperado, pero el reporte no trajo Transf. PDV explicito."
+            className="inline-flex px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/20 text-[8px] font-black text-amber-400 uppercase tracking-widest whitespace-nowrap"
+          >
+            Falta dato
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  const renderInlineAddCell = (column: ClosureTableColumnKey) => {
+    const difference = (inlineAddValues.physicalAmount || 0) - (inlineAddValues.systemBalance || 0);
+
+    switch (column) {
+      case 'date':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-lg px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
+              <input
+                ref={dateInputRef}
+                type="datetime-local"
+                value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
+                onChange={e => {
+                  if (!e.target.value) return;
+                  const d = new Date(e.target.value);
+                  if (!isNaN(d.getTime())) setInlineAddValues({ ...inlineAddValues, date: d.toISOString() });
+                }}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, responsibleInputRef)}
+                className="w-full bg-transparent outline-none text-white font-sans font-bold text-[10px]"
+              />
+            </div>
+          </td>
+        );
+      case 'responsible':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className={inputShellClass}>
+              <input
+                ref={responsibleInputRef}
+                list="responsibles-list"
+                type="text"
+                value={inlineAddValues.responsible}
+                onFocus={e => e.target.select()}
+                onChange={e => setInlineAddValues({ ...inlineAddValues, responsible: e.target.value.toUpperCase() })}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, physicalAmountRef, dateInputRef)}
+                className="w-full bg-transparent outline-none text-white placeholder:text-slate-600 font-bold text-xs uppercase"
+                placeholder="RESPONSABLE"
+              />
+              <datalist id="responsibles-list">
+                {uniqueResponsibles.map(r => <option key={r} value={r} />)}
+              </datalist>
+            </div>
+          </td>
+        );
+      case 'physicalAmount':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className={inputShellClass}>
+              <input
+                ref={physicalAmountRef}
+                type="number"
+                min="0"
+                value={inlineAddValues.physicalAmount || ''}
+                onFocus={e => e.target.select()}
+                onChange={e => setInlineAddValues({ ...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value) })}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemBalanceRef, responsibleInputRef)}
+                className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
+                placeholder="FISICO"
+              />
+            </div>
+          </td>
+        );
+      case 'systemBalance':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className={inputShellClass}>
+              <input
+                ref={systemBalanceRef}
+                type="number"
+                min="0"
+                value={inlineAddValues.systemBalance || ''}
+                onFocus={e => e.target.select()}
+                onChange={e => setInlineAddValues({ ...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value) })}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemAmountRef, physicalAmountRef)}
+                className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
+                placeholder="SALDO"
+              />
+            </div>
+          </td>
+        );
+      case 'systemAmount':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className={inputShellClass}>
+              <input
+                ref={systemAmountRef}
+                type="number"
+                min="0"
+                value={inlineAddValues.systemAmount || ''}
+                onFocus={e => e.target.select()}
+                onChange={e => setInlineAddValues({ ...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value) })}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, undefined, systemBalanceRef)}
+                className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
+                placeholder="VENTA"
+              />
+            </div>
+          </td>
+        );
+      case 'difference':
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(difference)}</td>;
+      case 'status':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <select
+              value={inlineAddValues.status || 'safe'}
+              onChange={e => setInlineAddValues({ ...inlineAddValues, status: e.target.value as ClosureCashBoxStatus })}
+              className="bg-[#0F172A] border border-white/10 rounded-lg px-2 py-1.5 text-[10px] font-black uppercase text-white outline-none"
+            >
+              <option value="safe">Tienda</option>
+              <option value="transit">Transito</option>
+              <option value="bank">Banco</option>
+              <option value="banquitos">Banquitos</option>
+            </select>
+          </td>
+        );
+      case 'actions':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex justify-end gap-1">
+              <button
+                onClick={() => {
+                  const note = prompt('Notas / Observaciones:', inlineAddValues.notes || '');
+                  if (note !== null) setInlineAddValues({ ...inlineAddValues, notes: note });
+                }}
+                className={`p-1.5 rounded-lg transition-all ${inlineAddValues.notes ? 'bg-blue-500 text-white' : 'bg-white/5 text-slate-500'}`}
+              >
+                <MessageSquare className="w-4 h-4" />
+              </button>
+              <button onClick={handleSaveInlineAdd} disabled={isSaving} className="bg-blue-600 hover:bg-blue-500 text-white p-1.5 rounded-lg transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50">
+                <Check className="w-4 h-4" />
+              </button>
+              <button onClick={() => setIsInlineAdding(false)} className="bg-white/5 hover:bg-white/10 text-slate-500 p-1.5 rounded-lg transition-all">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </td>
+        );
+      case 'notes':
+        return <td key={column} className={cellClass(column, 'text-slate-500 text-xs')}>{inlineAddValues.notes || '-'}</td>;
+      default:
+        return <td key={column} className={cellClass(column, amountCellClass)}>-</td>;
+    }
+  };
+
+  const renderGroupSummaryCell = (group: (typeof groupedClosures)[number], column: ClosureTableColumnKey) => {
+    switch (column) {
+      case 'date':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-white/5 rounded-lg border border-white/5">
+                <RefreshCw className="w-4 h-4 text-slate-500" />
+              </div>
+              <div>
+                <div className="font-black text-white text-xs">{format(parseISO(group.date), 'EEEE, dd MMMM', { locale: es })}</div>
+                <div className="text-[9px] font-black text-blue-500 uppercase tracking-widest">{group.items.length} Registros</div>
+                {group.missingRows.length > 0 && (
+                  <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[8px] font-black text-amber-400 uppercase tracking-widest">
+                    <ShieldAlert className="w-3 h-3" />
+                    {group.missingRows.length} venta sin foto
+                  </div>
+                )}
+              </div>
+            </div>
+          </td>
+        );
+      case 'responsible':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
+              <span className="text-[9px] font-black text-slate-400 uppercase tracking-[0.2em]">Resumen del dia</span>
+            </div>
+          </td>
+        );
+      case 'physicalAmount':
+        return <td key={column} className={cellClass(column, 'font-black text-white font-sans text-xs whitespace-nowrap')}>${group.totals.physicalAmount.toLocaleString('es-CL')}</td>;
+      case 'systemBalance':
+        return <td key={column} className={cellClass(column, amountCellClass)}>${(group.totals.systemBalance || 0).toLocaleString('es-CL')}</td>;
+      case 'transferAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{renderTransferValue(group.totals.transferAmount, group.totals.systemAmount, group.totals.systemBalance)}</td>;
+      case 'systemAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>${group.totals.systemAmount.toLocaleString('es-CL')}</td>;
+      case 'reportedAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>${(group.totals.reportedAmount || 0).toLocaleString('es-CL')}</td>;
+      case 'difference':
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(group.totals.difference)}</td>;
+      case 'status':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
+              {closureCashBoxStatuses.map(status => {
+                const statusInfo = getDayStatusInfo(status);
+                const StatusIcon = statusInfo.Icon;
+                const active = group.status === status;
+                return (
+                  <button
+                    key={status}
+                    type="button"
+                    onClick={() => setDayStatus(group.date, status)}
+                    title={`Enviar todos los cierres del dia a ${statusInfo.label}`}
+                    className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                  >
+                    <StatusIcon className="w-3 h-3" />
+                    {statusButtonLabel(status)}
+                  </button>
+                );
+              })}
+            </div>
+          </td>
+        );
+      case 'actions':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <ChevronDown className={`w-5 h-5 text-slate-700 transition-transform ml-auto ${expandedDays[group.date] ? 'rotate-180' : ''}`} />
+          </td>
+        );
+      case 'notes':
+        return <td key={column} className={cellClass(column, 'text-slate-600 text-xs')}>-</td>;
+      default:
+        return <td key={column} className={cellClass(column, amountCellClass)}>-</td>;
+    }
+  };
+
+  const renderInlineEditCell = (column: ClosureTableColumnKey) => {
+    const difference = (inlineEditValues.physicalAmount || 0) - (inlineEditValues.systemBalance || 0);
+
+    switch (column) {
+      case 'date':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-lg px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
+              <input
+                type="datetime-local"
+                value={inlineEditValues.date ? format(parseISO(inlineEditValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
+                onChange={e => setInlineEditValues({ ...inlineEditValues, date: new Date(e.target.value).toISOString() })}
+                className="bg-transparent outline-none text-white font-sans font-bold text-[10px] w-full"
+              />
+            </div>
+          </td>
+        );
+      case 'responsible':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className={inputShellClass}>
+              <input
+                type="text"
+                value={inlineEditValues.responsible}
+                onFocus={e => e.target.select()}
+                onChange={e => setInlineEditValues({ ...inlineEditValues, responsible: e.target.value.toUpperCase() })}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
+                className="bg-transparent outline-none text-white font-black text-xs uppercase w-full"
+              />
+            </div>
+          </td>
+        );
+      case 'physicalAmount':
+      case 'systemBalance':
+      case 'systemAmount': {
+        const ref = column === 'physicalAmount' ? physicalAmountRef : column === 'systemBalance' ? systemBalanceRef : systemAmountRef;
+        const placeholder = column === 'physicalAmount' ? 'FISICO' : column === 'systemBalance' ? 'SALDO' : 'VENTA';
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className={inputShellClass}>
+              <input
+                ref={ref}
+                type="number"
+                min="0"
+                value={inlineEditValues[column] || ''}
+                onFocus={e => e.target.select()}
+                onChange={e => setInlineEditValues({ ...inlineEditValues, [column]: toNonNegativeNumber(e.target.value) })}
+                onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
+                className="bg-transparent outline-none text-white text-center font-black font-sans text-xs w-full"
+                placeholder={placeholder}
+              />
+            </div>
+          </td>
+        );
+      }
+      case 'transferAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{moneyText(transferPdvAmount(inlineEditValues.transferAmount))}</td>;
+      case 'reportedAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{moneyText(inlineEditValues.reportedAmount || 0)}</td>;
+      case 'difference':
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(difference)}</td>;
+      case 'status':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <select
+              value={inlineEditValues.status || 'safe'}
+              onChange={e => setInlineEditValues({ ...inlineEditValues, status: e.target.value as ClosureCashBoxStatus })}
+              className="bg-[#0F172A] border border-white/10 rounded-lg px-2 py-1.5 text-[10px] font-black uppercase text-white outline-none"
+            >
+              <option value="safe">Tienda</option>
+              <option value="transit">Transito</option>
+              <option value="bank">Banco</option>
+              <option value="banquitos">Banquitos</option>
+            </select>
+          </td>
+        );
+      case 'actions':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex justify-end gap-1">
+              <button onClick={handleSaveInlineEdit} disabled={isSaving} className="p-1.5 bg-blue-600 rounded-lg text-white shadow-lg shadow-blue-500/20 disabled:opacity-50"><Check className="w-4 h-4" /></button>
+              <button onClick={handleCancelInlineEdit} className="p-1.5 bg-white/5 rounded-lg text-slate-500"><X className="w-4 h-4" /></button>
+            </div>
+          </td>
+        );
+      case 'notes':
+        return <td key={column} className={cellClass(column, 'text-slate-500 text-xs')}>{inlineEditValues.notes || '-'}</td>;
+      default:
+        return <td key={column} className={cellClass(column, amountCellClass)}>-</td>;
+    }
+  };
+
+  const renderClosureCell = (closure: ShiftClosure, column: ClosureTableColumnKey) => {
+    const matchedPerseoRow = closure.id ? perseoClosureMatchById[closure.id]?.row : null;
+    const displaySystemBalance = matchedPerseoRow ? Number(matchedPerseoRow.systemBalance) || 0 : Number(closure.systemBalance) || 0;
+    const displaySystemAmount = matchedPerseoRow ? Number(matchedPerseoRow.systemAmount) || 0 : Number(closure.systemAmount) || 0;
+    const displayTransferAmount = matchedPerseoRow ? getExplicitPerseoTransferAmount(matchedPerseoRow) : Number(closure.transferAmount) || 0;
+    const displayReportedAmount = matchedPerseoRow ? Number(matchedPerseoRow.reportedAmount) || 0 : Number(closure.reportedAmount) || 0;
+    const displayDifference = Number(((Number(closure.physicalAmount) || 0) - displaySystemBalance).toFixed(2));
+    const displayClosureForAudit: ShiftClosure = {
+      ...closure,
+      systemAmount: displaySystemAmount,
+      systemBalance: displaySystemBalance,
+      reportedAmount: displayReportedAmount,
+      transferAmount: displayTransferAmount,
+      difference: displayDifference,
+      systemSource: matchedPerseoRow ? 'perseo' : closure.systemSource,
+      perseoAuditStatus: matchedPerseoRow
+        ? Math.abs(displayDifference) <= closureMatchTolerance ? 'matched' : 'difference'
+        : closure.perseoAuditStatus,
+    };
+
+    switch (column) {
+      case 'date':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex flex-col">
+              <span className="text-xs font-black text-slate-200">{format(parseISO(closure.date), 'dd MMM', { locale: es })}</span>
+              <span className="text-[9px] font-black text-slate-500 uppercase">{format(parseISO(closure.date), 'HH:mm')} HRS</span>
+            </div>
+          </td>
+        );
+      case 'responsible':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 bg-white/5 rounded-full flex items-center justify-center border border-white/5">
+                <UserIcon className="w-3.5 h-3.5 text-slate-500" />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
+                {(() => {
+                  const auditInfo = getClosureAuditInfo(displayClosureForAudit);
+                  if (auditInfo.status === 'not_audited') return null;
+                  return (
+                    <span
+                      title={auditInfo.detail}
+                      className={`w-fit inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-widest ${auditInfo.className}`}
+                    >
+                      {auditInfo.status === 'difference'
+                        ? <ShieldAlert className="w-3 h-3" />
+                        : auditInfo.status === 'matched'
+                          ? <CheckCircle2 className="w-3 h-3" />
+                          : <FileText className="w-3 h-3" />}
+                      {auditInfo.label}
+                    </span>
+                  );
+                })()}
+              </div>
+            </div>
+          </td>
+        );
+      case 'physicalAmount':
+        return <td key={column} className={cellClass(column, 'font-black text-white font-sans text-xs whitespace-nowrap')}>${closure.physicalAmount.toLocaleString('es-CL')}</td>;
+      case 'systemBalance':
+        return <td key={column} className={cellClass(column, amountCellClass)}>${displaySystemBalance.toLocaleString('es-CL')}</td>;
+      case 'transferAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{renderTransferValue(displayTransferAmount, displaySystemAmount, displaySystemBalance)}</td>;
+      case 'systemAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>${displaySystemAmount.toLocaleString('es-CL')}</td>;
+      case 'reportedAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>${displayReportedAmount.toLocaleString('es-CL')}</td>;
+      case 'difference':
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(displayDifference)}</td>;
+      case 'status':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center justify-center gap-1">
+              {closureCashBoxStatuses.map(status => {
+                const currentStatus = closure.id
+                  ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
+                  : normalizeClosureCashBoxStatus(closure.status);
+                const statusInfo = getDayStatusInfo(status);
+                const StatusIcon = statusInfo.Icon;
+                const active = currentStatus === status;
+                return (
+                  <button
+                    key={status}
+                    type="button"
+                    onClick={() => setClosureStatus(closure.id!, status)}
+                    title={statusInfo.label}
+                    className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                  >
+                    <StatusIcon className="w-3 h-3" />
+                    {statusButtonLabel(status)}
+                  </button>
+                );
+              })}
+            </div>
+          </td>
+        );
+      case 'actions':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              <button onClick={() => handleToggleClosureSelection(closure.id!)} title="Seleccionar para Viaje" className={`p-1.5 rounded-lg transition-colors ${selectedClosures.has(closure.id!) ? 'text-blue-500 bg-blue-500/10' : 'text-slate-600 hover:text-white'}`}><CheckCircle2 className="w-4 h-4" /></button>
+              {closure.notes && <button onClick={() => alert(closure.notes)} className="p-1.5 text-blue-400 hover:bg-blue-500/10 rounded-lg"><MessageSquare className="w-4 h-4" /></button>}
+              <button onClick={() => handleEdit(closure)} className="p-1.5 text-slate-500 hover:text-white hover:bg-white/5 rounded-lg"><Edit2 className="w-4 h-4" /></button>
+              <button onClick={() => handleDelete(closure.id!)} className="p-1.5 text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+            </div>
+          </td>
+        );
+      case 'notes':
+        return <td key={column} className={cellClass(column, 'text-slate-500 text-xs max-w-[180px] truncate')}>{closure.notes || '-'}</td>;
+      default:
+        return <td key={column} className={cellClass(column, amountCellClass)}>-</td>;
+    }
+  };
+
+  const renderMissingRowCell = (row: MissingPerseoClosure, column: ClosureTableColumnKey) => {
+    switch (column) {
+      case 'date':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex flex-col">
+              <span className="text-xs font-black text-amber-300">{format(parseISO(`${row.businessDate}T12:00:00.000Z`), 'dd MMM', { locale: es })}</span>
+              <span className="text-[9px] font-black text-amber-500 uppercase">Sin foto</span>
+            </div>
+          </td>
+        );
+      case 'responsible':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 bg-amber-500/10 rounded-full flex items-center justify-center border border-amber-500/20">
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs font-black text-amber-200 uppercase tracking-wider">{row.responsibleLabel}</span>
+                <span className="w-fit inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-widest bg-amber-500/10 text-amber-400 border-amber-500/20">
+                  <FileText className="w-3 h-3" />
+                  Falta foto/corte
+                </span>
+              </div>
+            </div>
+          </td>
+        );
+      case 'physicalAmount':
+        return <td key={column} className={cellClass(column, 'font-black text-amber-400 font-sans text-xs whitespace-nowrap')}>Pendiente</td>;
+      case 'systemBalance':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{moneyText(row.systemBalance)}</td>;
+      case 'transferAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{renderTransferValue(getExplicitPerseoTransferAmount(row), row.systemAmount, row.systemBalance)}</td>;
+      case 'systemAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{moneyText(row.systemAmount)}</td>;
+      case 'reportedAmount':
+        return <td key={column} className={cellClass(column, amountCellClass)}>{moneyText(row.reportedAmount)}</td>;
+      case 'difference':
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(0, true)}</td>;
+      case 'status':
+        return (
+          <td key={column} className={cellClass(column)}>
+            <span className="inline-flex px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[8px] font-black uppercase">
+              Perseo
+            </span>
+          </td>
+        );
+      case 'actions':
+        return <td key={column} className={cellClass(column, 'text-[9px] font-black text-slate-600 uppercase')}>Reporte</td>;
+      case 'notes':
+        return <td key={column} className={cellClass(column, 'text-slate-600 text-xs')}>Venta sin foto</td>;
+      default:
+        return <td key={column} className={cellClass(column, amountCellClass)}>-</td>;
+    }
   };
 
   const renderCashBoxStatementModal = () => {
@@ -1753,6 +3045,13 @@ Notas: ${closure.notes || 'N/A'}`;
         Icon: Building2,
         color: 'text-emerald-600',
         soft: 'bg-emerald-50',
+      },
+      banquitos: {
+        label: 'Banquitos',
+        balance: accumulatedBanquitosTotal,
+        Icon: DollarSign,
+        color: 'text-blue-600',
+        soft: 'bg-blue-50',
       },
       personal: {
         label: 'Caja Personal',
@@ -1810,7 +3109,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="px-5 py-5 bg-white border-b border-slate-200">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-bold text-slate-500 uppercase">Saldo actual <span className="text-amber-400">★</span></p>
+                <p className="text-xs font-bold text-slate-500 uppercase">Saldo actual <span className="text-amber-400">*</span></p>
                 <div className="flex items-center gap-2 mt-1">
                   <p className="text-4xl font-black tracking-tight">${boxInfo.balance.toLocaleString('es-CL')}</p>
                   <Eye className={`w-5 h-5 ${boxInfo.color}`} />
@@ -1826,11 +3125,13 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
           </div>
 
-          <div className="grid grid-cols-4 gap-3 px-6 py-4 border-b border-slate-200 bg-slate-50">
+          <div className="grid grid-cols-5 gap-2 px-5 py-4 border-b border-slate-200 bg-slate-50">
             {[
               { label: 'Gasto', Icon: ArrowUpRight, onClick: () => handleOpenAddMovement('outflow', status) },
+              ...(status !== 'safe' && status !== 'personal' ? [{ label: 'Tienda', Icon: ShieldCheck, onClick: () => handleOpenAddMovement('internal_transfer', status, 'safe') }] : []),
               ...(status !== 'bank' && status !== 'personal' ? [{ label: 'Banco', Icon: Building2, onClick: () => handleOpenAddMovement('transfer', status, 'bank') }] : []),
               ...(status !== 'transit' ? [{ label: 'Transito', Icon: Truck, onClick: () => handleOpenAddMovement('internal_transfer', status, 'transit') }] : []),
+              ...(status !== 'banquitos' && status !== 'personal' ? [{ label: 'Banquitos', Icon: DollarSign, onClick: () => handleOpenAddMovement('internal_transfer', status, 'banquitos') }] : []),
               ...(status !== 'personal' ? [{ label: 'Personal', Icon: Wallet, onClick: () => handleOpenAddMovement('internal_transfer', status, 'personal') }] : []),
               { label: 'Actualizar', Icon: RefreshCw, onClick: () => setViewingCajaMovements(status) },
             ].map(action => (
@@ -1980,110 +3281,194 @@ Notas: ${closure.notes || 'N/A'}`;
     return <PersonalFinance user={user} onBack={() => setCurrentView('main')} />;
   }
 
+  if (currentView === 'payroll') {
+    return (
+      <PayrollModule
+        user={user}
+        onBack={() => setCurrentView('main')}
+        balances={{
+          safe: accumulatedSafeTotal,
+          transit: accumulatedTransitTotal,
+          bank: accumulatedBankTotal,
+          personal: accumulatedPersonalTotal,
+        }}
+      />
+    );
+  }
+
+  if (currentView === 'inventory') {
+    return <InventoryModule onBack={() => setCurrentView('main')} />;
+  }
+
+  if (currentView === 'credits') {
+    return (
+      <BusinessCreditsModule
+        user={user}
+        onBack={() => setCurrentView('main')}
+        balances={{
+          safe: accumulatedSafeTotal,
+          transit: accumulatedTransitTotal,
+          bank: accumulatedBankTotal,
+        }}
+      />
+    );
+  }
+
   return (
     <>
       <div className={`min-h-screen bg-[#0F172A] text-slate-200 pb-20 select-none ${showPrintPreview ? 'hidden' : 'block'} print:hidden`}>
         <header className="bg-[#1E293B]/50 backdrop-blur-md border-b border-white/5 sticky top-0 z-30">
           <div className="w-full px-4 h-20 flex items-center justify-between">
             <div className="flex items-center gap-4">
+              <button
+                onClick={() => setIsModuleSidebarOpen(prev => !prev)}
+                className="w-11 h-11 rounded-2xl bg-white/5 border border-white/5 text-slate-400 hover:text-white hover:bg-white/10 transition-all flex items-center justify-center"
+                title={isModuleSidebarOpen ? 'Ocultar menu' : 'Mostrar menu'}
+              >
+                {isModuleSidebarOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
+              </button>
               <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center">
                 <Calculator className="text-white w-7 h-7" />
               </div>
-              <h1 className="text-xl font-black text-white">CIERRES 1.1</h1>
+              <div>
+                <h1 className="text-xl font-black text-white">CIERRES 1.1</h1>
+                <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.24em]">Plataforma administrativa</p>
+              </div>
             </div>
             <div className="flex items-center gap-4">
               <button onClick={() => setShowPrintPreview(true)} className="p-3 bg-white/5 hover:bg-blue-500/10 text-slate-400 rounded-2xl border border-white/5"><Printer className="w-5 h-5" /></button>
               <button onClick={handleExportCSV} className="p-3 bg-white/5 hover:bg-emerald-500/10 text-slate-400 rounded-2xl border border-white/5"><Download className="w-5 h-5" /></button>
-              <button onClick={() => setCurrentView('dashboard')} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
-                <LayoutDashboard className="w-5 h-5" />
-                <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Dashboard</span>
-              </button>
-              <button onClick={() => setCurrentView('personal')} className="p-3 bg-white/5 hover:bg-purple-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
-                <Wallet className="w-5 h-5" />
-                <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Personal</span>
-              </button>
-              <button onClick={() => setViewingTripId('LIST')} className="p-3 bg-white/5 hover:bg-amber-500/10 text-slate-400 rounded-2xl border border-white/5 flex items-center gap-2">
-                <Truck className="w-5 h-5" />
-                <span className="hidden lg:inline text-xs font-black uppercase tracking-widest">Viajes</span>
-              </button>
               <button onClick={logOut} className="p-3 bg-white/5 hover:bg-red-500/10 text-slate-400 rounded-2xl border border-white/5"><LogOut className="w-5 h-5" /></button>
             </div>
           </div>
         </header>
 
-        <main className="w-full px-4 py-10">
-          {/* Success Feedback Notification */}
-          {showSuccess && (
-            <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] animate-in fade-in zoom-in slide-in-from-top-4 duration-300">
-              <div className="bg-emerald-500 text-white px-8 py-4 rounded-[2rem] shadow-2xl flex items-center gap-4 border border-emerald-400/50">
-                <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center animate-bounce">
-                  <Banknote className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="font-black text-sm uppercase tracking-widest">¡Registro Guardado!</p>
-                  <p className="text-[10px] font-bold opacity-80 uppercase">El cierre se ha guardado correctamente</p>
-                </div>
-              </div>
-            </div>
-          )}
-          {/* Context Menu */}
-          {contextMenu && (
-            <div
-              style={{ top: contextMenu.y, left: contextMenu.x }}
-              className="fixed z-[200] bg-[#1E293B] border border-white/10 rounded-2xl shadow-2xl py-2 min-w-[200px] overflow-hidden backdrop-blur-xl"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="px-4 py-2 border-b border-white/5 mb-2">
-                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Acciones: {contextMenu.caja.toUpperCase()}</p>
-              </div>
-              <button
-                onClick={() => handleOpenAddMovement('outflow', contextMenu.caja)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-rose-500/20 hover:text-rose-400 transition-colors uppercase tracking-widest"
+        <div className="w-full px-4 py-6 flex gap-6 relative">
+          <AnimatePresence>
+            {isModuleSidebarOpen && (
+              <motion.aside
+                initial={{ opacity: 0, width: 0 }}
+                animate={{ opacity: 1, width: 280 }}
+                exit={{ opacity: 0, width: 0 }}
+                className="sticky top-24 z-30 max-h-[calc(100vh-7rem)] shrink-0 overflow-hidden rounded-[2rem] border border-white/5 bg-[#1E293B]/95 backdrop-blur-xl shadow-2xl"
               >
-                <ArrowUpRight className="w-4 h-4" />
-                Registrar Gasto
-              </button>
-              {contextMenu.caja !== 'bank' && contextMenu.caja !== 'personal' && (
+                <div className="w-[280px] p-4">
+                  <div className="px-2 pb-4 border-b border-white/5">
+                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.28em]">Navegacion</p>
+                    <h3 className="mt-2 text-lg font-black text-white">Modulos</h3>
+                    <p className="mt-1 text-xs font-bold text-slate-400">Aqui iremos agregando nuevas areas administrativas.</p>
+                  </div>
+                  <div className="mt-4 space-y-2">
+                    {adminModules.map(module => {
+                      const isActive = activeModuleId === module.id;
+                      return (
+                        <button
+                          key={module.id}
+                          onClick={() => {
+                            module.action();
+                          }}
+                          className={`w-full text-left rounded-2xl border px-3 py-3 transition-all ${isActive ? 'bg-white/10 border-white/15' : 'bg-white/[0.03] border-white/5 hover:bg-white/5 hover:border-white/10'}`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`w-10 h-10 rounded-2xl bg-white/10 border border-white/10 flex items-center justify-center ${module.iconColor}`}>
+                              <module.Icon className="w-5 h-5" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-xs font-black text-white uppercase tracking-wide">{module.title}</p>
+                              <p className="text-[11px] font-bold text-slate-400 truncate">{module.subtitle}</p>
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.aside>
+            )}
+          </AnimatePresence>
+
+          <main className="flex-1 min-w-0">
+            {/* Success Feedback Notification */}
+            {showSuccess && (
+              <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] animate-in fade-in zoom-in slide-in-from-top-4 duration-300">
+                <div className="bg-emerald-500 text-white px-8 py-4 rounded-[2rem] shadow-2xl flex items-center gap-4 border border-emerald-400/50">
+                  <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center animate-bounce">
+                    <Banknote className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <p className="font-black text-sm uppercase tracking-widest">Registro Guardado!</p>
+                    <p className="text-[10px] font-bold opacity-80 uppercase">El cierre se ha guardado correctamente</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Context Menu */}
+            {contextMenu && (
+              <div
+                style={{ top: contextMenu.y, left: contextMenu.x }}
+                className="fixed z-[200] bg-[#1E293B] border border-white/10 rounded-2xl shadow-2xl py-2 min-w-[200px] overflow-hidden backdrop-blur-xl"
+                onClick={e => e.stopPropagation()}
+              >
+                <div className="px-4 py-2 border-b border-white/5 mb-2">
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Acciones: {contextMenu.caja.toUpperCase()}</p>
+                </div>
                 <button
-                  onClick={() => handleOpenAddMovement('transfer', contextMenu.caja, 'bank')}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors uppercase tracking-widest"
+                  onClick={() => handleOpenAddMovement('outflow', contextMenu.caja)}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-rose-500/20 hover:text-rose-400 transition-colors uppercase tracking-widest"
                 >
-                  <Building2 className="w-4 h-4" />
-                  Enviar a Banco
+                  <ArrowUpRight className="w-4 h-4" />
+                  Registrar Gasto
                 </button>
-              )}
-              {contextMenu.caja !== 'transit' && (
+                {contextMenu.caja !== 'bank' && contextMenu.caja !== 'personal' && (
+                  <button
+                    onClick={() => handleOpenAddMovement('transfer', contextMenu.caja, 'bank')}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors uppercase tracking-widest"
+                  >
+                    <Building2 className="w-4 h-4" />
+                    Enviar a Banco
+                  </button>
+                )}
+                {contextMenu.caja !== 'transit' && (
+                  <button
+                    onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'transit')}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-amber-500/20 hover:text-amber-400 transition-colors uppercase tracking-widest"
+                  >
+                    <Truck className="w-4 h-4" />
+                    Enviar a Transito
+                  </button>
+                )}
+                {contextMenu.caja !== 'banquitos' && contextMenu.caja !== 'personal' && (
+                  <button
+                    onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'banquitos')}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-blue-500/20 hover:text-blue-400 transition-colors uppercase tracking-widest"
+                  >
+                    <DollarSign className="w-4 h-4" />
+                    Enviar a Banquitos
+                  </button>
+                )}
+                {contextMenu.caja !== 'personal' && (
+                  <button
+                    onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'personal')}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
+                  >
+                    <Wallet className="w-4 h-4" />
+                    Enviar a Personal
+                  </button>
+                )}
                 <button
-                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'transit')}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-amber-500/20 hover:text-amber-400 transition-colors uppercase tracking-widest"
-                >
-                  <Truck className="w-4 h-4" />
-                  Enviar a Transito
-                </button>
-              )}
-              {contextMenu.caja !== 'personal' && (
-                <button
-                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja, 'personal')}
+                  onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja)}
                   className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
                 >
-                  <Wallet className="w-4 h-4" />
-                  Enviar a Personal
+                  <ArrowRightLeft className="w-4 h-4" />
+                  Transferencia Interna
                 </button>
-              )}
-              <button
-                onClick={() => handleOpenAddMovement('internal_transfer', contextMenu.caja)}
-                className="w-full flex items-center gap-3 px-4 py-3 text-xs font-black text-white hover:bg-purple-500/20 hover:text-purple-400 transition-colors uppercase tracking-widest"
-              >
-                <ArrowRightLeft className="w-4 h-4" />
-                Transferencia Interna
-              </button>
-            </div>
-          )}
+              </div>
+            )}
 
-          {/* Movements Viewer Modal */}
-          <AnimatePresence>
-            {renderCashBoxStatementModal()}
-            {false && viewingCajaMovements && (
+            {/* Movements Viewer Modal */}
+            <AnimatePresence>
+              {renderCashBoxStatementModal()}
+              {false && viewingCajaMovements && (
               <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
                 <motion.div
                   initial={{ opacity:0, y: 20 }}
@@ -2097,7 +3482,8 @@ Notas: ${closure.notes || 'N/A'}`;
                         {viewingCajaMovements === 'safe' && <ShieldCheck className="w-8 h-8 text-blue-400" />}
                         {viewingCajaMovements === 'transit' && <Truck className="w-8 h-8 text-amber-400" />}
                         {viewingCajaMovements === 'bank' && <Building2 className="w-8 h-8 text-emerald-400" />}
-                        Movimientos: {viewingCajaMovements === 'safe' ? 'En Tienda' : viewingCajaMovements === 'transit' ? 'En Tránsito' : 'Banco'}
+                        {viewingCajaMovements === 'banquitos' && <DollarSign className="w-8 h-8 text-blue-400" />}
+                        Movimientos: {viewingCajaMovements === 'safe' ? 'En Tienda' : viewingCajaMovements === 'transit' ? 'En Transito' : viewingCajaMovements === 'bank' ? 'Banco' : 'Banquitos'}
                       </h3>
                       <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Historial detallado de transacciones</p>
                     </div>
@@ -2219,7 +3605,7 @@ Notas: ${closure.notes || 'N/A'}`;
             )}
           </AnimatePresence>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-12 text-left">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6 mb-12 text-left">
             <div
               onDoubleClick={() => setViewingCajaMovements('safe')}
               onContextMenu={(e) => {
@@ -2250,7 +3636,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </div>
               <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
                 <Truck className="w-3 h-3 text-amber-400" />
-                En Tránsito
+                En Transito
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedTransitTotal.toLocaleString('es-CL')}</p>
             </div>
@@ -2270,6 +3656,23 @@ Notas: ${closure.notes || 'N/A'}`;
                 Banco
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBankTotal.toLocaleString('es-CL')}</p>
+            </div>
+            <div
+              onDoubleClick={() => setViewingCajaMovements('banquitos')}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({ x: e.clientX, y: e.clientY, caja: 'banquitos' });
+              }}
+              className="bg-[#1E293B] p-8 rounded-[2rem] border border-blue-500/20 relative overflow-hidden group cursor-pointer hover:border-blue-500/50 transition-colors"
+            >
+              <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
+                <DollarSign className="w-16 h-16 text-blue-400" />
+              </div>
+              <p className="text-xs font-black text-blue-400/70 uppercase tracking-widest mb-4 flex items-center gap-2">
+                <DollarSign className="w-3 h-3 text-blue-400" />
+                Banquitos
+              </p>
+              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBanquitosTotal.toLocaleString('es-CL')}</p>
             </div>
             <div
               onDoubleClick={() => setHistoryView({ type: 'outflow', title: 'GASTOS TOTALES' })}
@@ -2392,7 +3795,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             </h3>
                             <div className="h-px bg-white/5 flex-1" />
                             <span className="text-[10px] font-black text-rose-500/50 bg-rose-500/5 px-3 py-1 rounded-full">
-                              TOTAL DÍA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
+                              TOTAL DIA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
                             </span>
                           </div>
 
@@ -2408,7 +3811,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                     <div>
                                       <div className="flex items-center gap-2 mb-1">
                                         <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                                          {format(parseISO(m.date), 'HH:mm')} • {m.category || 'GENERAL'}
+                                          {format(parseISO(m.date), 'HH:mm')} ⬢ {m.category || 'GENERAL'}
                                         </span>
                                         {m.from && (
                                           <span className="text-[9px] bg-white/10 text-slate-400 px-2 py-0.5 rounded-lg font-black tracking-widest uppercase">
@@ -2526,19 +3929,20 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 <option value="all">Todos los Estados</option>
                 <option value="safe">En Tienda</option>
-                <option value="transit">En Tránsito</option>
+                <option value="transit">En Transito</option>
                 <option value="bank">En Banco</option>
+                <option value="banquitos">En Banquitos</option>
               </select>
               <select
                 value={filterAudit}
                 onChange={e => setFilterAudit(e.target.value as ClosureAuditStatus)}
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
-                <option value="all">Toda Auditoría</option>
+                <option value="all">Toda Auditoria</option>
                 <option value="difference">Con Diferencia</option>
                 <option value="pending_report">Falta Venta Sistema</option>
                 <option value="matched">Auditado OK</option>
-                <option value="not_audited">Sin Auditoría</option>
+                <option value="not_audited">Sin Auditoria</option>
               </select>
               <button
                 onClick={() => setHideCollected(!hideCollected)}
@@ -2616,386 +4020,38 @@ Notas: ${closure.notes || 'N/A'}`;
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-[#1D283A] border-b border-white/5 align-top">
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 min-w-[190px]">
-                      {renderColumnHeader('date', 'Fecha y Hora', <Calendar className="w-3 h-3" />)}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 min-w-[220px]">
-                      {renderColumnHeader('responsible', 'Responsable', <UserIcon className="w-3 h-3" />)}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
-                      {renderColumnHeader('physicalAmount', '$ Físico', <Banknote className="w-3 h-3" />, 'center')}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[190px]">
-                      {renderColumnHeader('systemAmount', 'Venta Sistema', <Calculator className="w-3 h-3" />, 'center')}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[190px]">
-                      {renderColumnHeader('systemBalance', 'Cuadre Sistema', <Wallet className="w-3 h-3" />, 'center')}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
-                      {renderColumnHeader('difference', 'Diferencia', <AlertCircle className="w-3 h-3" />, 'center')}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
-                      {renderColumnHeader('status', 'Estado', <ShieldCheck className="w-3 h-3" />, 'center')}
-                    </th>
-                    <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-right min-w-[130px]">Acciones</th>
+                    {closureTableColumnOrder.map(renderDraggableClosureHeader)}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                   {isInlineAdding && (
+                  {isInlineAdding && (
                     <tr className="bg-blue-950/20 border-y-2 border-blue-500/30">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-xl px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
-                          <input
-                            ref={dateInputRef}
-                            type="datetime-local"
-                            value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
-                            onChange={e => {
-                              if (!e.target.value) return;
-                              try {
-                                const d = new Date(e.target.value);
-                                if (!isNaN(d.getTime())) {
-                                  setInlineAddValues({...inlineAddValues, date: d.toISOString()});
-                                }
-                              } catch (e) {}
-                            }}
-                            onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, responsibleInputRef)}
-                            className="w-full bg-transparent outline-none text-white font-sans font-bold text-[10px]"
-                          />
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-blue-500">
-                          <input
-                            ref={responsibleInputRef}
-                            list="responsibles-list"
-                            type="text"
-                            value={inlineAddValues.responsible}
-                            onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, responsible: e.target.value.toUpperCase()})}
-                            onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, physicalAmountRef, dateInputRef)}
-                            className="w-full bg-transparent outline-none text-white placeholder:text-slate-600 font-bold text-xs uppercase"
-                            placeholder="RESPONSABLE"
-                          />
-                          <datalist id="responsibles-list">
-                            {uniqueResponsibles.map(r => <option key={r} value={r} />)}
-                          </datalist>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input
-                            ref={physicalAmountRef}
-                            type="number"
-                            min="0"
-                            value={inlineAddValues.physicalAmount || ''}
-                            onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
-                            onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemAmountRef, responsibleInputRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
-                            placeholder="FÍSICO"
-                          />
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input
-                            ref={systemAmountRef}
-                            type="number"
-                            min="0"
-                            value={inlineAddValues.systemAmount || ''}
-                            onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemAmount: toNonNegativeNumber(e.target.value)})}
-                            onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemBalanceRef, physicalAmountRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
-                            placeholder="VENTA"
-                          />
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-white/20">
-                          <input
-                            ref={systemBalanceRef}
-                            type="number"
-                            min="0"
-                            value={inlineAddValues.systemBalance || ''}
-                            onFocus={e => e.target.select()}
-                            onChange={e => setInlineAddValues({...inlineAddValues, systemBalance: toNonNegativeNumber(e.target.value)})}
-                            onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, undefined, systemAmountRef)}
-                            className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
-                            placeholder="CUADRE"
-                          />
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <div className={`inline-flex px-3 py-1 rounded-full text-[10px] font-black ${((inlineAddValues.physicalAmount || 0) - (inlineAddValues.systemBalance || 0)) < 0 ? 'bg-rose-500/20 text-rose-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                          ${((inlineAddValues.physicalAmount || 0) - (inlineAddValues.systemBalance || 0)).toLocaleString('es-CL')}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <select
-                          value={inlineAddValues.status || 'safe'}
-                          onChange={e => setInlineAddValues({...inlineAddValues, status: e.target.value as ClosureCashBoxStatus})}
-                          className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
-                        >
-                          <option value="safe">Tienda</option>
-                          <option value="transit">Transito</option>
-                          <option value="bank">Banco</option>
-                        </select>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex justify-end gap-2">
-                           <button
-                            onClick={() => {
-                              const note = prompt('Notas / Observaciones:', inlineAddValues.notes || '');
-                              if (note !== null) setInlineAddValues({...inlineAddValues, notes: note});
-                            }}
-                            className={`p-2 rounded-xl transition-all ${inlineAddValues.notes ? 'bg-blue-500 text-white' : 'bg-white/5 text-slate-500'}`}
-                          >
-                            <MessageSquare className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={handleSaveInlineAdd}
-                            disabled={isSaving}
-                            className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-xl transition-all shadow-lg shadow-blue-500/20 disabled:opacity-50"
-                          >
-                            <Check className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => setIsInlineAdding(false)}
-                            className="bg-white/5 hover:bg-white/10 text-slate-500 p-2 rounded-xl transition-all"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
+                      {closureTableColumnOrder.map(renderInlineAddCell)}
                     </tr>
-                   )}
-                   {groupedClosures.map(group => (
-                     <React.Fragment key={group.date}>
-                        <tr onClick={() => toggleDay(group.date)} className="bg-white/[0.03] cursor-pointer hover:bg-white/[0.06] transition-colors border-y border-white/5">
-                           <td className="px-6 py-4">
-                             <div className="flex items-center gap-3">
-                                <div className="p-2 bg-white/5 rounded-lg border border-white/5">
-                                  <RefreshCw className="w-4 h-4 text-slate-500" />
-                                </div>
-                                <div>
-                                  <div className="font-black text-white text-sm">{format(parseISO(group.date), 'EEEE, dd MMMM', { locale: es })}</div>
-                                  <div className="text-[10px] font-black text-blue-500 uppercase tracking-widest">{group.items.length} Registros</div>
-                                </div>
-                             </div>
-                           </td>
-                           <td className="px-6 py-4">
-                             <div className="flex items-center gap-2">
-                                <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
-                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Resumen del día</span>
-                             </div>
-                           </td>
-                           <td className="px-6 py-4 text-center font-black text-white font-sans text-sm">${group.totals.physicalAmount.toLocaleString('es-CL')}</td>
-                           <td className="px-6 py-4 text-center font-black text-slate-500 font-sans text-sm">${group.totals.systemAmount.toLocaleString('es-CL')}</td>
-                           <td className="px-6 py-4 text-center font-black text-slate-500 font-sans text-sm">${(group.totals.systemBalance || 0).toLocaleString('es-CL')}</td>
-                           <td className="px-6 py-4 text-center">
-                              <div className={`inline-flex px-4 py-1.5 rounded-full text-[11px] font-black shadow-lg ${group.totals.difference < 0 ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20' : 'bg-blue-500/10 text-blue-400 border border-blue-500/20'}`}>
-                                {group.totals.difference >= 0 ? '+' : ''}{group.totals.difference.toLocaleString('es-CL')}
-                              </div>
-                           </td>
-                           <td className="px-6 py-4 text-center">
-                              <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
-                                {closureCashBoxStatuses.map(status => {
-                                  const statusInfo = getDayStatusInfo(status);
-                                  const StatusIcon = statusInfo.Icon;
-                                  const active = group.status === status;
-
-                                  return (
-                                    <button
-                                      key={status}
-                                      type="button"
-                                      onClick={() => setDayStatus(group.date, status)}
-                                      title={`Enviar todos los cierres del d�a a ${statusInfo.label}`}
-                                      className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
-                                    >
-                                      <StatusIcon className="w-3 h-3" />
-                                      {status === 'safe' ? 'Tienda' : status === 'transit' ? 'Transito' : 'Banco'}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                           </td>
-                           <td className="px-6 py-4 text-right">
-                              <ChevronDown className={`w-5 h-5 text-slate-700 transition-transform ml-auto ${expandedDays[group.date] ? 'rotate-180' : ''}`} />
-                           </td>
+                  )}
+                  {groupedClosures.map(group => (
+                    <React.Fragment key={group.date}>
+                      <tr onClick={() => toggleDay(group.date)} className="bg-white/[0.03] cursor-pointer hover:bg-white/[0.06] transition-colors border-y border-white/5">
+                        {closureTableColumnOrder.map(column => renderGroupSummaryCell(group, column))}
+                      </tr>
+                      {expandedDays[group.date] && group.items.map(closure => (
+                        inlineEditingId === closure.id ? (
+                          <tr key={closure.id} className="bg-blue-950/30 border-y border-blue-500/20">
+                            {closureTableColumnOrder.map(renderInlineEditCell)}
+                          </tr>
+                        ) : (
+                          <tr key={closure.id} className="hover:bg-white/[0.02] border-b border-white/5 group">
+                            {closureTableColumnOrder.map(column => renderClosureCell(closure, column))}
+                          </tr>
+                        )
+                      ))}
+                      {expandedDays[group.date] && group.missingRows.map(row => (
+                        <tr key={`missing-${row.key}`} className="bg-amber-500/[0.04] border-b border-amber-500/10">
+                          {closureTableColumnOrder.map(column => renderMissingRowCell(row, column))}
                         </tr>
-                        {expandedDays[group.date] && group.items.map(closure => (
-                          inlineEditingId === closure.id ? (
-                            <tr key={closure.id} className="bg-blue-950/30 border-y border-blue-500/20">
-                               <td className="px-6 py-4">
-                                <div className="flex items-center bg-[#1E293B] border border-blue-500 rounded-xl px-2 py-1.5 focus-within:ring-2 focus-within:ring-blue-500/50">
-                                  <input
-                                    type="datetime-local"
-                                    value={inlineEditValues.date ? format(parseISO(inlineEditValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, date: new Date(e.target.value).toISOString()})}
-                                    className="bg-transparent outline-none text-white font-sans font-bold text-[10px] w-full"
-                                  />
-                                </div>
-                              </td>
-                              <td className="px-6 py-4">
-                                <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5 focus-within:border-blue-500">
-                                  <input
-                                    type="text"
-                                    value={inlineEditValues.responsible}
-                                    onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, responsible: e.target.value.toUpperCase()})}
-                                    onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
-                                    className="bg-transparent outline-none text-white font-black text-sm uppercase w-full"
-                                  />
-                                </div>
-                              </td>
-                              <td className="px-6 py-4">
-                                <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={inlineEditValues.physicalAmount}
-                                    onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
-                                    onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
-                                    className="bg-transparent outline-none text-white text-center font-black font-sans text-sm w-full"
-                                  />
-                                </div>
-                              </td>
-                              <td className="px-6 py-4">
-                                <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={inlineEditValues.systemAmount}
-                                    onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, systemAmount: toNonNegativeNumber(e.target.value)})}
-                                    onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
-                                    className="bg-transparent outline-none text-slate-400 text-center font-black font-sans text-sm w-full"
-                                  />
-                                </div>
-                              </td>
-                              <td className="px-6 py-4">
-                                <div className="flex items-center bg-[#1E293B] border border-white/10 rounded-xl px-3 py-1.5">
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={inlineEditValues.systemBalance}
-                                    onFocus={e => e.target.select()}
-                                    onChange={e => setInlineEditValues({...inlineEditValues, systemBalance: toNonNegativeNumber(e.target.value)})}
-                                    onKeyDown={(e) => handleKeyDown(e, handleSaveInlineEdit)}
-                                    className="bg-transparent outline-none text-slate-400 text-center font-black font-sans text-sm w-full"
-                                  />
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 text-center">
-                                <div className={`inline-flex px-3 py-1 rounded-full text-xs font-black ${((inlineEditValues.physicalAmount || 0) - (inlineEditValues.systemBalance || 0)) < 0 ? 'bg-rose-500/20 text-rose-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                                  ${( (inlineEditValues.physicalAmount || 0) - (inlineEditValues.systemBalance || 0) ).toLocaleString('es-CL')}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 text-center">
-                                <select
-                                  value={inlineEditValues.status || 'safe'}
-                                  onChange={e => setInlineEditValues({...inlineEditValues, status: e.target.value as ClosureCashBoxStatus})}
-                                  className="bg-[#0F172A] border border-white/10 rounded-xl px-2 py-2 text-[10px] font-black uppercase text-white outline-none"
-                                >
-                                  <option value="safe">Tienda</option>
-                                  <option value="transit">Transito</option>
-                                  <option value="bank">Banco</option>
-                                </select>
-                              </td>
-                              <td className="px-6 py-4 text-right">
-                                <div className="flex justify-end gap-2">
-                                  <button onClick={handleSaveInlineEdit} disabled={isSaving} className="p-2 bg-blue-600 rounded-xl text-white shadow-lg shadow-blue-500/20 disabled:opacity-50"><Check className="w-4 h-4" /></button>
-                                  <button onClick={handleCancelInlineEdit} className="p-2 bg-white/5 rounded-xl text-slate-500"><X className="w-4 h-4" /></button>
-                                </div>
-                              </td>
-                            </tr>
-                          ) : (
-                            <tr key={closure.id} className="hover:bg-white/[0.02] border-b border-white/5 group">
-                              <td className="px-6 py-4">
-                                <div className="flex flex-col">
-                                  <span className="text-sm font-black text-slate-200">{format(parseISO(closure.date), 'dd MMM', { locale: es })}</span>
-                                  <span className="text-[10px] font-black text-slate-500 uppercase">{format(parseISO(closure.date), 'HH:mm')} HRS</span>
-                                </div>
-                              </td>
-                              <td className="px-6 py-4">
-                                <div className="flex items-center gap-3">
-                                   <div className="w-8 h-8 bg-white/5 rounded-full flex items-center justify-center border border-white/5">
-                                      <UserIcon className="w-4 h-4 text-slate-500" />
-                                   </div>
-                                   <div className="flex flex-col gap-2">
-                                     <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
-                                     {(() => {
-                                       const auditInfo = getClosureAuditInfo(closure);
-                                       if (auditInfo.status === 'not_audited') return null;
-
-                                       return (
-                                         <span
-                                           title={auditInfo.detail}
-                                           className={`w-fit inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[8px] font-black uppercase tracking-widest ${auditInfo.className}`}
-                                         >
-                                           {auditInfo.status === 'difference'
-                                             ? <ShieldAlert className="w-3 h-3" />
-                                             : auditInfo.status === 'matched'
-                                               ? <CheckCircle2 className="w-3 h-3" />
-                                               : <FileText className="w-3 h-3" />}
-                                           {auditInfo.label}
-                                         </span>
-                                       );
-                                     })()}
-                                   </div>
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 text-center font-black text-white font-sans text-sm">
-                                ${closure.physicalAmount.toLocaleString('es-CL')}
-                              </td>
-                              <td className="px-6 py-4 text-center font-black text-slate-500 font-sans text-sm">${closure.systemAmount.toLocaleString('es-CL')}</td>
-                              <td className="px-6 py-4 text-center font-black text-slate-500 font-sans text-sm">${(closure.systemBalance || 0).toLocaleString('es-CL')}</td>
-                              <td className="px-6 py-4 text-center">
-                                 <div className={`inline-flex px-3 py-1 rounded-full text-[10px] font-black border ${closure.difference < 0 ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'}`}>
-                                    {closure.difference >= 0 ? <AlertCircle className="w-3 h-3 mr-1" /> : <ShieldAlert className="w-3 h-3 mr-1" />}
-                                    {closure.difference >= 0 ? '+' : ''}{closure.difference.toLocaleString('es-CL')}
-                                 </div>
-                              </td>
-                              <td className="px-6 py-4 text-center">
-                                <div className="flex items-center justify-center gap-1">
-                                  {closureCashBoxStatuses.map(status => {
-                                    const currentStatus = closure.id
-                                      ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
-                                      : normalizeClosureCashBoxStatus(closure.status);
-                                    const statusInfo = getDayStatusInfo(status);
-                                    const StatusIcon = statusInfo.Icon;
-                                    const active = currentStatus === status;
-
-                                    return (
-                                      <button
-                                        key={status}
-                                        type="button"
-                                        onClick={() => setClosureStatus(closure.id!, status)}
-                                        title={statusInfo.label}
-                                        className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
-                                      >
-                                        <StatusIcon className="w-3 h-3" />
-                                        {status === 'safe' ? 'Tienda' : status === 'transit' ? 'Transito' : 'Banco'}
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 text-right">
-                                <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <button onClick={() => handleToggleClosureSelection(closure.id!)} title="Seleccionar para Viaje" className={`p-2 rounded-lg transition-colors ${selectedClosures.has(closure.id!) ? 'text-blue-500 bg-blue-500/10' : 'text-slate-600 hover:text-white'}`}><CheckCircle2 className="w-4 h-4" /></button>
-                                  {closure.notes && <button onClick={() => alert(closure.notes)} className="p-2 text-blue-400 hover:bg-blue-500/10 rounded-lg"><MessageSquare className="w-4 h-4" /></button>}
-                                  <button onClick={() => handleEdit(closure)} className="p-2 text-slate-500 hover:text-white hover:bg-white/5 rounded-lg"><Edit2 className="w-4 h-4" /></button>
-                                  <button onClick={() => handleDelete(closure.id!)} className="p-2 text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg"><Trash2 className="w-4 h-4" /></button>
-                                </div>
-                              </td>
-                            </tr>
-                          )
-                        ))}
-                     </React.Fragment>
-                   ))}
+                      ))}
+                    </React.Fragment>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -3051,7 +4107,7 @@ Notas: ${closure.notes || 'N/A'}`;
                   </div>
 
                   <div>
-                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Nombre / Descripción del Viaje</label>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Nombre / Descripcion del Viaje</label>
                     <input
                       type="text"
                       value={tripFormValues.description}
@@ -3067,7 +4123,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       value={tripFormValues.notes}
                       onChange={e => setTripFormValues({...tripFormValues, notes: e.target.value})}
                       className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] resize-none"
-                      placeholder="Agrega aquí cualquier observación relevante sobre este retiro de fondos..."
+                      placeholder="Agrega aqui cualquier observacion relevante sobre este retiro de fondos..."
                     />
                   </div>
 
@@ -3163,7 +4219,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            <div className="text-right">
                              <p className="text-xl font-black text-white font-sans tracking-tight">${trip.totalAmount.toLocaleString('es-CL')}</p>
                              <span className={`text-[8px] font-black uppercase tracking-widest px-3 py-1 rounded-full mt-2 inline-block ${trip.status === 'completed' ? 'bg-emerald-500/20 text-emerald-500' : 'bg-amber-500/20 text-amber-500 animate-pulse'}`}>
-                               {trip.status === 'completed' ? 'Depositado' : 'En Tránsito'}
+                               {trip.status === 'completed' ? 'Depositado' : 'En Transito'}
                              </span>
                            </div>
                          </div>
@@ -3188,7 +4244,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            {trip.status === 'in_transit' && (
                              <button onClick={() => handleCompleteTrip(trip.id!)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-500/20 flex items-center gap-2">
                                <CheckCircle2 className="w-4 h-4" />
-                               Confirmar Depósito
+                               Confirmar Deposito
                              </button>
                            )}
                            <button onClick={() => setViewingTripId(null)} className="p-3 bg-white/5 hover:bg-rose-500/20 text-slate-500 hover:text-rose-500 rounded-2xl transition-all"><X className="w-6 h-6" /></button>
@@ -3252,7 +4308,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                   value={editedTripNotes}
                                   onChange={e => setEditedTripNotes(e.target.value)}
                                   className="w-full bg-transparent outline-none text-white text-sm leading-relaxed min-h-[100px] resize-none"
-                                  placeholder="Escribe tus observaciones aquí..."
+                                  placeholder="Escribe tus observaciones aqui..."
                                   autoFocus
                                 />
                               ) : (
@@ -3316,7 +4372,7 @@ Notas: ${closure.notes || 'N/A'}`;
                  <Printer className="w-6 h-6" />
                </div>
                <div>
-                  <h3 className="text-xl font-black uppercase tracking-tight">Previsualización de Reporte</h3>
+                  <h3 className="text-xl font-black uppercase tracking-tight">Previsualizacion de Reporte</h3>
                   <p className="text-slate-400 text-xs uppercase tracking-widest">{format(new Date(), "EEEE dd 'de' MMMM", { locale: es })}</p>
                </div>
              </div>
@@ -3337,10 +4393,10 @@ Notas: ${closure.notes || 'N/A'}`;
               <div className="flex justify-between items-start border-b-4 border-slate-950 pb-10 mb-12">
                 <div>
                   <h1 className="text-5xl font-black text-slate-950 mb-2 font-sans">REPORTE DE CIERRES</h1>
-                  <p className="text-slate-500 font-sans font-black tracking-widest text-sm uppercase">Consolidado de Operaciones • Sistema 1.1</p>
+                  <p className="text-slate-500 font-sans font-black tracking-widest text-sm uppercase">Consolidado de Operaciones ⬢ Sistema 1.1</p>
                   <p className="text-slate-500 text-xs mt-4 uppercase font-bold tracking-widest flex items-center gap-2">
                     <Calendar className="w-3 h-3" />
-                    Periodo: {format(parseISO(filterStartDate), 'dd/MM/yyyy')} — {format(parseISO(filterEndDate), 'dd/MM/yyyy')}
+                    Periodo: {format(parseISO(filterStartDate), 'dd/MM/yyyy')} - {format(parseISO(filterEndDate), 'dd/MM/yyyy')}
                   </p>
                 </div>
                 <div className="text-right">
@@ -3380,7 +4436,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         {format(parseISO(group.date), 'EEEE dd MMMM yyyy', { locale: es })}
                       </h3>
                       <div className="text-right">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mr-4">Total Día</span>
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest mr-4">Total Dia</span>
                         <span className="text-lg font-black text-slate-950 font-sans">${group.totals.physicalAmount.toLocaleString('es-CL')}</span>
                       </div>
                     </div>
@@ -3390,7 +4446,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         <tr className="text-slate-500 font-black text-[10px] uppercase tracking-widest text-left border-b border-slate-100">
                           <th className="py-4">Hora</th>
                           <th className="py-4">Responsable</th>
-                          <th className="py-4 text-right">Monto Físico</th>
+                          <th className="py-4 text-right">Monto Fisico</th>
                           <th className="py-4 text-right">Diferencia</th>
                           <th className="py-4 text-center">Estado</th>
                         </tr>
@@ -3408,7 +4464,7 @@ Notas: ${closure.notes || 'N/A'}`;
                               <span className="text-[8px] font-black uppercase tracking-widest bg-slate-100 px-2 py-1 rounded">
                                 {(() => {
                                   const itemStatus = getClosureDisplayStatus(item);
-                                  return itemStatus === 'bank' ? 'En Banco' : itemStatus === 'transit' ? 'Tránsito' : 'En Tienda';
+                                  return itemStatus === 'bank' ? 'En Banco' : itemStatus === 'transit' ? 'Transito' : itemStatus === 'banquitos' ? 'Banquitos' : 'En Tienda';
                                 })()}
                               </span>
                             </td>
@@ -3422,13 +4478,13 @@ Notas: ${closure.notes || 'N/A'}`;
 
               {/* Footer */}
               <div className="mt-20 pt-10 border-t border-slate-200 text-center">
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Fin del Reporte — Registro de Auditoría: {new Date().getTime()}</p>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em]">Fin del Reporte - Registro de Auditoria: {new Date().getTime()}</p>
                 <div className="mt-8 flex justify-center gap-20">
                   <div className="w-48 border-t border-slate-300 pt-2">
                     <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Firma Responsable</p>
                   </div>
                   <div className="w-48 border-t border-slate-300 pt-2">
-                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Firma Revisión</p>
+                    <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Firma Revision</p>
                   </div>
                 </div>
               </div>
@@ -3463,7 +4519,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-sm outline-none focus:ring-2 focus:ring-purple-500"
                     />
                     <p className="mt-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
-                      Esta fecha será usada para ordenar el movimiento y afectar el estado del dinero.
+                      Esta fecha sera usada para ordenar el movimiento y afectar el estado del dinero.
                     </p>
                   </div>
 
@@ -3532,10 +4588,11 @@ Notas: ${closure.notes || 'N/A'}`;
                           className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                         >
                           <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                          <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
+                          <option value="transit" className="bg-[#0F172A] text-white">En Transito</option>
                           {movementValues.type === 'internal_transfer' && (
                             <>
                               <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                              <option value="banquitos" className="bg-[#0F172A] text-white">Banquitos</option>
                               <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                             </>
                           )}
@@ -3554,8 +4611,9 @@ Notas: ${closure.notes || 'N/A'}`;
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                            <option value="transit" className="bg-[#0F172A] text-white">En Tr�nsito</option>
+                            <option value="transit" className="bg-[#0F172A] text-white">En Transito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <option value="banquitos" className="bg-[#0F172A] text-white">Banquitos</option>
                             <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
                         )}
@@ -3574,14 +4632,15 @@ Notas: ${closure.notes || 'N/A'}`;
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                            <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
+                            <option value="transit" className="bg-[#0F172A] text-white">En Transito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
+                            <option value="banquitos" className="bg-[#0F172A] text-white">Banquitos</option>
                             <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
                         </div>
                         <div>
                           <div className="flex justify-between mb-2">
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Categoría</label>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Categoria</label>
                             <button
                               onClick={() => setIsAddingNewCategory(!isAddingNewCategory)}
                               className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
@@ -3618,7 +4677,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       </div>
                       <div>
                         <div className="flex justify-between mb-2">
-                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Subcategoría</label>
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Subcategoria</label>
                           <button
                             onClick={() => setIsAddingNewSubcategory(!isAddingNewSubcategory)}
                             className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
@@ -3653,6 +4712,19 @@ Notas: ${closure.notes || 'N/A'}`;
                           </select>
                         )}
                       </div>
+
+                      {(movementValues.category || '').toLowerCase() === 'sueldos' && (
+                        <button
+                          onClick={() => {
+                            setIsAddingMovement(false);
+                            setCurrentView('payroll');
+                          }}
+                          className="w-full flex items-center justify-center gap-2 rounded-2xl border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-blue-200"
+                        >
+                          <Users className="w-4 h-4" />
+                          Abrir modulo de pago al personal
+                        </button>
+                      )}
 
                       <div>
                         <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Etiquetas para reportes</label>
@@ -3709,8 +4781,9 @@ Notas: ${closure.notes || 'N/A'}`;
                 </div>
               </motion.div>
             </div>
-          )}
-       </AnimatePresence>
+              )}
+         </AnimatePresence>
+        </div>
     </>
   );
 }
@@ -3722,3 +4795,4 @@ export default function App() {
     </ErrorBoundary>
   );
 }
+

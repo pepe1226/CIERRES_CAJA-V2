@@ -1,9 +1,5 @@
-import {
-  auditClosuresWithPerseoRows,
-  isPerseoAuthorized,
-  parsePerseoReport,
-  savePerseoReport,
-} from "../_lib/perseoAudit.js";
+import { isPerseoAuthorized } from "../_lib/perseoAudit.js";
+import { parsePerseoInventory, savePerseoInventory } from "../_lib/perseoInventory.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -34,32 +30,24 @@ export default async function handler(req: any, res: any) {
   }
 
   const body = getBody(req);
-  const rows = parsePerseoReport(body);
+  const rows = parsePerseoInventory(body);
 
   if (rows.length === 0) {
     return res.status(400).json({
       ok: false,
-      error: "No se encontraron filas validas. Envie JSON con rows/data o CSV con fecha, responsable y sistema.",
+      error: "No se encontraron filas validas para inventario. Envie JSON con rows/data o CSV con nombre y stock.",
     });
   }
 
-  const reportId = await savePerseoReport({
-    source: typeof body === "object" && body ? String((body as any).source || "api") : "api",
+  const saved = await savePerseoInventory({
+    source: typeof body === "object" && body ? String((body as any).source || "perseo-inventory") : "perseo-inventory",
     rows,
     rawInput: body,
-    dailySystemAmountByDate: typeof body === "object" && body ? (body as any).dailySystemAmountByDate : undefined,
-  });
-
-  const audit = await auditClosuresWithPerseoRows({
-    rows,
-    reportId,
-    tolerance: typeof body === "object" && body ? Number((body as any).tolerance || 0.10) : 0.10,
   });
 
   return res.status(200).json({
     ok: true,
-    reportId,
-    ...audit,
+    imported: rows.length,
+    ...saved,
   });
 }
-

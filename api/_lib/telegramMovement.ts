@@ -1,11 +1,13 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
+import { knownCashierPrompt } from "./cashierNames.js";
 
 type GeminiTipo = "ingreso" | "egreso" | "transferencia" | "desconocido";
 type AppMovementType = "inflow" | "outflow" | "transfer" | "internal_transfer";
 type CajaId = "safe" | "transit" | "bank";
 
 const ACTIVE_BUSINESS_YEAR = 2026;
+const BUSINESS_TIME_ZONE = "America/Guayaquil";
 
 export type TelegramFinancialExtraction = {
   tipo: GeminiTipo;
@@ -42,9 +44,11 @@ export function getTelegramConfig() {
     telegramExpenseSecretToken: env("TELEGRAM_EXPENSE_SECRET_TOKEN"),
     telegramPersonalSecretToken: env("TELEGRAM_PERSONAL_SECRET_TOKEN"),
     telegramAllowedChatId: env("TELEGRAM_ALLOWED_CHAT_ID"),
+    telegramPersonalAllowedChatId: env("TELEGRAM_PERSONAL_ALLOWED_CHAT_ID"),
     telegramCreatedByUid: env("TELEGRAM_CREATED_BY_UID", "telegram-bot"),
     geminiApiKey: env("GEMINI_API_KEY"),
     geminiModel: env("GEMINI_MODEL", "gemini-2.5-flash"),
+    geminiFallbackModels: env("GEMINI_FALLBACK_MODELS", "gemini-3.1-flash-lite-preview"),
   };
 }
 
@@ -68,6 +72,7 @@ export function getTelegramStatus() {
     hasGeminiApiKey: Boolean(config.geminiApiKey),
     geminiModel: config.geminiModel,
     allowedChatId: config.telegramAllowedChatId || null,
+    personalAllowedChatId: config.telegramPersonalAllowedChatId || null,
     telegramCreatedByUid: config.telegramCreatedByUid,
   };
 }
@@ -116,7 +121,6 @@ export async function sendTelegramMessage(
     console.error("No se pudo responder en Telegram:", error);
   }
 }
-
 export async function editTelegramMessageText(params: {
   chatId: number | string;
   messageId: number;
@@ -276,10 +280,18 @@ function isValidDateParts(year: number, month: number, day: number) {
 }
 
 function getFallbackDateParts(fallbackDate: Date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(fallbackDate);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
   return {
     year: ACTIVE_BUSINESS_YEAR,
-    month: fallbackDate.getUTCMonth() + 1,
-    day: fallbackDate.getUTCDate(),
+    month: Number(values.month),
+    day: Number(values.day),
   };
 }
 
@@ -298,9 +310,13 @@ function toBusinessDate(year: number, month: number, day: number, fallbackDate: 
   return new Date(Date.UTC(normalizedYear, month - 1, day, 12, 0, 0));
 }
 
-function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
+function parseBusinessDateCandidate(value: string | null, fallbackDate: Date): Date {
+  const fallback = getFallbackDateParts(fallbackDate);
+  const fallbackBusinessDate =
+    toBusinessDate(fallback.year, fallback.month, fallback.day, fallbackDate) || fallbackDate;
+
   if (!value) {
-    return fallbackDate;
+    return fallbackBusinessDate;
   }
 
   const text = value
@@ -308,14 +324,12 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
     .replace(/\s+/g, "")
     .replace(/[.]/g, "-");
 
-  const fallback = getFallbackDateParts(fallbackDate);
-
   const dayOnlyMatch = text.match(/^(\d{1,2})$/);
 
   if (dayOnlyMatch) {
     const parsed = toBusinessDate(fallback.year, fallback.month, Number(dayOnlyMatch[1]), fallbackDate);
 
-    return parsed || fallbackDate;
+    return parsed || fallbackBusinessDate;
   }
 
   const dayMonthMatch = text.match(/^(\d{1,2})[-/](\d{1,2})$/);
@@ -323,7 +337,7 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
   if (dayMonthMatch) {
     const parsed = toBusinessDate(fallback.year, Number(dayMonthMatch[2]), Number(dayMonthMatch[1]), fallbackDate);
 
-    return parsed || fallbackDate;
+    return parsed || fallbackBusinessDate;
   }
 
   const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -333,7 +347,7 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
     const month = Number(isoMatch[2]);
     const day = Number(isoMatch[3]);
 
-    return toBusinessDate(year, month, day, fallbackDate) || fallbackDate;
+    return toBusinessDate(year, month, day, fallbackDate) || fallbackBusinessDate;
   }
 
   const shortDateMatch = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/);
@@ -343,11 +357,11 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
     const month = Number(shortDateMatch[2]);
     const year = Number(shortDateMatch[3]);
 
-    return toBusinessDate(year, month, day, fallbackDate) || fallbackDate;
+    return toBusinessDate(year, month, day, fallbackDate) || fallbackBusinessDate;
   }
 
   if (/^\d+$/.test(text)) {
-    return fallbackDate;
+    return fallbackBusinessDate;
   }
 
   const parsed = new Date(value);
@@ -356,7 +370,31 @@ function parseBusinessDate(value: string | null, fallbackDate: Date): Date {
     return parsed;
   }
 
-  return fallbackDate;
+  return fallbackBusinessDate;
+}
+
+function resolveBusinessDate(value: string | null, fallbackDate: Date) {
+  const fallback = getFallbackDateParts(fallbackDate);
+  const fallbackBusinessDate =
+    toBusinessDate(fallback.year, fallback.month, fallback.day, fallbackDate) || fallbackDate;
+  const candidateDate = parseBusinessDateCandidate(value, fallbackDate);
+  const isFutureDate = candidateDate.getTime() > fallbackBusinessDate.getTime();
+
+  if (isFutureDate) {
+    return {
+      date: fallbackBusinessDate,
+      adjusted: true,
+      originalDate: candidateDate.toISOString().slice(0, 10),
+      correctionReason: "future_ocr_date",
+    };
+  }
+
+  return {
+    date: candidateDate,
+    adjusted: false,
+    originalDate: null,
+    correctionReason: null,
+  };
 }
 
 export function buildMovementFromExtraction(
@@ -371,7 +409,8 @@ export function buildMovementFromExtraction(
   const cajaOrigen = normalizeCaja(extraction.caja_origen) || caja;
   const cajaDestino = normalizeCaja(extraction.caja_destino);
 
-  const movementDate = parseBusinessDate(extraction.fecha, fallbackDate);
+  const dateResolution = resolveBusinessDate(extraction.fecha, fallbackDate);
+  const movementDate = dateResolution.date;
 
   const amount =
     typeof extraction.monto === "number" && Number.isFinite(extraction.monto)
@@ -467,6 +506,9 @@ export function buildMovementFromExtraction(
     createdAt: FieldValue.serverTimestamp(),
     source: "telegram",
     telegramProvider: "vercel",
+    telegramDateAdjusted: dateResolution.adjusted,
+    telegramOriginalDate: dateResolution.originalDate,
+    telegramDateCorrectionReason: dateResolution.correctionReason,
     telegramRequiresReview: requiresReview,
     telegramConfidence: confidence,
     telegramReviewReasons: requiresReview ? hardReviewReasons : [],
@@ -536,34 +578,46 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getGeminiModelCandidates(primaryModel: string, fallbackModels: string) {
+  return [primaryModel, ...fallbackModels.split(",")]
+    .map((model) => model.trim())
+    .filter(Boolean)
+    .filter((model, index, models) => models.indexOf(model) === index);
+}
+
 export async function extractFinancialDataFromImage(params: {
   imageBuffer: Buffer;
   mimeType: string;
   caption?: string;
+  referenceDate?: string;
   maxAttempts?: number;
   baseDelayMs?: number;
 }): Promise<TelegramFinancialExtraction> {
   const maxAttempts = Math.max(1, params.maxAttempts ?? 3);
   const baseDelayMs = Math.max(0, params.baseDelayMs ?? 1500);
+  const { geminiModel, geminiFallbackModels } = getTelegramConfig();
+  const models = getGeminiModelCandidates(geminiModel, geminiFallbackModels);
   let lastError: any = null;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      return await extractFinancialDataFromImageOnce(params);
-    } catch (error) {
-      lastError = error;
-      const temporary = isTemporaryGeminiError(error);
+  for (const model of models) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await extractFinancialDataFromImageOnce(params, model);
+      } catch (error) {
+        lastError = error;
+        const temporary = isTemporaryGeminiError(error);
 
-      console.error(
-        `Gemini falló en intento ${attempt}/${maxAttempts}:`,
-        getErrorMessage(error)
-      );
+        console.error(
+          `Gemini ${model} falló en intento ${attempt}/${maxAttempts}:`,
+          getErrorMessage(error)
+        );
 
-      if (!temporary || attempt >= maxAttempts) {
-        break;
+        if (!temporary || attempt >= maxAttempts) {
+          break;
+        }
+
+        await sleep(baseDelayMs * attempt);
       }
-
-      await sleep(baseDelayMs * attempt);
     }
   }
 
@@ -574,8 +628,9 @@ async function extractFinancialDataFromImageOnce(params: {
   imageBuffer: Buffer;
   mimeType: string;
   caption?: string;
-}): Promise<TelegramFinancialExtraction> {
-  const { geminiApiKey, geminiModel } = getTelegramConfig();
+  referenceDate?: string;
+}, model: string): Promise<TelegramFinancialExtraction> {
+  const { geminiApiKey } = getTelegramConfig();
 
   if (!geminiApiKey) {
     throw new Error("Falta GEMINI_API_KEY en Vercel.");
@@ -606,9 +661,12 @@ En estos casos:
 - Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes del mensaje de Telegram y anio 2026.
 - Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio 2026.
 - Nunca uses 26 como anio 0026 ni intercambies dia y anio.
+- La fecha local del mensaje de Telegram es ${params.referenceDate || "desconocida"}.
+- Una fecha de la foto nunca puede ser posterior a la fecha local del mensaje. Si la escritura es dudosa, usa la fecha del mensaje.
 - El monto es el valor escrito junto al símbolo $.
 - El responsable/cajero es el nombre escrito en la etiqueta, normalmente despues de ESQ, Responsable, Sr. o Sra.
 - Coloca el responsable/cajero en proveedor_cliente, no solo en descripcion.
+- ${knownCashierPrompt()}
 - El tipo debe ser "ingreso".
 - La caja debe ser "Principal".
 - La categoría debe ser "Cierre de caja".
@@ -625,7 +683,7 @@ ${params.caption || "Sin texto adicional"}
 `;
 
   const response = await ai.models.generateContent({
-    model: geminiModel,
+    model,
     contents: [
       {
         role: "user",
@@ -698,3 +756,4 @@ ${params.caption || "Sin texto adicional"}
 
   return JSON.parse(response.text || "{}");
 }
+

@@ -4,6 +4,7 @@ import {
   parsePerseoReport,
   savePerseoReport,
 } from "../_lib/perseoAudit.js";
+import { handleClosureStatus } from "../_lib/closureStatus.js";
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -23,6 +24,11 @@ export default async function handler(req: any, res: any) {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
 
+  const body = getBody(req);
+  if (body?.action === "closure_status") {
+    return handleClosureStatus(req, res);
+  }
+
   if (!isPerseoAuthorized(req)) {
     return res.status(401).json({
       ok: false,
@@ -30,7 +36,6 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const body = getBody(req);
   const rows = parsePerseoReport(body);
 
   if (rows.length === 0) {
@@ -44,7 +49,7 @@ export default async function handler(req: any, res: any) {
   const audit = await auditClosuresWithPerseoRows({
     rows,
     reportId,
-    tolerance: Number((body as any)?.tolerance || 0.01),
+    tolerance: Number((body as any)?.tolerance || 0.10),
   });
 
   return res.status(200).json({
