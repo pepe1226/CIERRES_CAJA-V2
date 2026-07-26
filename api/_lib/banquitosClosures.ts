@@ -62,6 +62,7 @@ const roundMoney = (value: unknown) => {
 const STORE_CLOSURES_CACHE_MS = 15_000;
 const STORE_CLOSURES_STALE_MS = 10 * 60_000;
 const STORE_CLOSURES_QUOTA_BACKOFF_MS = 30 * 60_000;
+const STORE_CLOSURES_FAST_RESPONSE_MS = 1_200;
 const STORE_CLOSURES_BOOTSTRAP_SNAPSHOT = {
   generatedAt: "2026-07-26T16:57:09.553Z",
   closures: [
@@ -260,15 +261,40 @@ const getAvailableStoreClosures = async (
   }
 
   try {
-    storeClosuresRequest ||= loadAvailableStoreClosures(database);
-    const closures = await storeClosuresRequest;
-    storeClosuresCache = { loadedAt: Date.now(), closures };
-    storeClosuresQuotaBackoffUntil = 0;
+    if (!storeClosuresRequest) {
+      storeClosuresRequest = loadAvailableStoreClosures(database)
+        .then((closures) => {
+          storeClosuresCache = { loadedAt: Date.now(), closures };
+          storeClosuresQuotaBackoffUntil = 0;
+          return closures;
+        })
+        .catch((error) => {
+          if (isQuotaExceededError(error)) {
+            storeClosuresQuotaBackoffUntil = Date.now() + STORE_CLOSURES_QUOTA_BACKOFF_MS;
+          }
+          throw error;
+        })
+        .finally(() => {
+          storeClosuresRequest = null;
+        });
+    }
+
+    const closures = await Promise.race([
+      storeClosuresRequest,
+      new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), STORE_CLOSURES_FAST_RESPONSE_MS);
+      }),
+    ]);
+    if (!closures) {
+      const fallbackClosures = storeClosuresCache?.closures
+        || STORE_CLOSURES_BOOTSTRAP_SNAPSHOT.closures;
+      if (!storeClosuresCache) {
+        storeClosuresCache = { loadedAt: Date.now(), closures: fallbackClosures };
+      }
+      return { closures: fallbackClosures, cached: true, stale: true };
+    }
     return { closures, cached: false, stale: false };
   } catch (error) {
-    if (isQuotaExceededError(error)) {
-      storeClosuresQuotaBackoffUntil = Date.now() + STORE_CLOSURES_QUOTA_BACKOFF_MS;
-    }
     if (
       storeClosuresCache
       && now - storeClosuresCache.loadedAt < STORE_CLOSURES_STALE_MS
@@ -282,8 +308,6 @@ const getAvailableStoreClosures = async (
       return { closures, cached: true, stale: true };
     }
     throw error;
-  } finally {
-    storeClosuresRequest = null;
   }
 };
 
