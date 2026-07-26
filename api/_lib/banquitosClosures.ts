@@ -59,6 +59,14 @@ const roundMoney = (value: unknown) => {
   return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
 };
 
+const STORE_CLOSURES_CACHE_MS = 15_000;
+const STORE_CLOSURES_STALE_MS = 10 * 60_000;
+let storeClosuresCache: {
+  loadedAt: number;
+  closures: Array<Record<string, unknown>>;
+} | null = null;
+let storeClosuresRequest: Promise<Array<Record<string, unknown>>> | null = null;
+
 const isAuthorizedIntegration = (req: any) => {
   const configuredSecret = String(process.env.BANQUITOS_INTEGRATION_SECRET || "");
   const receivedSecret = String(req.headers["x-integration-key"] || "");
@@ -153,6 +161,76 @@ const getPrimaryLocation = (balances: Record<CashLocation, number>, fallback: Ca
   ), fallback === "personal" ? "safe" : fallback);
 };
 
+const loadAvailableStoreClosures = async (database: ReturnType<typeof getFirebaseAdminDb>) => {
+  const snapshot = await database
+    .collection("closures")
+    .where("status", "==", "safe")
+    .limit(100)
+    .get();
+
+  return snapshot.docs
+    .map((document) => {
+      const data = document.data();
+      const physicalAmount = roundMoney(data.physicalAmount);
+      const systemBalance = roundMoney(data.systemBalance);
+      const persisted = data.cashBoxBalances && typeof data.cashBoxBalances === "object"
+        ? data.cashBoxBalances
+        : null;
+      const safeAmount = persisted ? roundMoney(persisted.safe) : physicalAmount;
+      const hasMoneyOutsideStore = persisted && ["transit", "bank", "banquitos"]
+        .some((location) => roundMoney(persisted[location]) > 0.009);
+
+      if (data.tripId || safeAmount <= 0.009 || hasMoneyOutsideStore) return null;
+
+      return {
+        id: document.id,
+        date: toIso(data.date),
+        responsible: String(data.responsible || "SIN RESPONSABLE"),
+        amount: safeAmount,
+        physicalAmount,
+        systemBalance,
+        difference: roundMoney(data.difference ?? physicalAmount - systemBalance),
+        systemSource: data.systemSource ? String(data.systemSource) : null,
+        auditStatus: data.perseoAuditStatus ? String(data.perseoAuditStatus) : null,
+        source: data.source ? String(data.source) : null,
+      };
+    })
+    .filter((closure): closure is NonNullable<typeof closure> => Boolean(closure))
+    .sort((left, right) => String(right.date).localeCompare(String(left.date)));
+};
+
+const getAvailableStoreClosures = async (
+  database: ReturnType<typeof getFirebaseAdminDb>,
+  forceRefresh: boolean,
+) => {
+  const now = Date.now();
+  if (
+    !forceRefresh
+    && storeClosuresCache
+    && now - storeClosuresCache.loadedAt < STORE_CLOSURES_CACHE_MS
+  ) {
+    return { closures: storeClosuresCache.closures, cached: true, stale: false };
+  }
+
+  try {
+    storeClosuresRequest ||= loadAvailableStoreClosures(database);
+    const closures = await storeClosuresRequest;
+    storeClosuresCache = { loadedAt: Date.now(), closures };
+    return { closures, cached: false, stale: false };
+  } catch (error) {
+    if (
+      storeClosuresCache
+      && now - storeClosuresCache.loadedAt < STORE_CLOSURES_STALE_MS
+    ) {
+      console.warn("Usando cache temporal de cortes por error de Firestore:", error);
+      return { closures: storeClosuresCache.closures, cached: true, stale: true };
+    }
+    throw error;
+  } finally {
+    storeClosuresRequest = null;
+  }
+};
+
 const loadClosureLedger = async (database: ReturnType<typeof getFirebaseAdminDb>) => {
   const [closuresSnapshot, movementsSnapshot] = await Promise.all([
     database.collection("closures").orderBy("date", "desc").limit(1000).get(),
@@ -241,13 +319,6 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
     });
   }
 
-  const { closures, balances } = await loadClosureLedger(database);
-  const closure = closures.find((item) => item.id === closureId);
-  const computedBalances = balances.get(closureId);
-  if (!closure || !computedBalances) {
-    return res.status(404).json({ ok: false, error: "El corte ya no existe." });
-  }
-
   const result = await database.runTransaction(async (transaction) => {
     const [movementSnapshot, closureSnapshot] = await Promise.all([
       transaction.get(movementRef),
@@ -281,7 +352,13 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
           personal: 0,
           banquitos: Math.max(0, roundMoney(persisted.banquitos)),
         }
-      : { ...computedBalances };
+      : {
+          safe: normalizeCashLocation(current.status) === "safe" ? roundMoney(current.physicalAmount) : 0,
+          transit: normalizeCashLocation(current.status) === "transit" ? roundMoney(current.physicalAmount) : 0,
+          bank: normalizeCashLocation(current.status) === "bank" ? roundMoney(current.physicalAmount) : 0,
+          personal: 0,
+          banquitos: normalizeCashLocation(current.status) === "banquitos" ? roundMoney(current.physicalAmount) : 0,
+        };
 
     if (current.tripId) {
       throw Object.assign(new Error("El corte ya salio de Tienda hacia un viaje."), { statusCode: 409 });
@@ -309,7 +386,7 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
     transaction.create(movementRef, {
       type: "internal_transfer",
       amount,
-      description: `CORTE DE TIENDA A BANQUITOS - ${String(current.responsible || closure.responsible)}`,
+      description: `CORTE DE TIENDA A BANQUITOS - ${String(current.responsible || "SIN RESPONSABLE")}`,
       createdBy: "banquitos-integration",
       responsible,
       from: "safe",
@@ -325,6 +402,7 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
     return { alreadySynced: false };
   });
 
+  storeClosuresCache = null;
   return res.status(200).json({
     ok: true,
     alreadySynced: result.alreadySynced,
@@ -352,43 +430,31 @@ export async function handleBanquitosClosures(req: any, res: any) {
     }
 
     const database = getFirebaseAdminDb();
-    const { closures, balances } = await loadClosureLedger(database);
-    const availableClosures = closures
-      .filter((closure) => {
-        if (closure.tripId) return false;
-        const closureBalance = balances.get(closure.id);
-        if (!closureBalance || closureBalance.safe <= 0.009) return false;
-        return CASH_LOCATIONS
-          .filter((location) => location !== "safe")
-          .every((location) => closureBalance[location] <= 0.009);
-      })
-      .map((closure) => ({
-        id: closure.id,
-        date: closure.date,
-        responsible: closure.responsible,
-        amount: roundMoney(balances.get(closure.id)?.safe),
-        physicalAmount: closure.physicalAmount,
-        systemBalance: closure.systemBalance,
-        difference: closure.difference,
-        systemSource: closure.systemSource,
-        auditStatus: closure.perseoAuditStatus,
-        source: closure.source,
-      }))
-      .sort((left, right) => right.date.localeCompare(left.date));
+    const forceRefresh = String(req.query?.refresh || "") === "1";
+    const available = await getAvailableStoreClosures(database, forceRefresh);
 
     res.setHeader("Cache-Control", "private, no-store");
     return res.status(200).json({
       ok: true,
       source: "cierres-caja-v2",
       generatedAt: new Date().toISOString(),
-      closures: availableClosures,
+      cached: available.cached,
+      stale: available.stale,
+      closures: available.closures,
     });
   } catch (error) {
     console.error("Error listando cortes disponibles para Banquitos:", error);
-    const statusCode = Number((error as any)?.statusCode) || 500;
+    const errorText = String((error as any)?.message || "");
+    const isQuotaError = (error as any)?.code === 8
+      || String((error as any)?.code || "").includes("resource-exhausted")
+      || errorText.includes("RESOURCE_EXHAUSTED")
+      || errorText.includes("Quota exceeded");
+    const statusCode = isQuotaError ? 429 : Number((error as any)?.statusCode) || 500;
     return res.status(statusCode).json({
       ok: false,
-      error: (error as any)?.message || "No se pudieron procesar los cortes de tienda.",
+      error: isQuotaError
+        ? "Cierres alcanzo temporalmente el limite de consultas. Reintenta en unos minutos."
+        : errorText || "No se pudieron procesar los cortes de tienda.",
     });
   }
 }
