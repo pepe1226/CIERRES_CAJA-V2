@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 
 type CashLocation = "safe" | "transit" | "bank" | "personal" | "banquitos";
@@ -62,6 +63,36 @@ const roundMoney = (value: unknown) => {
 const STORE_CLOSURES_CACHE_MS = 15_000;
 const STORE_CLOSURES_STALE_MS = 10 * 60_000;
 const STORE_CLOSURES_QUOTA_BACKOFF_MS = 30 * 60_000;
+const STORE_CLOSURES_SNAPSHOT_PATH = "integrations/banquitos/store-closures.json";
+const STORE_CLOSURES_BOOTSTRAP_SNAPSHOT = {
+  generatedAt: "2026-07-26T16:57:09.553Z",
+  closures: [
+    {
+      id: "telegram_2026-07-25_YULEXI_UEM9DEAVUYRCI17GZT32LPHF2C72",
+      date: "2026-07-25T12:00:00.000Z",
+      responsible: "YULEXI",
+      amount: 166.8,
+    },
+    {
+      id: "telegram_2026-07-25_JOHANNA_UEM9DEAVUYRCI17GZT32LPHF2C72",
+      date: "2026-07-25T12:00:00.000Z",
+      responsible: "JOHANNA",
+      amount: 79.62,
+    },
+    {
+      id: "telegram_2026-07-25_ERICK_UEM9DEAVUYRCI17GZT32LPHF2C72",
+      date: "2026-07-25T12:00:00.000Z",
+      responsible: "ERICK",
+      amount: 168.39,
+    },
+    {
+      id: "telegram_2026-02-10_1115_ERICK_UEM9DEAVUYRCI17GZT32LPHF2C72",
+      date: "2026-02-10T12:00:00.000Z",
+      responsible: "ERICK",
+      amount: 11.15,
+    },
+  ],
+};
 let storeClosuresCache: {
   loadedAt: number;
   closures: Array<Record<string, unknown>>;
@@ -75,6 +106,40 @@ const isQuotaExceededError = (error: any) => {
     || String(error?.code || "").includes("resource-exhausted")
     || message.includes("RESOURCE_EXHAUSTED")
     || message.includes("Quota exceeded");
+};
+
+const saveStoreClosuresSnapshot = async (closures: Array<Record<string, unknown>>) => {
+  const file = getStorage().bucket().file(STORE_CLOSURES_SNAPSHOT_PATH);
+  await file.save(
+    JSON.stringify({ generatedAt: new Date().toISOString(), closures }),
+    {
+      contentType: "application/json",
+      resumable: false,
+      metadata: { cacheControl: "private, no-store" },
+    },
+  );
+};
+
+const loadStoreClosuresSnapshot = async () => {
+  try {
+    const file = getStorage().bucket().file(STORE_CLOSURES_SNAPSHOT_PATH);
+    const [contents] = await file.download();
+    const payload = JSON.parse(contents.toString("utf8"));
+    if (Array.isArray(payload?.closures)) {
+      return payload.closures as Array<Record<string, unknown>>;
+    }
+  } catch (error: any) {
+    if (Number(error?.code) !== 404) {
+      console.warn("No se pudo leer el snapshot durable de cortes:", error);
+    }
+  }
+
+  try {
+    await saveStoreClosuresSnapshot(STORE_CLOSURES_BOOTSTRAP_SNAPSHOT.closures);
+  } catch (error) {
+    console.warn("No se pudo crear el snapshot inicial de cortes:", error);
+  }
+  return STORE_CLOSURES_BOOTSTRAP_SNAPSHOT.closures;
 };
 
 const isAuthorizedIntegration = (req: any) => {
@@ -225,10 +290,9 @@ const getAvailableStoreClosures = async (
     if (storeClosuresCache) {
       return { closures: storeClosuresCache.closures, cached: true, stale: true };
     }
-    throw Object.assign(
-      new Error("Cierres alcanzo temporalmente el limite de consultas. Reintenta en unos minutos."),
-      { statusCode: 429, code: "resource-exhausted" },
-    );
+    const closures = await loadStoreClosuresSnapshot();
+    storeClosuresCache = { loadedAt: Date.now(), closures };
+    return { closures, cached: true, stale: true };
   }
 
   try {
@@ -236,6 +300,11 @@ const getAvailableStoreClosures = async (
     const closures = await storeClosuresRequest;
     storeClosuresCache = { loadedAt: Date.now(), closures };
     storeClosuresQuotaBackoffUntil = 0;
+    try {
+      await saveStoreClosuresSnapshot(closures);
+    } catch (error) {
+      console.warn("No se pudo actualizar el snapshot durable de cortes:", error);
+    }
     return { closures, cached: false, stale: false };
   } catch (error) {
     if (isQuotaExceededError(error)) {
@@ -247,6 +316,11 @@ const getAvailableStoreClosures = async (
     ) {
       console.warn("Usando cache temporal de cortes por error de Firestore:", error);
       return { closures: storeClosuresCache.closures, cached: true, stale: true };
+    }
+    if (isQuotaExceededError(error)) {
+      const closures = await loadStoreClosuresSnapshot();
+      storeClosuresCache = { loadedAt: Date.now(), closures };
+      return { closures, cached: true, stale: true };
     }
     throw error;
   } finally {
