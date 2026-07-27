@@ -160,6 +160,7 @@ const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'
 const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 const PERSEO_REPORTS_LIVE_LIMIT = 180;
+const PERSEO_REPORTS_REFRESH_MS = 5 * 60_000;
 const TRIPS_LIVE_LIMIT = 250;
 const BANQUITOS_STORE_SNAPSHOT_ID = 'banquitos_store_closures';
 
@@ -613,6 +614,7 @@ function AppContent() {
   const [closures, setClosures] = useState<ShiftClosure[]>([]);
   const [closuresLoaded, setClosuresLoaded] = useState(false);
   const [perseoReports, setPerseoReports] = useState<PerseoReport[]>([]);
+  const lastPerseoReportsLoadAt = useRef(0);
   const [movements, setMovements] = useState<Movement[]>([]);
   const [movementsLoaded, setMovementsLoaded] = useState(false);
   const lastPublishedStoreSnapshotSignature = useRef<string | null>(null);
@@ -909,24 +911,47 @@ function AppContent() {
       setClosuresLoaded(true);
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'closures'));
 
-    const qPerseoReports = query(
-      collection(db, 'perseo_reports'),
-      orderBy('createdAt', 'desc'),
-      limit(PERSEO_REPORTS_LIVE_LIMIT)
-    );
-    const unsubscribePerseoReports = onSnapshot(qPerseoReports, (snapshot) => {
-      const data = snapshot.docs.map(reportDoc => {
-        const raw = reportDoc.data();
-        return {
-          id: reportDoc.id,
-          createdAt: raw.createdAt?.toDate ? raw.createdAt.toDate().toISOString() : null,
-          businessDates: Array.isArray(raw.businessDates) ? raw.businessDates : [],
-          dailySystemAmountByDate: raw.dailySystemAmountByDate || null,
-          rows: Array.isArray(raw.rows) ? raw.rows : [],
-        } as PerseoReport;
-      });
-      setPerseoReports(data);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'perseo_reports'));
+    let cancelled = false;
+    let reportsRequestInFlight = false;
+    const loadPerseoReports = async (force = false) => {
+      if (reportsRequestInFlight) return;
+      if (!force && Date.now() - lastPerseoReportsLoadAt.current < PERSEO_REPORTS_REFRESH_MS) return;
+
+      const firebaseUser = auth.currentUser;
+      if (!firebaseUser) return;
+      reportsRequestInFlight = true;
+
+      try {
+        const token = await firebaseUser.getIdToken();
+        const response = await fetch('/api/perseo/audit-closures', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ action: 'list_reports', limit: PERSEO_REPORTS_LIVE_LIMIT })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.ok || !Array.isArray(result.reports)) {
+          throw new Error(result.error || 'No se pudieron cargar los reportes Perseo.');
+        }
+
+        if (!cancelled) {
+          setPerseoReports(result.reports as PerseoReport[]);
+          lastPerseoReportsLoadAt.current = Date.now();
+        }
+      } catch (error) {
+        console.error('No se pudieron cargar los reportes Perseo desde el backend:', error);
+      } finally {
+        reportsRequestInFlight = false;
+      }
+    };
+
+    void loadPerseoReports(true);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void loadPerseoReports(false);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     const qMovements = query(collection(db, 'movements'), orderBy('date', 'desc'));
     const unsubscribeMovements = onSnapshot(qMovements, (snapshot) => {
@@ -966,8 +991,9 @@ function AppContent() {
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'trips'));
 
     return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       unsubscribeClosures();
-      unsubscribePerseoReports();
       unsubscribeMovements();
       unsubscribeTrips();
     };
