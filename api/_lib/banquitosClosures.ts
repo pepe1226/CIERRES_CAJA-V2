@@ -75,6 +75,26 @@ const getBody = (req: any) => {
 const getMovementDocumentId = (movementId: string) =>
   `banquitos_${createHash("sha256").update(movementId).digest("hex").slice(0, 40)}`;
 
+const getReversalDocumentId = (movementId: string) =>
+  `banquitos_reverse_${createHash("sha256").update(movementId).digest("hex").slice(0, 32)}`;
+
+const buildPublishedClosure = (
+  closureId: string,
+  closure: Record<string, any>,
+  amount: number,
+) => ({
+  id: closureId,
+  date: toIso(closure.date),
+  responsible: String(closure.responsible || "SIN RESPONSABLE"),
+  amount: roundMoney(amount),
+  physicalAmount: roundMoney(closure.physicalAmount),
+  systemBalance: roundMoney(closure.systemBalance),
+  difference: roundMoney(closure.difference),
+  systemSource: closure.systemSource ? String(closure.systemSource) : null,
+  auditStatus: closure.perseoAuditStatus ? String(closure.perseoAuditStatus) : null,
+  source: closure.source ? String(closure.source) : null,
+});
+
 const getPrimaryLocation = (balances: Record<CashLocation, number>, fallback: CashLocation) => {
   const businessLocations: CashLocation[] = ["safe", "transit", "bank", "banquitos"];
   return businessLocations.reduce((primary, location) => (
@@ -191,6 +211,7 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
   const movementDocumentId = getMovementDocumentId(movementId);
   const movementRef = database.collection("movements").doc(movementDocumentId);
   const closureRef = database.collection("closures").doc(closureId);
+  const historyRef = database.collection("closure_status_history").doc();
   const storeSnapshotRef = database
     .collection(STORE_CLOSURES_SNAPSHOT_COLLECTION)
     .doc(STORE_CLOSURES_SNAPSHOT_ID);
@@ -295,6 +316,17 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
       date: Timestamp.fromDate(occurredAt),
       createdAt: FieldValue.serverTimestamp(),
     });
+    transaction.create(historyRef, {
+      closureId,
+      changedAt: FieldValue.serverTimestamp(),
+      amount,
+      responsible: String(current.responsible || ""),
+      createdBy: "banquitos-integration",
+      from: "safe",
+      to: "banquitos",
+      externalMovementId: movementId,
+      createdAt: FieldValue.serverTimestamp(),
+    });
 
     if (publishedStoreSnapshot.exists) {
       const publishedData = publishedStoreSnapshot.data() || {};
@@ -332,6 +364,149 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
   });
 };
 
+const reverseClosureFromBanquitos = async (req: any, res: any) => {
+  const body = getBody(req);
+  const closureId = String(body.closureId || "").trim();
+  const movementId = String(body.movementId || "").trim();
+  const responsible = String(body.responsible || "BANQUITOS").trim().slice(0, 120) || "BANQUITOS";
+  const occurredAt = body.occurredAt ? new Date(String(body.occurredAt)) : new Date();
+
+  if (!closureId || !movementId || Number.isNaN(occurredAt.getTime())) {
+    return res.status(400).json({ ok: false, error: "Datos de la reversion no validos." });
+  }
+
+  const database = getFirebaseAdminDb();
+  const movementRef = database.collection("movements").doc(getMovementDocumentId(movementId));
+  const reversalRef = database.collection("movements").doc(getReversalDocumentId(movementId));
+  const closureRef = database.collection("closures").doc(closureId);
+  const historyRef = database.collection("closure_status_history").doc();
+  const storeSnapshotRef = database
+    .collection(STORE_CLOSURES_SNAPSHOT_COLLECTION)
+    .doc(STORE_CLOSURES_SNAPSHOT_ID);
+
+  const result = await database.runTransaction(async (transaction) => {
+    const [movementSnapshot, reversalSnapshot, closureSnapshot, publishedStoreSnapshot] = await Promise.all([
+      transaction.get(movementRef),
+      transaction.get(reversalRef),
+      transaction.get(closureRef),
+      transaction.get(storeSnapshotRef),
+    ]);
+
+    if (!movementSnapshot.exists) {
+      throw Object.assign(new Error("No existe el traslado original a Banquitos."), { statusCode: 404 });
+    }
+    const originalMovement = movementSnapshot.data() || {};
+    const amount = roundMoney(originalMovement.amount);
+    if (
+      String(originalMovement.closureId || "") !== closureId
+      || String(originalMovement.externalMovementId || "") !== movementId
+      || amount <= 0
+    ) {
+      throw Object.assign(new Error("El traslado original no corresponde a este corte."), { statusCode: 409 });
+    }
+    if (reversalSnapshot.exists) {
+      return { alreadyReversed: true, amount };
+    }
+    if (!closureSnapshot.exists) {
+      throw Object.assign(new Error("El corte ya no existe."), { statusCode: 404 });
+    }
+
+    const current = closureSnapshot.data() || {};
+    const persisted = current.cashBoxBalances && typeof current.cashBoxBalances === "object"
+      ? current.cashBoxBalances
+      : {};
+    const currentBalances: Record<CashLocation, number> = {
+      safe: Math.max(0, roundMoney(persisted.safe)),
+      transit: Math.max(0, roundMoney(persisted.transit)),
+      bank: Math.max(0, roundMoney(persisted.bank)),
+      personal: 0,
+      banquitos: Math.max(0, roundMoney(persisted.banquitos)),
+    };
+
+    if (current.tripId) {
+      throw Object.assign(new Error("El corte pertenece a un viaje y no puede revertirse."), { statusCode: 409 });
+    }
+    if (currentBalances.banquitos + 0.009 < amount) {
+      throw Object.assign(new Error("El dinero del corte ya no esta completo en Banquitos."), { statusCode: 409 });
+    }
+
+    currentBalances.banquitos = roundMoney(currentBalances.banquitos - amount);
+    currentBalances.safe = roundMoney(currentBalances.safe + amount);
+    const status = getPrimaryLocation(currentBalances, "safe");
+
+    transaction.update(closureRef, {
+      status,
+      tripId: null,
+      cashBoxBalances: {
+        safe: currentBalances.safe,
+        transit: currentBalances.transit,
+        bank: currentBalances.bank,
+        banquitos: currentBalances.banquitos,
+      },
+      cashBoxBalancesUpdatedAt: FieldValue.serverTimestamp(),
+      statusUpdatedAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(reversalRef, {
+      type: "internal_transfer",
+      amount,
+      description: `REVERSO DE BANQUITOS A TIENDA - ${String(current.responsible || "SIN RESPONSABLE")}`,
+      createdBy: "banquitos-integration",
+      responsible,
+      from: "banquitos",
+      to: "safe",
+      closureId,
+      source: "status_control",
+      integrationSource: "banquitos-tmch",
+      reversesExternalMovementId: movementId,
+      date: Timestamp.fromDate(occurredAt),
+      createdAt: FieldValue.serverTimestamp(),
+    });
+    transaction.create(historyRef, {
+      closureId,
+      changedAt: FieldValue.serverTimestamp(),
+      amount,
+      responsible: String(current.responsible || ""),
+      createdBy: "banquitos-integration",
+      from: "banquitos",
+      to: "safe",
+      reversesExternalMovementId: movementId,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    const publishedData = publishedStoreSnapshot.exists ? publishedStoreSnapshot.data() || {} : {};
+    const nextClosures = (Array.isArray(publishedData.closures) ? publishedData.closures : [])
+      .filter((closure) => String(closure?.id || "") !== closureId);
+    nextClosures.push(buildPublishedClosure(closureId, current, currentBalances.safe));
+    nextClosures.sort((left, right) => String(right.date).localeCompare(String(left.date)));
+    const limitedClosures = nextClosures.slice(0, 100);
+    transaction.set(storeSnapshotRef, {
+      schemaVersion: 1,
+      source: "cierres-caja-v2",
+      signature: buildStoreSnapshotSignature(limitedClosures),
+      generatedAt: FieldValue.serverTimestamp(),
+      generatedBy: "banquitos-integration",
+      count: limitedClosures.length,
+      totalAmount: roundMoney(limitedClosures.reduce(
+        (total, closure) => total + roundMoney(closure?.amount),
+        0,
+      )),
+      closures: limitedClosures,
+    });
+
+    return { alreadyReversed: false, amount };
+  });
+
+  storeClosuresCache = null;
+  return res.status(200).json({
+    ok: true,
+    alreadyReversed: result.alreadyReversed,
+    movementId,
+    closureId,
+    amount: result.amount,
+    destination: "safe",
+  });
+};
+
 export async function handleBanquitosClosures(req: any, res: any) {
   if (req.method !== "GET" && req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -345,7 +520,10 @@ export async function handleBanquitosClosures(req: any, res: any) {
 
   try {
     if (req.method === "POST") {
-      return await transferClosureToBanquitos(req, res);
+      const action = String(getBody(req).action || "transfer");
+      return action === "reverse"
+        ? await reverseClosureFromBanquitos(req, res)
+        : await transferClosureToBanquitos(req, res);
     }
 
     const database = getFirebaseAdminDb();
