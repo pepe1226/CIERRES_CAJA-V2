@@ -8,9 +8,10 @@ import {
 import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import {
   answerTelegramCallbackQuery,
+  editTelegramMessageReplyMarkup,
   getFriendlyGeminiErrorMessage,
   getTelegramConfig,
-  isTemporaryGeminiError,
+  isTemporaryPhotoProcessingError,
   sendTelegramMessage,
 } from "../_lib/telegramMovement.js";
 import {
@@ -31,7 +32,41 @@ function getBody(req: any) {
   return req.body;
 }
 
-async function processPendingPhotoFromCallback(callbackQuery: any) {
+const MANUAL_RETRY_TIMEOUT_MS = 45_000;
+const STALE_PROCESSING_MS = 10 * 60_000;
+
+function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isStalePendingProcessing(pending: any) {
+  if (pending.status !== "processing") return false;
+  const updatedAt = toDate(pending.updatedAt) || toDate(pending.createdAt);
+  return !updatedAt || Date.now() - updatedAt.getTime() >= STALE_PROCESSING_MS;
+}
+
+async function withPhotoProcessingTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeout = setTimeout(() => {
+      const error: any = new Error("Se agotó el tiempo máximo de procesamiento de la foto.");
+      error.code = "PHOTO_PROCESSING_TIMEOUT";
+      reject(error);
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([work, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function processPendingPhotoFromCallback(callbackQuery: any, botToken?: string) {
   const data = String(callbackQuery.data || "");
   const pendingId = data.replace(/^pending:retry:/, "");
   const chatId = callbackQuery.message?.chat?.id;
@@ -39,6 +74,7 @@ async function processPendingPhotoFromCallback(callbackQuery: any) {
   await answerTelegramCallbackQuery({
     callbackQueryId: callbackQuery.id,
     text: "Reintentando foto pendiente...",
+    botToken,
   });
 
   if (!pendingId || !chatId) {
@@ -47,7 +83,18 @@ async function processPendingPhotoFromCallback(callbackQuery: any) {
 
   const db = getFirebaseAdminDb();
   const pendingRef = db.collection("telegram_pending_photos").doc(pendingId);
-  const pendingDoc = await pendingRef.get();
+  let pendingDoc: any;
+
+  try {
+    pendingDoc = await pendingRef.get();
+  } catch (error: any) {
+    await sendTelegramMessage(
+      chatId,
+      "No pude consultar el pendiente en Firebase. El botón seguirá disponible para intentarlo nuevamente.",
+      botToken,
+    );
+    return { ok: false, handled: true, pendingId, error: error?.message || String(error) };
+  }
 
   if (!pendingDoc.exists) {
     await sendTelegramMessage(chatId, `No encontre el pendiente ${pendingId}.`);
@@ -55,6 +102,30 @@ async function processPendingPhotoFromCallback(callbackQuery: any) {
   }
 
   const pending = pendingDoc.data() || {};
+  const callbackMessageId = Number(callbackQuery.message?.message_id || 0);
+
+  if (pending.status === "completed") {
+    if (callbackMessageId) {
+      await editTelegramMessageReplyMarkup({
+        chatId,
+        messageId: callbackMessageId,
+        inlineKeyboard: [],
+        botToken,
+      });
+    }
+    await sendTelegramMessage(
+      chatId,
+      `Ese pendiente ya fue procesado correctamente.${pending.closureId ? `\nCierre: ${pending.closureId}` : ""}`,
+      botToken,
+    );
+    return { ok: true, handled: true, pendingId, alreadyCompleted: true };
+  }
+
+  if (pending.status === "processing" && !isStalePendingProcessing(pending)) {
+    await sendTelegramMessage(chatId, "La foto ya se está procesando. Te avisaré cuando termine.", botToken);
+    return { ok: true, handled: true, pendingId, alreadyProcessing: true };
+  }
+
   const message = pending.rawMessage;
   const largestPhoto = {
     file_id: pending.photo?.fileId,
@@ -70,20 +141,33 @@ async function processPendingPhotoFromCallback(callbackQuery: any) {
       status: "needs_review",
       error: "Pendiente sin rawMessage o file_id. No se puede reintentar desde Telegram.",
     });
-    await sendTelegramMessage(chatId, `No pude reintentar ${pendingId}: falta informacion de la foto.`);
+    await sendTelegramMessage(chatId, `No pude reintentar ${pendingId}: falta información de la foto.`, botToken);
     return { ok: false, handled: true, pendingId, error: "missing-pending-data" };
   }
 
   try {
     await markPendingStatus({ pendingId, status: "processing" });
+    if (callbackMessageId) {
+      await editTelegramMessageReplyMarkup({
+        chatId,
+        messageId: callbackMessageId,
+        inlineKeyboard: [[
+          { text: "Procesando...", callback_data: `pending:working:${pendingId}` },
+        ]],
+        botToken,
+      });
+    }
 
-    const result = await processTelegramPhotoMessage({
-      chatId,
-      message,
-      largestPhoto,
-      sendSuccessMessage: true,
-      extractionAttempts: 3,
-    });
+    const result = await withPhotoProcessingTimeout(
+      processTelegramPhotoMessage({
+        chatId,
+        message,
+        largestPhoto,
+        sendSuccessMessage: true,
+        extractionAttempts: 2,
+      }),
+      MANUAL_RETRY_TIMEOUT_MS,
+    );
 
     await markPendingStatus({
       pendingId,
@@ -91,21 +175,45 @@ async function processPendingPhotoFromCallback(callbackQuery: any) {
       closureId: result.closureId || result.existingClosureId,
     });
 
+    if (callbackMessageId) {
+      await editTelegramMessageReplyMarkup({
+        chatId,
+        messageId: callbackMessageId,
+        inlineKeyboard: [],
+        botToken,
+      });
+    }
+
     return { ok: true, handled: true, pendingId, result };
   } catch (error: any) {
-    await savePendingTelegramPhoto({
-      chatId,
-      message,
-      largestPhoto,
-      error,
-      source: "retry",
-    });
+    try {
+      await savePendingTelegramPhoto({
+        chatId,
+        message,
+        largestPhoto,
+        error,
+        source: "retry",
+      });
 
-    await markPendingStatus({
-      pendingId,
-      status: isTemporaryGeminiError(error) ? "pending" : "needs_review",
-      error,
-    });
+      await markPendingStatus({
+        pendingId,
+        status: isTemporaryPhotoProcessingError(error) ? "pending" : "needs_review",
+        error,
+      });
+    } catch (persistenceError) {
+      console.error("No se pudo actualizar el pendiente durante el reintento:", persistenceError);
+    }
+
+    if (callbackMessageId) {
+      await editTelegramMessageReplyMarkup({
+        chatId,
+        messageId: callbackMessageId,
+        inlineKeyboard: [[
+          { text: "Reintentar ahora", callback_data: `pending:retry:${pendingId}` },
+        ]],
+        botToken,
+      });
+    }
 
     await sendTelegramMessage(
       chatId,
@@ -113,7 +221,7 @@ async function processPendingPhotoFromCallback(callbackQuery: any) {
         getFriendlyGeminiErrorMessage(error),
         `Sigue pendiente: ${pendingId}`,
       ].join("\n"),
-      undefined,
+      botToken,
       {
         reply_markup: {
           inline_keyboard: [[
@@ -221,6 +329,13 @@ export default async function handler(req: any, res: any) {
   const activePersonalBotRequest = forcePersonalWebhook || isPersonalBotRequest;
   const activeExpenseBotRequest = forceExpenseWebhook ? false : isExpenseBotRequest;
   const activePerseoBotRequest = forcePersonalWebhook ? false : isPerseoBotRequest;
+  const activeBotToken = activePersonalBotRequest
+    ? telegramPersonalBotToken || telegramBotToken
+    : activeExpenseBotRequest
+      ? telegramExpenseBotToken || telegramBotToken
+      : activePerseoBotRequest
+        ? telegramPerseoBotToken || telegramBotToken
+        : telegramBotToken;
 
   const allowedChatId = activePersonalBotRequest
     ? telegramPersonalAllowedChatId || telegramAllowedChatId
@@ -232,8 +347,17 @@ export default async function handler(req: any, res: any) {
     const callbackData = String(callbackQuery.data || "");
 
     if (callbackData.startsWith("pending:retry:")) {
-      const result = await processPendingPhotoFromCallback(callbackQuery);
+      const result = await processPendingPhotoFromCallback(callbackQuery, activeBotToken);
       return res.status(200).json(result);
+    }
+
+    if (callbackData.startsWith("pending:working:")) {
+      await answerTelegramCallbackQuery({
+        callbackQueryId: callbackQuery.id,
+        text: "La foto todavía se está procesando...",
+        botToken: activeBotToken,
+      });
+      return res.status(200).json({ ok: true, handled: true, processing: true });
     }
 
     if (activeExpenseBotRequest || activePersonalBotRequest) {
@@ -414,8 +538,8 @@ export default async function handler(req: any, res: any) {
       chatId,
       [
         getFriendlyGeminiErrorMessage(error),
-        "No se cre? ning?n registro incompleto.",
-        `C?digo pendiente: ${pending.pendingId}`,
+        "No se creó ningún registro incompleto.",
+        `Código pendiente: ${pending.pendingId}`,
       ].join("\n"),
       undefined,
       {

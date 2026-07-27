@@ -5,11 +5,30 @@ import {
   processTelegramPhotoMessage,
   savePendingTelegramPhoto,
 } from "../_lib/telegramPhotoProcessor.js";
-import { getTelegramConfig, isTemporaryGeminiError } from "../_lib/telegramMovement.js";
+import { getTelegramConfig, isTemporaryPhotoProcessingError } from "../_lib/telegramMovement.js";
 
-const MAX_ITEMS = 5;
+const MAX_ITEMS = 3;
 const MAX_ATTEMPTS_PER_PHOTO = 5;
 const STALE_PROCESSING_MINUTES = 10;
+const PHOTO_PROCESSING_TIMEOUT_MS = 35_000;
+const FUNCTION_DEADLINE_MS = 50_000;
+
+async function withPhotoProcessingTimeout<T>(work: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeout = setTimeout(() => {
+      const error: any = new Error("Se agotó el tiempo máximo de procesamiento de la foto.");
+      error.code = "PHOTO_PROCESSING_TIMEOUT";
+      reject(error);
+    }, PHOTO_PROCESSING_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([work, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 function getQuerySecret(req: any) {
   try {
@@ -76,12 +95,22 @@ export default async function handler(req: any, res: any) {
   }
 
   const db = getFirebaseAdminDb();
+  const startedAt = Date.now();
+  let snapshot: any;
 
-  const snapshot = await db
-    .collection("telegram_pending_photos")
-    .where("status", "in", ["pending", "processing"])
-    .limit(MAX_ITEMS * 2)
-    .get();
+  try {
+    snapshot = await db
+      .collection("telegram_pending_photos")
+      .where("status", "in", ["pending", "processing"])
+      .limit(MAX_ITEMS * 2)
+      .get();
+  } catch (error: any) {
+    return res.status(503).json({
+      ok: false,
+      error: "No se pudieron consultar los pendientes en Firebase.",
+      detail: error?.message || String(error),
+    });
+  }
 
   const results: any[] = [];
   let processedCount = 0;
@@ -99,6 +128,11 @@ export default async function handler(req: any, res: any) {
 
     if (processedCount >= MAX_ITEMS) {
       results.push({ pendingId, ok: true, skipped: true, reason: "batch-limit" });
+      continue;
+    }
+
+    if (Date.now() - startedAt >= FUNCTION_DEADLINE_MS) {
+      results.push({ pendingId, ok: true, skipped: true, reason: "function-deadline" });
       continue;
     }
 
@@ -150,13 +184,15 @@ export default async function handler(req: any, res: any) {
     try {
       await markPendingStatus({ pendingId, status: "processing" });
 
-      const result = await processTelegramPhotoMessage({
-        chatId,
-        message,
-        largestPhoto,
-        sendSuccessMessage: true,
-        extractionAttempts: 2,
-      });
+      const result = await withPhotoProcessingTimeout(
+        processTelegramPhotoMessage({
+          chatId,
+          message,
+          largestPhoto,
+          sendSuccessMessage: true,
+          extractionAttempts: 2,
+        })
+      );
 
       await markPendingStatus({
         pendingId,
@@ -166,20 +202,19 @@ export default async function handler(req: any, res: any) {
 
       results.push({ pendingId, ok: true, result });
     } catch (error: any) {
-      await savePendingTelegramPhoto({
-        chatId,
-        message,
-        largestPhoto,
-        error,
-        source: "retry",
-      });
-
-      const nextStatus = isTemporaryGeminiError(error) ? "pending" : "needs_review";
-      await markPendingStatus({
-        pendingId,
-        status: nextStatus,
-        error,
-      });
+      const nextStatus = isTemporaryPhotoProcessingError(error) ? "pending" : "needs_review";
+      try {
+        await savePendingTelegramPhoto({
+          chatId,
+          message,
+          largestPhoto,
+          error,
+          source: "retry",
+        });
+        await markPendingStatus({ pendingId, status: nextStatus, error });
+      } catch (persistenceError: any) {
+        console.error("No se pudo conservar el estado del reintento:", persistenceError);
+      }
 
       results.push({
         pendingId,

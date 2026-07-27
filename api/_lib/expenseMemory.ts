@@ -85,16 +85,20 @@ export async function findExpenseMemorySuggestion(
 ): Promise<ExpenseMemorySuggestion | null> {
   const searchText = normalizeText(values.filter(Boolean).join(" "));
   const candidates = keywordCandidates(values);
-  if (!searchText && candidates.length === 0) return null;
+  if (!searchText || candidates.length === 0) return null;
 
   const db = getFirebaseAdminDb();
-  const memorySnapshot = await db
-    .collection(memoryCollectionName(namespace))
-    .orderBy("uses", "desc")
-    .limit(250)
-    .get();
+  const memoryCollection = db.collection(memoryCollectionName(namespace));
+  const exactCandidates = candidates.slice(0, 16);
+  const [keywordSnapshot, aliasSnapshot] = await Promise.all([
+    memoryCollection.where("keyword", "in", exactCandidates).limit(5).get(),
+    memoryCollection.where("aliases", "array-contains-any", exactCandidates).limit(5).get(),
+  ]);
+  const memoryDocs = new Map(
+    [...keywordSnapshot.docs, ...aliasSnapshot.docs].map((document) => [document.id, document])
+  );
 
-  for (const doc of memorySnapshot.docs) {
+  for (const doc of memoryDocs.values()) {
     const data = doc.data();
     const keywords = [
       data.keyword,
@@ -115,7 +119,7 @@ export async function findExpenseMemorySuggestion(
 
   const movementSnapshots = await Promise.all(
     movementCollections(namespace).map((collectionName) =>
-      db.collection(collectionName).orderBy("createdAt", "desc").limit(300).get()
+      db.collection(collectionName).orderBy("createdAt", "desc").limit(75).get()
     )
   );
 

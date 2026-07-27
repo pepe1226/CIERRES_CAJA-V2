@@ -16,6 +16,7 @@ import {
   onSnapshot,
   query,
   orderBy,
+  limit,
   addDoc,
   updateDoc,
   deleteDoc,
@@ -158,6 +159,8 @@ type MissingPerseoClosure = PerseoReportRow & {
 const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos', 'personal'];
 const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
+const PERSEO_REPORTS_LIVE_LIMIT = 180;
+const TRIPS_LIVE_LIMIT = 250;
 const BANQUITOS_STORE_SNAPSHOT_ID = 'banquitos_store_closures';
 
 const roundMoney = (value: unknown) => {
@@ -906,7 +909,11 @@ function AppContent() {
       setClosuresLoaded(true);
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'closures'));
 
-    const qPerseoReports = query(collection(db, 'perseo_reports'), orderBy('createdAt', 'desc'));
+    const qPerseoReports = query(
+      collection(db, 'perseo_reports'),
+      orderBy('createdAt', 'desc'),
+      limit(PERSEO_REPORTS_LIVE_LIMIT)
+    );
     const unsubscribePerseoReports = onSnapshot(qPerseoReports, (snapshot) => {
       const data = snapshot.docs.map(reportDoc => {
         const raw = reportDoc.data();
@@ -943,7 +950,11 @@ function AppContent() {
       });
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'movements'));
 
-    const qTrips = query(collection(db, 'trips'), orderBy('startDate', 'desc'));
+    const qTrips = query(
+      collection(db, 'trips'),
+      orderBy('startDate', 'desc'),
+      limit(TRIPS_LIVE_LIMIT)
+    );
     const unsubscribeTrips = onSnapshot(qTrips, (snapshot) => {
       const data = snapshot.docs.map(doc => ({
         ...doc.data(),

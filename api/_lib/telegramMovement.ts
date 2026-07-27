@@ -141,6 +141,23 @@ export async function editTelegramMessageText(params: {
   }
 }
 
+export async function editTelegramMessageReplyMarkup(params: {
+  chatId: number | string;
+  messageId: number;
+  inlineKeyboard: Array<Array<Record<string, string>>>;
+  botToken?: string;
+}) {
+  try {
+    await telegramApi("editMessageReplyMarkup", {
+      chat_id: params.chatId,
+      message_id: params.messageId,
+      reply_markup: { inline_keyboard: params.inlineKeyboard },
+    }, params.botToken);
+  } catch (error) {
+    console.error("No se pudo actualizar el botón de Telegram:", error);
+  }
+}
+
 export async function answerTelegramCallbackQuery(params: {
   callbackQueryId: string;
   text?: string;
@@ -540,6 +557,8 @@ function getErrorMessage(error: any) {
 }
 
 export function isTemporaryGeminiError(error: any) {
+  if (isTemporaryFirestoreError(error)) return false;
+
   const message = getErrorMessage(error).toLowerCase();
 
   return (
@@ -560,7 +579,32 @@ export function isTemporaryGeminiError(error: any) {
   );
 }
 
+export function isTemporaryFirestoreError(error: any) {
+  const message = getErrorMessage(error).toLowerCase();
+  const numericCode = Number(error?.code);
+
+  return (
+    numericCode === 8 ||
+    message.includes("firestore quota") ||
+    message.includes("firestore resource_exhausted")
+  );
+}
+
+export function isTemporaryPhotoProcessingError(error: any) {
+  return error?.code === "PHOTO_PROCESSING_TIMEOUT"
+    || isTemporaryFirestoreError(error)
+    || isTemporaryGeminiError(error);
+}
+
 export function getFriendlyGeminiErrorMessage(error: any) {
+  if (error?.code === "PHOTO_PROCESSING_TIMEOUT") {
+    return "El procesamiento tardó más de lo esperado. La foto sigue pendiente y puedes reintentarla sin crear duplicados.";
+  }
+
+  if (isTemporaryFirestoreError(error)) {
+    return "Firebase alcanzó temporalmente su límite de operaciones. Guardé la foto como pendiente y se procesará automáticamente cuando el servicio vuelva a estar disponible.";
+  }
+
   if (isTemporaryGeminiError(error)) {
     return "La IA está ocupada temporalmente. Guardé la foto como pendiente y el sistema intentará procesarla nuevamente.";
   }

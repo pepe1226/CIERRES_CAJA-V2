@@ -7,7 +7,7 @@ import {
   downloadTelegramPhoto,
   extractFinancialDataFromImage,
   getFriendlyGeminiErrorMessage,
-  isTemporaryGeminiError,
+  isTemporaryPhotoProcessingError,
   sendTelegramMessage,
 } from "./telegramMovement.js";
 
@@ -313,7 +313,7 @@ export async function savePendingTelegramPhoto(params: {
   const db = getFirebaseAdminDb();
   const pendingId = getTelegramMessageKey(params.chatId, params.message.message_id);
   const errorMessage = params.error?.message || String(params.error || "Error desconocido");
-  const retryable = isTemporaryGeminiError(params.error);
+  const retryable = isTemporaryPhotoProcessingError(params.error);
 
   await db.collection("telegram_pending_photos").doc(pendingId).set(
     removeUndefinedDeep({
@@ -358,12 +358,19 @@ export async function markPendingStatus(params: {
   closureId?: string;
 }) {
   const db = getFirebaseAdminDb();
+  const isCompleted = params.status === "completed";
+  const isTerminal = isCompleted || params.status === "failed" || params.status === "needs_review";
 
   await db.collection("telegram_pending_photos").doc(params.pendingId).set(
     removeUndefinedDeep({
       updatedAt: FieldValue.serverTimestamp(),
       status: params.status,
-      lastError: params.error ? String(params.error?.message || params.error).slice(0, 1000) : undefined,
+      lastError: params.error
+        ? String(params.error?.message || params.error).slice(0, 1000)
+        : isCompleted ? null : undefined,
+      retryable: isTerminal ? false : undefined,
+      nextRetryAt: isCompleted ? null : undefined,
+      completedAt: isCompleted ? FieldValue.serverTimestamp() : undefined,
       closureId: params.closureId,
     }),
     { merge: true }
