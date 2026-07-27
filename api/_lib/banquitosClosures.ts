@@ -32,7 +32,7 @@ const roundMoney = (value: unknown) => {
   return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
 };
 
-const STORE_CLOSURES_CACHE_MS = 20_000;
+const STORE_CLOSURES_CACHE_MS = 60_000;
 const STORE_CLOSURES_STALE_MS = 24 * 60 * 60_000;
 const STORE_CLOSURES_SNAPSHOT_COLLECTION = "integration_snapshots";
 const STORE_CLOSURES_SNAPSHOT_ID = "banquitos_store_closures";
