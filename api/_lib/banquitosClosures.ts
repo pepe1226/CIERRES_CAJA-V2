@@ -4,33 +4,6 @@ import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 
 type CashLocation = "safe" | "transit" | "bank" | "personal" | "banquitos";
 
-type ClosureRecord = {
-  id: string;
-  date: string;
-  responsible: string;
-  physicalAmount: number;
-  systemBalance: number;
-  difference: number;
-  status: CashLocation;
-  tripId: string | null;
-  cashBoxBalances: Partial<Record<CashLocation, number>> | null;
-  cashBoxBalancesUpdatedAt: string | null;
-  systemSource: string | null;
-  perseoAuditStatus: string | null;
-  source: string | null;
-};
-
-type TransferRecord = {
-  date: string;
-  amount: number;
-  from: CashLocation;
-  to: CashLocation;
-  source: string | null;
-  closureId: string | null;
-};
-
-const CASH_LOCATIONS: CashLocation[] = ["safe", "transit", "bank", "personal", "banquitos"];
-
 const normalizeCashLocation = (value: unknown): CashLocation => {
   const normalized = String(value || "")
     .toLowerCase()
@@ -59,45 +32,16 @@ const roundMoney = (value: unknown) => {
   return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
 };
 
-const STORE_CLOSURES_CACHE_MS = 15_000;
-const STORE_CLOSURES_STALE_MS = 10 * 60_000;
-const STORE_CLOSURES_QUOTA_BACKOFF_MS = 30 * 60_000;
-const STORE_CLOSURES_FAST_RESPONSE_MS = 1_200;
-const STORE_CLOSURES_BOOTSTRAP_SNAPSHOT = {
-  generatedAt: "2026-07-26T16:57:09.553Z",
-  closures: [
-    {
-      id: "telegram_2026-07-25_YULEXI_UEM9DEAVUYRCI17GZT32LPHF2C72",
-      date: "2026-07-25T12:00:00.000Z",
-      responsible: "YULEXI",
-      amount: 166.8,
-    },
-    {
-      id: "telegram_2026-07-25_JOHANNA_UEM9DEAVUYRCI17GZT32LPHF2C72",
-      date: "2026-07-25T12:00:00.000Z",
-      responsible: "JOHANNA",
-      amount: 79.62,
-    },
-    {
-      id: "telegram_2026-07-25_ERICK_UEM9DEAVUYRCI17GZT32LPHF2C72",
-      date: "2026-07-25T12:00:00.000Z",
-      responsible: "ERICK",
-      amount: 168.39,
-    },
-    {
-      id: "telegram_2026-02-10_1115_ERICK_UEM9DEAVUYRCI17GZT32LPHF2C72",
-      date: "2026-02-10T12:00:00.000Z",
-      responsible: "ERICK",
-      amount: 11.15,
-    },
-  ],
-};
+const STORE_CLOSURES_CACHE_MS = 20_000;
+const STORE_CLOSURES_STALE_MS = 24 * 60 * 60_000;
+const STORE_CLOSURES_SNAPSHOT_COLLECTION = "integration_snapshots";
+const STORE_CLOSURES_SNAPSHOT_ID = "banquitos_store_closures";
 let storeClosuresCache: {
   loadedAt: number;
+  generatedAt: string;
   closures: Array<Record<string, unknown>>;
 } | null = null;
 let storeClosuresRequest: Promise<Array<Record<string, unknown>>> | null = null;
-let storeClosuresQuotaBackoffUntil = 0;
 
 const isQuotaExceededError = (error: any) => {
   const message = String(error?.message || "");
@@ -114,69 +58,6 @@ const isAuthorizedIntegration = (req: any) => {
   const receivedBuffer = Buffer.from(receivedSecret);
   if (configuredBuffer.length < 16 || receivedBuffer.length !== configuredBuffer.length) return false;
   return timingSafeEqual(receivedBuffer, configuredBuffer);
-};
-
-const buildStoreBalances = (closures: ClosureRecord[], transfers: TransferRecord[]) => {
-  const balances = new Map<string, Record<CashLocation, number>>();
-  const balanceBaselineByClosureId = new Map<string, number>();
-
-  closures.forEach((closure) => {
-    const persistedBalances = closure.cashBoxBalances;
-    const hasPersistedBalances = persistedBalances && typeof persistedBalances === "object";
-    const initialBalance: Record<CashLocation, number> = hasPersistedBalances
-      ? {
-          safe: Math.max(0, Number(persistedBalances.safe) || 0),
-          transit: Math.max(0, Number(persistedBalances.transit) || 0),
-          bank: Math.max(0, Number(persistedBalances.bank) || 0),
-          personal: 0,
-          banquitos: Math.max(0, Number(persistedBalances.banquitos) || 0),
-        }
-      : { safe: 0, transit: 0, bank: 0, personal: 0, banquitos: 0 };
-
-    if (!hasPersistedBalances) initialBalance[closure.status] = closure.physicalAmount;
-    balances.set(closure.id, initialBalance);
-
-    const baselineTime = closure.cashBoxBalancesUpdatedAt
-      ? new Date(closure.cashBoxBalancesUpdatedAt).getTime()
-      : Number.NaN;
-    balanceBaselineByClosureId.set(closure.id, Number.isNaN(baselineTime) ? 0 : baselineTime);
-  });
-
-  [...transfers]
-    .sort((left, right) => left.date.localeCompare(right.date))
-    .forEach((transfer) => {
-      if (
-        transfer.from === "personal"
-        || transfer.to === "personal"
-        || transfer.from === transfer.to
-        || transfer.amount <= 0
-      ) return;
-
-      let remainingAmount = transfer.amount;
-      const transferTime = new Date(transfer.date).getTime();
-      const candidates = [...closures]
-        .filter((closure) => {
-          if (transfer.closureId && transfer.closureId !== closure.id) return false;
-          const closureTime = new Date(closure.date).getTime();
-          const baselineTime = balanceBaselineByClosureId.get(closure.id) || 0;
-          if (Number.isNaN(transferTime) || Number.isNaN(closureTime)) return true;
-          return closureTime <= transferTime && transferTime > baselineTime;
-        })
-        .sort((left, right) => right.date.localeCompare(left.date));
-
-      for (const closure of candidates) {
-        const closureBalance = balances.get(closure.id);
-        if (!closureBalance || closureBalance[transfer.from] <= 0) continue;
-
-        const movedAmount = Math.min(closureBalance[transfer.from], remainingAmount);
-        closureBalance[transfer.from] -= movedAmount;
-        closureBalance[transfer.to] += movedAmount;
-        remainingAmount -= movedAmount;
-        if (remainingAmount <= 0.009) break;
-      }
-    });
-
-  return balances;
 };
 
 const getBody = (req: any) => {
@@ -201,165 +82,97 @@ const getPrimaryLocation = (balances: Record<CashLocation, number>, fallback: Ca
   ), fallback === "personal" ? "safe" : fallback);
 };
 
-const loadAvailableStoreClosures = async (database: ReturnType<typeof getFirebaseAdminDb>) => {
+const buildStoreSnapshotSignature = (closures: Array<Record<string, unknown>>) => {
+  const value = JSON.stringify(closures);
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `v1-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
+
+const loadPublishedStoreClosures = async (database: ReturnType<typeof getFirebaseAdminDb>) => {
   const snapshot = await database
-    .collection("closures")
-    .where("status", "==", "safe")
-    .limit(100)
+    .collection(STORE_CLOSURES_SNAPSHOT_COLLECTION)
+    .doc(STORE_CLOSURES_SNAPSHOT_ID)
     .get();
 
-  return snapshot.docs
-    .map((document) => {
-      const data = document.data();
-      const physicalAmount = roundMoney(data.physicalAmount);
-      const systemBalance = roundMoney(data.systemBalance);
-      const persisted = data.cashBoxBalances && typeof data.cashBoxBalances === "object"
-        ? data.cashBoxBalances
-        : null;
-      const safeAmount = persisted ? roundMoney(persisted.safe) : physicalAmount;
-      const hasMoneyOutsideStore = persisted && ["transit", "bank", "banquitos"]
-        .some((location) => roundMoney(persisted[location]) > 0.009);
+  if (!snapshot.exists) {
+    throw Object.assign(new Error("El resumen de cortes todavia no fue publicado por Cierres de Caja."), {
+      statusCode: 503,
+    });
+  }
 
-      if (data.tripId || safeAmount <= 0.009 || hasMoneyOutsideStore) return null;
+  const data = snapshot.data() || {};
+  const closures = Array.isArray(data.closures)
+    ? data.closures
+      .filter((closure) => closure && typeof closure === "object" && String(closure.id || "").trim())
+      .slice(0, 100)
+      .map((closure) => ({
+        id: String(closure.id),
+        date: String(closure.date || ""),
+        responsible: String(closure.responsible || "SIN RESPONSABLE"),
+        amount: roundMoney(closure.amount),
+        physicalAmount: roundMoney(closure.physicalAmount),
+        systemBalance: roundMoney(closure.systemBalance),
+        difference: roundMoney(closure.difference),
+        systemSource: closure.systemSource ? String(closure.systemSource) : null,
+        auditStatus: closure.auditStatus ? String(closure.auditStatus) : null,
+        source: closure.source ? String(closure.source) : null,
+      }))
+      .filter((closure) => closure.amount > 0.009)
+      .sort((left, right) => right.date.localeCompare(left.date))
+    : [];
 
-      return {
-        id: document.id,
-        date: toIso(data.date),
-        responsible: String(data.responsible || "SIN RESPONSABLE"),
-        amount: safeAmount,
-        physicalAmount,
-        systemBalance,
-        difference: roundMoney(data.difference ?? physicalAmount - systemBalance),
-        systemSource: data.systemSource ? String(data.systemSource) : null,
-        auditStatus: data.perseoAuditStatus ? String(data.perseoAuditStatus) : null,
-        source: data.source ? String(data.source) : null,
-      };
-    })
-    .filter((closure): closure is NonNullable<typeof closure> => Boolean(closure))
-    .sort((left, right) => String(right.date).localeCompare(String(left.date)));
+  return {
+    closures,
+    generatedAt: toIso(data.generatedAt) || new Date().toISOString(),
+  };
 };
 
 const getAvailableStoreClosures = async (
   database: ReturnType<typeof getFirebaseAdminDb>,
-  forceRefresh: boolean,
 ) => {
   const now = Date.now();
   if (
-    !forceRefresh
-    && storeClosuresCache
+    storeClosuresCache
     && now - storeClosuresCache.loadedAt < STORE_CLOSURES_CACHE_MS
   ) {
-    return { closures: storeClosuresCache.closures, cached: true, stale: false };
-  }
-  if (now < storeClosuresQuotaBackoffUntil) {
-    if (storeClosuresCache) {
-      return { closures: storeClosuresCache.closures, cached: true, stale: true };
-    }
-    const closures = STORE_CLOSURES_BOOTSTRAP_SNAPSHOT.closures;
-    storeClosuresCache = { loadedAt: Date.now(), closures };
-    return { closures, cached: true, stale: true };
+    return { ...storeClosuresCache, cached: true, stale: false };
   }
 
   try {
     if (!storeClosuresRequest) {
-      storeClosuresRequest = loadAvailableStoreClosures(database)
-        .then((closures) => {
-          storeClosuresCache = { loadedAt: Date.now(), closures };
-          storeClosuresQuotaBackoffUntil = 0;
-          return closures;
-        })
-        .catch((error) => {
-          if (isQuotaExceededError(error)) {
-            storeClosuresQuotaBackoffUntil = Date.now() + STORE_CLOSURES_QUOTA_BACKOFF_MS;
-          }
-          throw error;
+      storeClosuresRequest = loadPublishedStoreClosures(database)
+        .then((published) => {
+          storeClosuresCache = { loadedAt: Date.now(), ...published };
+          return published.closures;
         })
         .finally(() => {
           storeClosuresRequest = null;
         });
     }
 
-    const closures = await Promise.race([
-      storeClosuresRequest,
-      new Promise<null>((resolve) => {
-        setTimeout(() => resolve(null), STORE_CLOSURES_FAST_RESPONSE_MS);
-      }),
-    ]);
-    if (!closures) {
-      const fallbackClosures = storeClosuresCache?.closures
-        || STORE_CLOSURES_BOOTSTRAP_SNAPSHOT.closures;
-      if (!storeClosuresCache) {
-        storeClosuresCache = { loadedAt: Date.now(), closures: fallbackClosures };
-      }
-      return { closures: fallbackClosures, cached: true, stale: true };
-    }
-    return { closures, cached: false, stale: false };
+    const closures = await storeClosuresRequest;
+    return {
+      closures,
+      generatedAt: storeClosuresCache?.generatedAt || new Date().toISOString(),
+      cached: false,
+      stale: false,
+    };
   } catch (error) {
     if (
       storeClosuresCache
       && now - storeClosuresCache.loadedAt < STORE_CLOSURES_STALE_MS
     ) {
       console.warn("Usando cache temporal de cortes por error de Firestore:", error);
-      return { closures: storeClosuresCache.closures, cached: true, stale: true };
-    }
-    if (isQuotaExceededError(error)) {
-      const closures = STORE_CLOSURES_BOOTSTRAP_SNAPSHOT.closures;
-      storeClosuresCache = { loadedAt: Date.now(), closures };
-      return { closures, cached: true, stale: true };
+      return { ...storeClosuresCache, cached: true, stale: true };
     }
     throw error;
   }
-};
-
-const loadClosureLedger = async (database: ReturnType<typeof getFirebaseAdminDb>) => {
-  const [closuresSnapshot, movementsSnapshot] = await Promise.all([
-    database.collection("closures").orderBy("date", "desc").limit(1000).get(),
-    database.collection("movements").orderBy("date", "asc").limit(3000).get(),
-  ]);
-
-  const closures: ClosureRecord[] = closuresSnapshot.docs.map((document) => {
-    const data = document.data();
-    const physicalAmount = roundMoney(data.physicalAmount);
-    const systemBalance = roundMoney(data.systemBalance);
-    return {
-      id: document.id,
-      date: toIso(data.date),
-      responsible: String(data.responsible || "SIN RESPONSABLE"),
-      physicalAmount,
-      systemBalance,
-      difference: roundMoney(data.difference ?? physicalAmount - systemBalance),
-      status: normalizeCashLocation(data.status),
-      tripId: data.tripId ? String(data.tripId) : null,
-      cashBoxBalances: data.cashBoxBalances && typeof data.cashBoxBalances === "object"
-        ? data.cashBoxBalances
-        : null,
-      cashBoxBalancesUpdatedAt: data.cashBoxBalancesUpdatedAt
-        ? toIso(data.cashBoxBalancesUpdatedAt)
-        : null,
-      systemSource: data.systemSource ? String(data.systemSource) : null,
-      perseoAuditStatus: data.perseoAuditStatus ? String(data.perseoAuditStatus) : null,
-      source: data.source ? String(data.source) : null,
-    };
-  });
-
-  const transfers: TransferRecord[] = movementsSnapshot.docs
-    .map((document) => document.data())
-    .filter((data) => (
-      (data.type === "transfer" || data.type === "internal_transfer")
-      && data.source !== "status_control"
-      && data.from
-      && data.to
-    ))
-    .map((data) => ({
-      date: toIso(data.date),
-      amount: roundMoney(data.amount),
-      from: normalizeCashLocation(data.from),
-      to: normalizeCashLocation(data.to),
-      source: data.source ? String(data.source) : null,
-      closureId: data.closureId ? String(data.closureId) : null,
-    }));
-
-  return { closures, balances: buildStoreBalances(closures, transfers) };
 };
 
 const transferClosureToBanquitos = async (req: any, res: any) => {
@@ -378,6 +191,9 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
   const movementDocumentId = getMovementDocumentId(movementId);
   const movementRef = database.collection("movements").doc(movementDocumentId);
   const closureRef = database.collection("closures").doc(closureId);
+  const storeSnapshotRef = database
+    .collection(STORE_CLOSURES_SNAPSHOT_COLLECTION)
+    .doc(STORE_CLOSURES_SNAPSHOT_ID);
   const existingMovement = await movementRef.get();
 
   if (existingMovement.exists) {
@@ -400,9 +216,10 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
   }
 
   const result = await database.runTransaction(async (transaction) => {
-    const [movementSnapshot, closureSnapshot] = await Promise.all([
+    const [movementSnapshot, closureSnapshot, publishedStoreSnapshot] = await Promise.all([
       transaction.get(movementRef),
       transaction.get(closureRef),
+      transaction.get(storeSnapshotRef),
     ]);
 
     if (movementSnapshot.exists) {
@@ -479,6 +296,28 @@ const transferClosureToBanquitos = async (req: any, res: any) => {
       createdAt: FieldValue.serverTimestamp(),
     });
 
+    if (publishedStoreSnapshot.exists) {
+      const publishedData = publishedStoreSnapshot.data() || {};
+      const nextClosures = (Array.isArray(publishedData.closures) ? publishedData.closures : [])
+        .filter((closure) => String(closure?.id || "") !== closureId);
+
+      if (nextClosures.length !== Number(publishedData.count || 0)) {
+        transaction.set(storeSnapshotRef, {
+          schemaVersion: 1,
+          source: "cierres-caja-v2",
+          signature: buildStoreSnapshotSignature(nextClosures),
+          generatedAt: FieldValue.serverTimestamp(),
+          generatedBy: "banquitos-integration",
+          count: nextClosures.length,
+          totalAmount: roundMoney(nextClosures.reduce(
+            (total, closure) => total + roundMoney(closure?.amount),
+            0,
+          )),
+          closures: nextClosures,
+        });
+      }
+    }
+
     return { alreadySynced: false };
   });
 
@@ -510,14 +349,13 @@ export async function handleBanquitosClosures(req: any, res: any) {
     }
 
     const database = getFirebaseAdminDb();
-    const forceRefresh = String(req.query?.refresh || "") === "1";
-    const available = await getAvailableStoreClosures(database, forceRefresh);
+    const available = await getAvailableStoreClosures(database);
 
     res.setHeader("Cache-Control", "private, no-store");
     return res.status(200).json({
       ok: true,
       source: "cierres-caja-v2",
-      generatedAt: new Date().toISOString(),
+      generatedAt: available.generatedAt,
       cached: available.cached,
       stale: available.stale,
       closures: available.closures,

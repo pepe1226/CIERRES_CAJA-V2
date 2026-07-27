@@ -108,6 +108,18 @@ type ClosureLedgerEntry = {
   hasSplitBalance: boolean;
   balances: Record<CashBoxStatus, number>;
 };
+type BanquitosStoreClosureSnapshotItem = {
+  id: string;
+  date: string;
+  responsible: string;
+  amount: number;
+  physicalAmount: number;
+  systemBalance: number;
+  difference: number;
+  systemSource: string | null;
+  auditStatus: string | null;
+  source: string | null;
+};
 type AdminModule = {
   id: 'main' | 'dashboard' | 'inventory' | 'personal' | 'payroll' | 'trips' | 'credits';
   title: string;
@@ -146,6 +158,24 @@ type MissingPerseoClosure = PerseoReportRow & {
 const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos', 'personal'];
 const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
+const BANQUITOS_STORE_SNAPSHOT_ID = 'banquitos_store_closures';
+
+const roundMoney = (value: unknown) => {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
+};
+
+const buildStoreSnapshotSignature = (closures: BanquitosStoreClosureSnapshotItem[]) => {
+  const value = JSON.stringify(closures);
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `v1-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+};
 
 const normalizeCashBoxStatus = (status?: string | null): CashBoxStatus => {
   const normalized = String(status || '')
@@ -578,8 +608,11 @@ function AppContent() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [closures, setClosures] = useState<ShiftClosure[]>([]);
+  const [closuresLoaded, setClosuresLoaded] = useState(false);
   const [perseoReports, setPerseoReports] = useState<PerseoReport[]>([]);
   const [movements, setMovements] = useState<Movement[]>([]);
+  const [movementsLoaded, setMovementsLoaded] = useState(false);
+  const lastPublishedStoreSnapshotSignature = useRef<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [visibleColumnFilter, setVisibleColumnFilter] = useState<ClosureColumnKey | null>(null);
@@ -851,6 +884,9 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
+    setClosuresLoaded(false);
+    setMovementsLoaded(false);
+    lastPublishedStoreSnapshotSignature.current = null;
     if (!user) return;
 
     const qClosures = query(collection(db, 'closures'), orderBy('date', 'desc'));
@@ -867,6 +903,7 @@ function AppContent() {
         };
       }) as ShiftClosure[];
       setClosures(data);
+      setClosuresLoaded(true);
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'closures'));
 
     const qPerseoReports = query(collection(db, 'perseo_reports'), orderBy('createdAt', 'desc'));
@@ -892,6 +929,7 @@ function AppContent() {
         date: (doc.data().date as Timestamp).toDate().toISOString()
       })) as Movement[];
       setMovements(data);
+      setMovementsLoaded(true);
 
       setCategories(prev => {
         const unique = new Set([...prev]);
@@ -1121,6 +1159,72 @@ function AppContent() {
     !closure.tripId &&
     !(closure.id && closureLedgerById[closure.id]?.hasSplitBalance),
   [getClosureDisplayStatus, closureLedgerById]);
+
+  const banquitosStoreSnapshot = useMemo(() => closures
+    .map((closure): BanquitosStoreClosureSnapshotItem | null => {
+      if (!closure.id || !isClosureAvailableForTrip(closure)) return null;
+
+      const safeAmount = roundMoney(closureLedgerById[closure.id]?.balances.safe);
+      if (safeAmount <= 0.009) return null;
+
+      return {
+        id: closure.id,
+        date: closure.date,
+        responsible: closure.responsible || 'SIN RESPONSABLE',
+        amount: safeAmount,
+        physicalAmount: roundMoney(closure.physicalAmount),
+        systemBalance: roundMoney(closure.systemBalance),
+        difference: roundMoney(closure.difference),
+        systemSource: closure.systemSource || null,
+        auditStatus: closure.perseoAuditStatus || null,
+        source: closure.source || null,
+      };
+    })
+    .filter((closure): closure is BanquitosStoreClosureSnapshotItem => Boolean(closure))
+    .sort((left, right) => right.date.localeCompare(left.date))
+    .slice(0, 100),
+  [closures, closureLedgerById, isClosureAvailableForTrip]);
+
+  useEffect(() => {
+    if (!user || !closuresLoaded || !movementsLoaded) return;
+
+    const signature = buildStoreSnapshotSignature(banquitosStoreSnapshot);
+    if (signature === lastPublishedStoreSnapshotSignature.current) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const snapshotRef = doc(db, 'integration_snapshots', BANQUITOS_STORE_SNAPSHOT_ID);
+        const currentSnapshot = await getDoc(snapshotRef);
+        if (cancelled) return;
+
+        if (currentSnapshot.exists() && currentSnapshot.data().signature === signature) {
+          lastPublishedStoreSnapshotSignature.current = signature;
+          return;
+        }
+
+        await setDoc(snapshotRef, {
+          schemaVersion: 1,
+          source: 'cierres-caja-v2',
+          signature,
+          generatedAt: serverTimestamp(),
+          generatedBy: user.uid,
+          count: banquitosStoreSnapshot.length,
+          totalAmount: roundMoney(banquitosStoreSnapshot.reduce((total, closure) => total + closure.amount, 0)),
+          closures: banquitosStoreSnapshot,
+        });
+
+        if (!cancelled) lastPublishedStoreSnapshotSignature.current = signature;
+      } catch (error) {
+        console.error('No se pudo publicar el resumen para Banquitos:', error);
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [user, closuresLoaded, movementsLoaded, banquitosStoreSnapshot]);
 
   const filteredClosures = useMemo(() => {
     const normalizedGlobalSearch = normalizeSearchText(debouncedSearchTerm);

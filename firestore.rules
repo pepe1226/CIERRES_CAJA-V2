@@ -161,6 +161,19 @@ service cloud.firestore {
              (!('createdAt' in data) || data.createdAt is timestamp);
     }
 
+    function isValidBanquitosStoreSnapshot(data) {
+      return data.keys().hasAll(['schemaVersion', 'source', 'signature', 'generatedAt', 'generatedBy', 'count', 'totalAmount', 'closures']) &&
+             data.keys().hasOnly(['schemaVersion', 'source', 'signature', 'generatedAt', 'generatedBy', 'count', 'totalAmount', 'closures']) &&
+             data.schemaVersion == 1 &&
+             data.source == 'cierres-caja-v2' &&
+             data.signature is string && data.signature.size() <= 64 &&
+             data.generatedAt == request.time &&
+             data.generatedBy == request.auth.uid &&
+             data.count is number && data.count >= 0 && data.count <= 100 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.closures is list && data.closures.size() == data.count;
+    }
+
     function isValidPersonalCashBox(data) {
       return hasRequiredFields(['name', 'type', 'openingBalance', 'color', 'isActive', 'createdBy']) &&
              hasOnlyAllowedFields(['id', 'name', 'type', 'openingBalance', 'color', 'isActive', 'createdBy', 'createdAt', 'updatedAt', 'sharedWith']) &&
@@ -236,6 +249,14 @@ service cloud.firestore {
         isValidClosureStatusHistory(request.resource.data) &&
         request.resource.data.createdBy == request.auth.uid;
       allow update, delete: if false;
+    }
+
+    match /integration_snapshots/{snapshotId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() &&
+        snapshotId == 'banquitos_store_closures' &&
+        isValidBanquitosStoreSnapshot(request.resource.data);
+      allow delete: if false;
     }
 
     match /personalCashBoxes/{boxId} {
