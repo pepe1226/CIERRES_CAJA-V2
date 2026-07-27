@@ -1,0 +1,17 @@
+{
+  "name": "CIERRES 1.1",
+  "short_name": "CIERRES",
+  "description": "Plataforma administrativa de cierres de caja",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
