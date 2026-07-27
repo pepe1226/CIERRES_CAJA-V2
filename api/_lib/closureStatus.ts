@@ -5,6 +5,32 @@ import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 
 const STATUSES = new Set(["safe", "transit", "bank", "banquitos"]);
 const MAX_ITEMS = 250;
+const STORE_SNAPSHOT_COLLECTION = "integration_snapshots";
+const STORE_SNAPSHOT_ID = "banquitos_store_closures";
+
+const roundMoney = (value: unknown) => {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) ? Number(amount.toFixed(2)) : 0;
+};
+
+const toIso = (value: any) => {
+  if (!value) return "";
+  if (typeof value.toDate === "function") return value.toDate().toISOString();
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+};
+
+const buildStoreSnapshotSignature = (closures: Array<Record<string, unknown>>) => {
+  const value = JSON.stringify(closures);
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return `v1-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
 
 function getBody(req: any) {
   if (!req.body) return {};
@@ -82,6 +108,8 @@ export async function handleClosureStatus(req: any, res: any) {
     ) as any[];
     const refs = uniqueItems.map(item => db.collection("closures").doc(item.id));
     const snapshots = await db.getAll(...refs);
+    const storeSnapshotRef = db.collection(STORE_SNAPSHOT_COLLECTION).doc(STORE_SNAPSHOT_ID);
+    const publishedStoreSnapshot = await storeSnapshotRef.get();
 
     for (const snapshot of snapshots) {
       if (!snapshot.exists) {
@@ -124,6 +152,53 @@ export async function handleClosureStatus(req: any, res: any) {
         });
       }
     });
+
+    if (publishedStoreSnapshot.exists) {
+      const changedIds = new Set(snapshots.map(snapshot => snapshot.id));
+      const publishedData = publishedStoreSnapshot.data() || {};
+      const nextClosures = (Array.isArray(publishedData.closures) ? publishedData.closures : [])
+        .filter((closure: any) => !changedIds.has(String(closure?.id || "")));
+
+      if (status === "safe" && !tripId) {
+        snapshots.forEach((snapshot, index) => {
+          const data = snapshot.data() || {};
+          const current = uniqueItems[index].cashBoxBalances || data.cashBoxBalances || {};
+          const targetBalances = normalizeBalances(current, status);
+          if (targetBalances.safe <= 0.009) return;
+
+          const physicalAmount = roundMoney(data.physicalAmount);
+          const systemBalance = roundMoney(data.systemBalance);
+          nextClosures.push({
+            id: snapshot.id,
+            date: toIso(data.date),
+            responsible: String(data.responsible || "SIN RESPONSABLE"),
+            amount: roundMoney(targetBalances.safe),
+            physicalAmount,
+            systemBalance,
+            difference: roundMoney(data.difference ?? physicalAmount - systemBalance),
+            systemSource: data.systemSource ? String(data.systemSource) : null,
+            auditStatus: data.perseoAuditStatus ? String(data.perseoAuditStatus) : null,
+            source: data.source ? String(data.source) : null,
+          });
+        });
+      }
+
+      nextClosures.sort((left: any, right: any) => String(right.date).localeCompare(String(left.date)));
+      const limitedClosures = nextClosures.slice(0, 100);
+      batch.set(storeSnapshotRef, {
+        schemaVersion: 1,
+        source: "cierres-caja-v2",
+        signature: buildStoreSnapshotSignature(limitedClosures),
+        generatedAt: changedAt,
+        generatedBy: decoded.uid,
+        count: limitedClosures.length,
+        totalAmount: roundMoney(limitedClosures.reduce(
+          (total: number, closure: any) => total + roundMoney(closure?.amount),
+          0,
+        )),
+        closures: limitedClosures,
+      });
+    }
 
     await batch.commit();
     return res.status(200).json({
