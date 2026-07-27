@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
+import { downloadTelegramPhoto } from "./telegramMovement.js";
 
 type CashLocation = "safe" | "transit" | "bank" | "personal" | "banquitos";
 
@@ -193,6 +194,37 @@ const getAvailableStoreClosures = async (
     }
     throw error;
   }
+};
+
+const sendClosurePhoto = async (req: any, res: any) => {
+  const closureId = String(req.query?.closureId || "").trim();
+  if (!closureId || closureId.length > 180 || closureId.includes("/")) {
+    return res.status(400).json({ ok: false, error: "Corte no valido." });
+  }
+
+  const database = getFirebaseAdminDb();
+  const snapshot = await database.collection("closures").doc(closureId).get();
+  if (!snapshot.exists) {
+    return res.status(404).json({ ok: false, error: "No se encontro el corte." });
+  }
+
+  const closure = snapshot.data() || {};
+  const telegramFileId = String(closure.telegramFileId || "").trim();
+  if (!telegramFileId) {
+    return res.status(404).json({ ok: false, error: "Este corte no tiene una foto disponible." });
+  }
+
+  const downloaded = await downloadTelegramPhoto(telegramFileId);
+  if (!downloaded.mimeType.startsWith("image/")) {
+    return res.status(415).json({ ok: false, error: "El archivo del corte no es una imagen." });
+  }
+
+  res.setHeader("Content-Type", downloaded.mimeType);
+  res.setHeader("Content-Length", String(downloaded.imageBuffer.length));
+  res.setHeader("Content-Disposition", `inline; filename="corte-${closureId.replace(/[^a-zA-Z0-9_-]/g, "-")}.jpg"`);
+  res.setHeader("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  return res.status(200).send(downloaded.imageBuffer);
 };
 
 const transferClosureToBanquitos = async (req: any, res: any) => {
@@ -519,6 +551,10 @@ export async function handleBanquitosClosures(req: any, res: any) {
   }
 
   try {
+    if (req.method === "GET" && String(req.query?.action || "") === "photo") {
+      return await sendClosurePhoto(req, res);
+    }
+
     if (req.method === "POST") {
       const action = String(getBody(req).action || "transfer");
       return action === "reverse"
