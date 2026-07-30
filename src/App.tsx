@@ -638,6 +638,9 @@ function AppContent() {
 
   const [trips, setTrips] = useState<CollectionTrip[]>([]);
   const [selectedClosures, setSelectedClosures] = useState<Set<string>>(new Set());
+  const statusUpdateIdsRef = useRef<Set<string>>(new Set());
+  const [statusUpdateIds, setStatusUpdateIds] = useState<Set<string>>(new Set());
+  const [statusUpdateError, setStatusUpdateError] = useState<string | null>(null);
   const [isCreatingTrip, setIsCreatingTrip] = useState(false);
   const [isTripLoading, setIsTripLoading] = useState(false);
   const [tripFormValues, setTripFormValues] = useState({
@@ -1830,35 +1833,6 @@ function AppContent() {
     setSelectedClosures(newSelected);
   };
 
-  const getClosureTargetBalances = useCallback((
-    closure: ShiftClosure,
-    status: ClosureCashBoxStatus
-  ) => {
-    const ledger = closure.id ? closureLedgerById[closure.id] : undefined;
-    const currentBalances = ledger?.balances || {
-      safe: normalizeClosureCashBoxStatus(closure.status) === 'safe' ? Number(closure.physicalAmount) || 0 : 0,
-      transit: normalizeClosureCashBoxStatus(closure.status) === 'transit' ? Number(closure.physicalAmount) || 0 : 0,
-      bank: normalizeClosureCashBoxStatus(closure.status) === 'bank' ? Number(closure.physicalAmount) || 0 : 0,
-      banquitos: normalizeClosureCashBoxStatus(closure.status) === 'banquitos' ? Number(closure.physicalAmount) || 0 : 0,
-      personal: 0
-    };
-    const totalBalance = closureCashBoxStatuses.reduce(
-      (sum, sourceStatus) => sum + Math.max(0, Number(currentBalances[sourceStatus]) || 0),
-      0
-    );
-
-    return {
-      currentBalances,
-      totalBalance,
-      targetBalances: {
-        safe: status === 'safe' ? totalBalance : 0,
-        transit: status === 'transit' ? totalBalance : 0,
-        bank: status === 'bank' ? totalBalance : 0,
-        banquitos: status === 'banquitos' ? totalBalance : 0
-      }
-    };
-  }, [closureLedgerById]);
-
   const handleCreateTrip = async () => {
     if (!user || !tripFormValues.description) return;
 
@@ -2310,43 +2284,66 @@ function AppContent() {
   const persistClosureStatusChanges = async (
     items: ShiftClosure[],
     status: ClosureCashBoxStatus,
-    tripId: string | null = null
+    tripId?: string | null
   ) => {
     if (!user || items.length === 0) return;
 
-    const firebaseUser = auth.currentUser;
-    if (!firebaseUser) throw new Error('La sesion de Firebase no esta disponible.');
-    const token = await firebaseUser.getIdToken();
-    const response = await fetch('/api/perseo/audit-closures', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
+    const validItems = items.filter((closure): closure is ShiftClosure & { id: string } => Boolean(closure.id));
+    if (validItems.length === 0) return;
+    if (validItems.some(closure => statusUpdateIdsRef.current.has(closure.id))) {
+      throw new Error('Ya se esta guardando el estado de uno de estos cierres.');
+    }
+
+    validItems.forEach(closure => statusUpdateIdsRef.current.add(closure.id));
+    setStatusUpdateIds(new Set(statusUpdateIdsRef.current));
+    setStatusUpdateError(null);
+
+    try {
+      const firebaseUser = auth.currentUser;
+      if (!firebaseUser) throw new Error('La sesion de Firebase no esta disponible.');
+      const token = await firebaseUser.getIdToken();
+      const body: Record<string, unknown> = {
         action: 'closure_status',
         status,
-        tripId,
-        items: items
-          .filter(closure => Boolean(closure.id))
-          .map(closure => {
-            const { currentBalances } = getClosureTargetBalances(closure, status);
-            return {
-              id: closure.id,
-              cashBoxBalances: {
-                safe: Math.max(0, Number(currentBalances.safe) || 0),
-                transit: Math.max(0, Number(currentBalances.transit) || 0),
-                bank: Math.max(0, Number(currentBalances.bank) || 0),
-                banquitos: Math.max(0, Number(currentBalances.banquitos) || 0)
-              }
-            };
-          })
-      })
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok || !result.ok) {
-      throw new Error(result.error || 'No se pudo guardar el cambio de estado.');
+        items: validItems.map(closure => ({ id: closure.id }))
+      };
+      if (tripId !== undefined) body.tripId = tripId;
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
+      let response: Response;
+      try {
+        response = await fetch('/api/perseo/audit-closures', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          throw new Error('El cambio tardo demasiado. Verifica tu conexion e intenta nuevamente.');
+        }
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || 'No se pudo guardar el cambio de estado.');
+      }
+    } finally {
+      validItems.forEach(closure => statusUpdateIdsRef.current.delete(closure.id));
+      setStatusUpdateIds(new Set(statusUpdateIdsRef.current));
     }
+  };
+
+  const showClosureStatusError = (error: unknown) => {
+    const message = error instanceof Error ? error.message : 'No se pudo guardar el cambio de estado.';
+    console.error('Closure status update error:', error);
+    setStatusUpdateError(message);
   };
 
   const toggleStatus = async (id: string) => {
@@ -2360,7 +2357,7 @@ function AppContent() {
     try {
       await persistClosureStatusChanges([closure], nextStatus);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
+      showClosureStatusError(err);
     }
   };
 
@@ -2373,7 +2370,7 @@ function AppContent() {
     try {
       await persistClosureStatusChanges([closure], status);
     } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `closures/${id}`);
+      showClosureStatusError(err);
     }
   };
 
@@ -2394,7 +2391,7 @@ function AppContent() {
     try {
       await persistClosureStatusChanges(items, nextStatus);
     } catch (err) {
-      console.error('Day status toggle error:', err);
+      showClosureStatusError(err);
     }
   };
 
@@ -2407,7 +2404,7 @@ function AppContent() {
     try {
       await persistClosureStatusChanges(items, status);
     } catch (err) {
-      console.error('Day status update error:', err);
+      showClosureStatusError(err);
     }
   };
 
@@ -2866,15 +2863,19 @@ Notas: ${closure.notes || 'N/A'}`;
                 const statusInfo = getDayStatusInfo(status);
                 const StatusIcon = statusInfo.Icon;
                 const active = group.status === status;
+                const isUpdating = group.items.some(item => Boolean(item.id && statusUpdateIds.has(item.id)));
                 return (
                   <button
                     key={status}
                     type="button"
                     onClick={() => setDayStatus(group.date, status)}
                     title={`Enviar todos los cierres del dia a ${statusInfo.label}`}
-                    className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                    disabled={active || isUpdating}
+                    className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all disabled:cursor-not-allowed ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10 disabled:opacity-40'}`}
                   >
-                    <StatusIcon className="w-3 h-3" />
+                    {isUpdating && active
+                      ? <RefreshCw className="w-3 h-3 animate-spin" />
+                      : <StatusIcon className="w-3 h-3" />}
                     {statusButtonLabel(status)}
                   </button>
                 );
@@ -3070,15 +3071,20 @@ Notas: ${closure.notes || 'N/A'}`;
                 const statusInfo = getDayStatusInfo(status);
                 const StatusIcon = statusInfo.Icon;
                 const active = currentStatus === status;
+                const isUpdating = Boolean(closure.id && statusUpdateIds.has(closure.id));
+                const hasSplitBalance = Boolean(closure.id && closureLedgerById[closure.id]?.hasSplitBalance);
                 return (
                   <button
                     key={status}
                     type="button"
                     onClick={() => setClosureStatus(closure.id!, status)}
                     title={statusInfo.label}
-                    className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
+                    disabled={isUpdating || (active && !hasSplitBalance)}
+                    className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all disabled:cursor-not-allowed ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10 disabled:opacity-40'}`}
                   >
-                    <StatusIcon className="w-3 h-3" />
+                    {isUpdating && active
+                      ? <RefreshCw className="w-3 h-3 animate-spin" />
+                      : <StatusIcon className="w-3 h-3" />}
                     {statusButtonLabel(status)}
                   </button>
                 );
@@ -3540,6 +3546,25 @@ Notas: ${closure.notes || 'N/A'}`;
                     <p className="font-black text-sm uppercase tracking-widest">Registro Guardado!</p>
                     <p className="text-[10px] font-bold opacity-80 uppercase">El cierre se ha guardado correctamente</p>
                   </div>
+                </div>
+              </div>
+            )}
+            {statusUpdateError && (
+              <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[110] w-[min(92vw,34rem)]">
+                <div className="bg-rose-950 text-rose-100 px-5 py-4 rounded-2xl shadow-2xl flex items-start gap-3 border border-rose-500/40">
+                  <ShieldAlert className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-black text-xs uppercase tracking-widest">No se cambio el estado</p>
+                    <p className="text-xs font-bold text-rose-200 mt-1">{statusUpdateError}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStatusUpdateError(null)}
+                    title="Cerrar aviso"
+                    className="p-1 text-rose-300 hover:text-white"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
             )}

@@ -4,7 +4,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 
 const STATUSES = new Set(["safe", "transit", "bank", "banquitos"]);
-const MAX_ITEMS = 250;
+const MAX_ITEMS = 90;
 const STORE_SNAPSHOT_COLLECTION = "integration_snapshots";
 const STORE_SNAPSHOT_ID = "banquitos_store_closures";
 
@@ -67,6 +67,33 @@ function normalizeBalances(value: any, status: string) {
   };
 }
 
+function getStoredBalances(data: any) {
+  const persisted = data?.cashBoxBalances;
+  if (persisted && typeof persisted === "object") {
+    return {
+      safe: Math.max(0, roundMoney(persisted.safe)),
+      transit: Math.max(0, roundMoney(persisted.transit)),
+      bank: Math.max(0, roundMoney(persisted.bank)),
+      banquitos: Math.max(0, roundMoney(persisted.banquitos)),
+    };
+  }
+
+  const status = STATUSES.has(String(data?.status || "")) ? String(data.status) : "safe";
+  const amount = Math.max(0, roundMoney(data?.physicalAmount));
+  return {
+    safe: status === "safe" ? amount : 0,
+    transit: status === "transit" ? amount : 0,
+    bank: status === "bank" ? amount : 0,
+    banquitos: status === "banquitos" ? amount : 0,
+  };
+}
+
+function balancesMatch(left: any, right: any) {
+  return ["safe", "transit", "bank", "banquitos"].every(
+    location => Math.abs(roundMoney(left?.[location]) - roundMoney(right?.[location])) <= 0.009,
+  );
+}
+
 export async function handleClosureStatus(req: any, res: any) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
@@ -88,9 +115,14 @@ export async function handleClosureStatus(req: any, res: any) {
     const body = getBody(req);
     const status = String(body.status || "");
     const items = Array.isArray(body.items) ? body.items : [];
+    const shouldUpdateTripId = Object.prototype.hasOwnProperty.call(body, "tripId");
     const tripId = body.tripId === null || typeof body.tripId === "string"
       ? body.tripId
-      : null;
+      : undefined;
+
+    if (shouldUpdateTripId && tripId === undefined) {
+      return res.status(400).json({ ok: false, error: "Viaje no valido." });
+    }
 
     if (!STATUSES.has(status)) {
       return res.status(400).json({ ok: false, error: "Estado no valido." });
@@ -120,24 +152,40 @@ export async function handleClosureStatus(req: any, res: any) {
       }
     }
 
+    const preparedChanges = snapshots.map(snapshot => {
+      const data = snapshot.data() || {};
+      const currentBalances = getStoredBalances(data);
+      const targetBalances = normalizeBalances(currentBalances, status);
+      const tripChanged = shouldUpdateTripId && (data.tripId || null) !== tripId;
+      const changed = data.status !== status || !balancesMatch(currentBalances, targetBalances) || tripChanged;
+      return { snapshot, data, currentBalances, targetBalances, changed };
+    });
+    const changedEntries = preparedChanges.filter(entry => entry.changed);
+
+    if (changedEntries.length === 0) {
+      return res.status(200).json({
+        ok: true,
+        updated: 0,
+        unchanged: snapshots.length,
+        status,
+      });
+    }
+
     const changedAt = FieldValue.serverTimestamp();
     const batch = db.batch();
 
-    snapshots.forEach((snapshot, index) => {
-      const item = uniqueItems[index];
-      const current = item.cashBoxBalances || snapshot.data()?.cashBoxBalances || {};
-      const targetBalances = normalizeBalances(current, status);
-
-      batch.update(snapshot.ref, {
+    changedEntries.forEach(({ snapshot, currentBalances, targetBalances }) => {
+      const updateData: Record<string, unknown> = {
         status,
-        tripId,
         cashBoxBalances: targetBalances,
         cashBoxBalancesUpdatedAt: changedAt,
         statusUpdatedAt: changedAt,
-      });
+      };
+      if (shouldUpdateTripId) updateData.tripId = tripId;
+      batch.update(snapshot.ref, updateData);
 
       for (const from of ["safe", "transit", "bank", "banquitos"]) {
-        const amount = Math.max(0, Number(current[from]) || 0);
+        const amount = Math.max(0, Number(currentBalances[from]) || 0);
         if (from === status || amount <= 0.009) continue;
         const historyRef = db.collection("closure_status_history").doc();
         batch.set(historyRef, {
@@ -154,16 +202,13 @@ export async function handleClosureStatus(req: any, res: any) {
     });
 
     if (publishedStoreSnapshot.exists) {
-      const changedIds = new Set(snapshots.map(snapshot => snapshot.id));
+      const changedIds = new Set(changedEntries.map(entry => entry.snapshot.id));
       const publishedData = publishedStoreSnapshot.data() || {};
       const nextClosures = (Array.isArray(publishedData.closures) ? publishedData.closures : [])
         .filter((closure: any) => !changedIds.has(String(closure?.id || "")));
 
       if (status === "safe" && !tripId) {
-        snapshots.forEach((snapshot, index) => {
-          const data = snapshot.data() || {};
-          const current = uniqueItems[index].cashBoxBalances || data.cashBoxBalances || {};
-          const targetBalances = normalizeBalances(current, status);
+        changedEntries.forEach(({ snapshot, data, targetBalances }) => {
           if (targetBalances.safe <= 0.009) return;
 
           const physicalAmount = roundMoney(data.physicalAmount);
@@ -203,7 +248,8 @@ export async function handleClosureStatus(req: any, res: any) {
     await batch.commit();
     return res.status(200).json({
       ok: true,
-      updated: snapshots.length,
+      updated: changedEntries.length,
+      unchanged: snapshots.length - changedEntries.length,
       status,
     });
   } catch (error: any) {
