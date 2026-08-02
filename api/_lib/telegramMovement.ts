@@ -592,11 +592,16 @@ export function isTemporaryFirestoreError(error: any) {
 
 export function isTemporaryPhotoProcessingError(error: any) {
   return error?.code === "PHOTO_PROCESSING_TIMEOUT"
+    || error?.code === "PHOTO_AWAITING_PERSEO_REPORT"
     || isTemporaryFirestoreError(error)
     || isTemporaryGeminiError(error);
 }
 
 export function getFriendlyGeminiErrorMessage(error: any) {
+  if (error?.code === "PHOTO_AWAITING_PERSEO_REPORT") {
+    return "La fecha de la foto entra en conflicto con otro cierre. La guarde como pendiente y la cruzare automaticamente cuando llegue el reporte de Perseo.";
+  }
+
   if (error?.code === "PHOTO_PROCESSING_TIMEOUT") {
     return "El procesamiento tardó más de lo esperado. La foto sigue pendiente y puedes reintentarla sin crear duplicados.";
   }

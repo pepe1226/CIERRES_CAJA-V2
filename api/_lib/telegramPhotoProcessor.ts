@@ -1,4 +1,4 @@
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { auditSavedPerseoReportsForDate, getEcuadorBusinessDateKeyFromValue } from "./perseoAudit.js";
 import { canonicalizeCashierName } from "./cashierNames.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
@@ -160,6 +160,61 @@ function formatMoney(value: any) {
   const number = typeof value === "number" && Number.isFinite(value) ? value : 0;
   return number.toFixed(2);
 }
+
+function shiftBusinessDate(businessDate: string, days: number) {
+  const [year, month, day] = businessDate.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days, 12));
+  return shifted.toISOString().slice(0, 10);
+}
+
+async function findPerseoDateCorrection(params: {
+  date: any;
+  amount: number;
+  responsible: string;
+}) {
+  const originalDate = getEcuadorBusinessDateKeyFromValue(params.date);
+  if (!originalDate || params.amount <= 0) return null;
+
+  const candidateDates = [
+    originalDate,
+    shiftBusinessDate(originalDate, -1),
+    shiftBusinessDate(originalDate, 1),
+  ];
+  const cashier = canonicalizeCashierName(params.responsible).canonical;
+  const reportSnapshot = await getFirebaseAdminDb()
+    .collection("perseo_reports")
+    .where("businessDates", "array-contains-any", candidateDates)
+    .limit(20)
+    .get();
+  const matchingDates = new Set<string>();
+
+  reportSnapshot.docs.forEach(document => {
+    const rows = Array.isArray(document.data()?.rows) ? document.data().rows : [];
+    rows.forEach((row: any) => {
+      const businessDate = String(row?.businessDate || "");
+      if (!candidateDates.includes(businessDate)) return;
+
+      const rowCashiers = [row?.responsible, row?.cashBox]
+        .map(value => canonicalizeCashierName(value).canonical)
+        .filter(Boolean);
+      if (!rowCashiers.includes(cashier)) return;
+
+      const amounts = [row?.systemBalance, row?.reportedAmount]
+        .map(value => Number(value || 0))
+        .filter(value => value > 0);
+      if (amounts.some(value => Math.abs(value - params.amount) <= 0.10)) {
+        matchingDates.add(businessDate);
+      }
+    });
+  });
+
+  if (matchingDates.has(originalDate) || matchingDates.size !== 1) return null;
+  const correctedDate = Array.from(matchingDates)[0];
+  return correctedDate && correctedDate !== originalDate
+    ? { originalDate, correctedDate }
+    : null;
+}
+
 function parseOptionalMoney(value: any) {
   if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
 
@@ -419,6 +474,19 @@ export async function processTelegramPhotoMessage(params: {
       const existingDoc = samePhotoQuery.docs[0];
       const data = existingDoc.data();
 
+      if (!data.telegramFileId) {
+        await existingDoc.ref.set(
+          removeUndefinedDeep({
+            source: data.source || "telegram",
+            telegramChatId: String(params.chatId),
+            telegramMessageId: params.message.message_id,
+            telegramFileId: params.largestPhoto.file_id,
+            telegramFileUniqueId,
+          }),
+          { merge: true }
+        );
+      }
+
       await replyDuplicate({
         chatId: params.chatId,
         responsible: cleanResponsible(data.responsible || "SIN RESPONSABLE"),
@@ -500,6 +568,25 @@ export async function processTelegramPhotoMessage(params: {
     );
   }
 
+  const perseoDateCorrection = await findPerseoDateCorrection({
+    date: firestoreMovement.date,
+    amount,
+    responsible,
+  });
+  if (perseoDateCorrection) {
+    firestoreMovement.date = Timestamp.fromDate(
+      new Date(`${perseoDateCorrection.correctedDate}T12:00:00.000Z`)
+    );
+    firestoreMovement.telegramDateAdjusted = true;
+    firestoreMovement.telegramOriginalDate = perseoDateCorrection.originalDate;
+    firestoreMovement.telegramDateCorrectionReason = "perseo_cashier_amount_match";
+    firestoreMovement.telegramRawExtraction = {
+      ...raw,
+      fecha_original_ocr: perseoDateCorrection.originalDate,
+      fecha: perseoDateCorrection.correctedDate,
+    };
+  }
+
   const createdBy = firestoreMovement.createdBy || "telegram-bot";
 
   const duplicateKey = buildDuplicateKey({
@@ -523,6 +610,17 @@ export async function processTelegramPhotoMessage(params: {
     responsible,
     createdBy,
   });
+
+  if (
+    potentialDuplicate?.duplicateType === "same-day-cashier"
+    && Number(potentialDuplicate.amountDifference || 0) > 1
+  ) {
+    const error: any = new Error(
+      "La fecha OCR coincide con otro cierre del mismo cajero, pero el monto es diferente. Esperando reporte Perseo."
+    );
+    error.code = "PHOTO_AWAITING_PERSEO_REPORT";
+    throw error;
+  }
 
   if (potentialDuplicate) {
     await telegramMessageRef.set(
