@@ -13,16 +13,18 @@ function compactNameText(value: unknown) {
 }
 
 const CASHIER_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
-  { canonical: "JOHANNA", aliases: ["johanna", "johana", "joha", "yoha", "soha"] },
-  { canonical: "YULEXI", aliases: ["yulexi", "yulex", "yule", "yuli", "juli", "yul"] },
-  { canonical: "DAYELI", aliases: ["dayeli", "daye", "dayi", "dayveli", "deyli", "deili", "daili"] },
-  { canonical: "ERICK", aliases: ["erick", "eric", "erik"] },
+  { canonical: "JOHANNA", aliases: ["johanna", "johana", "joha", "yoha", "soha", "jaha", "jdha", "joho", "jolla", "scha"] },
+  { canonical: "YULEXI", aliases: ["yulexi", "yulex", "yule", "yuli", "juli", "yul", "yulexi"] },
+  { canonical: "DAYELI", aliases: ["dayeli", "daye", "dayi", "dayveli", "dahely", "danieli", "deyli", "deili", "daili"] },
+  { canonical: "ERICK", aliases: ["erick", "eric", "erik", "eick", "evick", "magaly", "nagaly", "maga"] },
 ];
 
 function aliasMatches(compact: string, alias: string) {
   const aliasCompact = compactNameText(alias);
   if (!compact || !aliasCompact) return false;
-  return compact === aliasCompact || compact.includes(aliasCompact) || aliasCompact.includes(compact);
+  if (compact === aliasCompact) return true;
+  if (compact.length < 4 || aliasCompact.length < 4) return false;
+  return compact.includes(aliasCompact) || aliasCompact.includes(compact);
 }
 
 export function canonicalizeCashierName(value: unknown) {
@@ -51,7 +53,7 @@ export function knownCashierPrompt() {
     "- JOHANNA (JOHA, JOHANA, YOHA, SOHA)",
     "- YULEXI (YULI, JULI, YULEX)",
     "- DAYELI (DAYI, DAYE)",
-    "- ERICK (ERIC, ERIK)",
+    "- ERICK (ERIC, ERIK; antiguas lecturas MAGALY o NAGALY)",
     "Si el nombre se parece a uno de ellos por caligrafia, normalizalo al nombre canonico.",
   ].join("\n");
 }

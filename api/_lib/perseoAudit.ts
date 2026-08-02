@@ -1,6 +1,7 @@
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { normalizeCashierName } from "./cashierNames.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
+import { buildPerseoReportFingerprint } from "./perseoReportFingerprint.js";
 import { getTelegramConfig } from "./telegramMovement.js";
 
 type PerseoReportRow = {
@@ -493,6 +494,102 @@ async function getClosuresForDate(businessDate: string) {
   return snapshot.docs.map((doc) => ({ id: doc.id, ref: doc.ref, data: doc.data() }));
 }
 
+function shiftBusinessDate(businessDate: string, days: number) {
+  const [year, month, day] = businessDate.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days, 12)).toISOString().slice(0, 10);
+}
+
+async function reconcileAdjacentTelegramClosureDates(params: {
+  rows: PerseoReportRow[];
+  reportId?: string;
+  tolerance: number;
+}) {
+  const db = getFirebaseAdminDb();
+  const closuresByDate = new Map<string, Awaited<ReturnType<typeof getClosuresForDate>>>();
+  const corrections: Array<{ closureId: string; from: string; to: string }> = [];
+
+  const loadDate = async (businessDate: string) => {
+    if (!closuresByDate.has(businessDate)) {
+      closuresByDate.set(businessDate, await getClosuresForDate(businessDate));
+    }
+    return closuresByDate.get(businessDate)!;
+  };
+
+  for (const row of params.rows) {
+    const cashierKeys = new Set([row.responsibleKey, row.cashBoxKey].filter(Boolean));
+    if (cashierKeys.size === 0) continue;
+
+    const targetClosures = await loadDate(row.businessDate);
+    const alreadyHasTargetClosure = targetClosures.some((closure) =>
+      cashierKeys.has(normalizeResponsible(closure.data.responsible))
+    );
+    if (alreadyHasTargetClosure) continue;
+
+    const expectedAmounts = [row.systemBalance, row.reportedAmount]
+      .map((value) => Number(value || 0))
+      .filter((value) => value > 0);
+    if (expectedAmounts.length === 0) continue;
+
+    const adjacentDates = [
+      shiftBusinessDate(row.businessDate, -1),
+      shiftBusinessDate(row.businessDate, 1),
+    ];
+    const adjacentClosures = (await Promise.all(adjacentDates.map(loadDate))).flat();
+    const candidates = adjacentClosures.filter((closure) => {
+      const data = closure.data;
+      const isTelegram = data.source === "telegram" || Boolean(data.telegramFileUniqueId);
+      const isUnaudited = !data.perseoReportId && data.systemSource !== "perseo";
+      const sameCashier = cashierKeys.has(normalizeResponsible(data.responsible));
+      const physicalAmount = Number(data.physicalAmount || 0);
+      const amountMatches = expectedAmounts.some(
+        (amount) => Math.abs(physicalAmount - amount) <= Math.max(params.tolerance, 0.10)
+      );
+      return isTelegram && isUnaudited && sameCashier && amountMatches;
+    });
+
+    if (candidates.length !== 1) continue;
+    const candidate = candidates[0];
+    const originalDate = closureBusinessDate(candidate.data);
+    const correctedAt = Timestamp.now();
+
+    await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(candidate.ref);
+      if (!snapshot.exists) return;
+      const current = snapshot.data() || {};
+      if (current.perseoReportId || current.systemSource === "perseo") return;
+      if (closureBusinessDate(current) !== originalDate) return;
+
+      const rawExtraction = current.telegramRawExtraction && typeof current.telegramRawExtraction === "object"
+        ? current.telegramRawExtraction
+        : {};
+      transaction.update(candidate.ref, {
+        date: Timestamp.fromDate(new Date(`${row.businessDate}T12:00:00.000Z`)),
+        telegramDateAdjusted: true,
+        telegramOriginalDate: current.telegramOriginalDate || originalDate,
+        telegramDateCorrectionReason: "perseo_post_report_match",
+        telegramRawExtraction: {
+          ...rawExtraction,
+          fecha_original_ocr: rawExtraction.fecha_original_ocr || originalDate,
+          fecha: row.businessDate,
+        },
+        dateCorrectionHistory: FieldValue.arrayUnion({
+          from: originalDate,
+          to: row.businessDate,
+          reason: "perseo_post_report_match",
+          reportId: params.reportId || null,
+          correctedAt,
+        }),
+      });
+    });
+
+    closuresByDate.delete(originalDate);
+    closuresByDate.delete(row.businessDate);
+    corrections.push({ closureId: candidate.id, from: originalDate, to: row.businessDate });
+  }
+
+  return corrections;
+}
+
 export async function savePerseoReport(params: {
   source?: string;
   rows: PerseoReportRow[];
@@ -500,26 +597,44 @@ export async function savePerseoReport(params: {
   dailySystemAmountByDate?: Record<string, number>;
 }) {
   const db = getFirebaseAdminDb();
-  const reportRef = db.collection("perseo_reports").doc();
+  const source = params.source || "api";
+  const fingerprint = buildPerseoReportFingerprint(params.rows, params.dailySystemAmountByDate);
+  const reportRef = db.collection("perseo_reports").doc(`perseo_${fingerprint.slice(0, 40)}`);
 
-  await reportRef.set({
-    createdAt: FieldValue.serverTimestamp(),
-    source: params.source || "api",
-    rowCount: params.rows.length,
-    businessDates: Array.from(new Set(params.rows.map((row) => row.businessDate))).sort(),
-    dailySystemAmountByDate: params.dailySystemAmountByDate || null,
-    rows: params.rows.map((row) => ({
-      businessDate: row.businessDate,
-      responsible: row.responsible,
-      responsibleKey: row.responsibleKey,
-      cashBox: row.cashBox,
-      cashBoxKey: row.cashBoxKey,
-      systemAmount: row.systemAmount,
-      systemBalance: row.systemBalance,
-      reportedAmount: row.reportedAmount,
-      transferAmount: row.transferAmount,
-      raw: row.raw,
-    })),
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(reportRef);
+    if (existing.exists) {
+      transaction.set(reportRef, {
+        lastReceivedAt: FieldValue.serverTimestamp(),
+        receiveCount: FieldValue.increment(1),
+        sources: FieldValue.arrayUnion(source),
+      }, { merge: true });
+      return;
+    }
+
+    transaction.create(reportRef, {
+      createdAt: FieldValue.serverTimestamp(),
+      lastReceivedAt: FieldValue.serverTimestamp(),
+      receiveCount: 1,
+      source,
+      sources: [source],
+      fingerprint,
+      rowCount: params.rows.length,
+      businessDates: Array.from(new Set(params.rows.map((row) => row.businessDate))).sort(),
+      dailySystemAmountByDate: params.dailySystemAmountByDate || null,
+      rows: params.rows.map((row) => ({
+        businessDate: row.businessDate,
+        responsible: row.responsible,
+        responsibleKey: row.responsibleKey,
+        cashBox: row.cashBox,
+        cashBoxKey: row.cashBoxKey,
+        systemAmount: row.systemAmount,
+        systemBalance: row.systemBalance,
+        reportedAmount: row.reportedAmount,
+        transferAmount: row.transferAmount,
+        raw: row.raw,
+      })),
+    });
   });
 
   return reportRef.id;
@@ -531,6 +646,11 @@ export async function auditClosuresWithPerseoRows(params: {
   tolerance?: number;
 }) {
   const tolerance = Math.max(0, params.tolerance ?? 0.10);
+  const dateCorrections = await reconcileAdjacentTelegramClosureDates({
+    rows: params.rows,
+    reportId: params.reportId,
+    tolerance,
+  });
   const results: AuditResult[] = [];
   const closuresByDate = new Map<string, Awaited<ReturnType<typeof getClosuresForDate>>>();
   const usedClosureIds = new Set<string>();
@@ -633,6 +753,7 @@ export async function auditClosuresWithPerseoRows(params: {
     unmatched: results.filter((result) => !result.ok).length,
     matched: matchedResults.filter((result) => result.auditStatus === "matched").length,
     differences: differenceResults.length,
+    dateCorrections,
     totalPhysicalAmount: Number(
       matchedResults.reduce((sum, result) => sum + Number(result.physicalAmount || 0), 0).toFixed(2)
     ),

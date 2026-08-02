@@ -95,6 +95,7 @@ import { PersonalFinance } from './components/PersonalFinance';
 import { PayrollModule } from './components/PayrollModule';
 import { InventoryModule } from './components/InventoryModule';
 import { BusinessCreditsModule } from './components/BusinessCreditsModule';
+import { ClosurePhotoThumbnail } from './components/ClosurePhotoThumbnail';
 
 
 type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
@@ -1471,33 +1472,6 @@ function AppContent() {
     const coveredRowKeys = new Set<string>();
     Object.values(perseoClosureMatchById).forEach(match => coveredRowKeys.add(match.key));
 
-    closures.forEach(closure => {
-      const day = format(parseISO(closure.date), 'yyyy-MM-dd');
-      const perseoRaw = closure.perseoRaw as Record<string, unknown> | undefined;
-      const cashier = normalizeCashierName(perseoRaw?.responsable || perseoRaw?.cajero || closure.responsible);
-      const cashBox = normalizePerseoCashBoxKey(perseoRaw?.caja);
-      if (cashBox) {
-        const report = latestPerseoRowsByDate.get(day);
-        const rowIndex = report?.rows.findIndex(row =>
-          normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox) === cashier &&
-          normalizePerseoCashBoxKey(row.cashBox || row.cashBoxKey || 'sin-caja') === cashBox
-        );
-        if (report && rowIndex !== undefined && rowIndex >= 0) {
-          coveredRowKeys.add(createPerseoRowKey(day, report.rows[rowIndex], rowIndex));
-        }
-      }
-      if (Number(closure.systemBalance) > 0) {
-        const report = latestPerseoRowsByDate.get(day);
-        const rowIndex = report?.rows.findIndex(row =>
-          normalizeCashierName(row.responsibleKey || row.responsible || row.cashBoxKey || row.cashBox) === cashier &&
-          Math.abs((Number(row.systemBalance) || 0) - (Number(closure.systemBalance) || 0)) <= 0.009
-        );
-        if (report && rowIndex !== undefined && rowIndex >= 0) {
-          coveredRowKeys.add(createPerseoRowKey(day, report.rows[rowIndex], rowIndex));
-        }
-      }
-    });
-
     const reportRows = Array.from(latestPerseoRowsByDate.entries()).flatMap(([businessDate, report]) => {
       return report.rows
         .map((row, index) => {
@@ -1618,15 +1592,6 @@ function AppContent() {
           difference: 0
         });
         totals.difference = Number((totals.physicalAmount - totals.systemBalance).toFixed(2));
-
-        if (
-          missingRows.length > 0 &&
-          sortedItems.length > 0 &&
-          perseoDailyTotals &&
-          Math.abs(totals.difference) <= closureMatchTolerance * Math.max(1, sortedItems.length)
-        ) {
-          missingRows = [];
-        }
 
         const status = getDayStatusFromItems(sortedItems);
 
@@ -2026,10 +1991,12 @@ function AppContent() {
     setIsSaving(true);
     try {
       const sanitizedValues = {
-        ...inlineEditValues,
         physicalAmount: toNonNegativeNumber(inlineEditValues.physicalAmount),
         systemAmount: toNonNegativeNumber(inlineEditValues.systemAmount),
-        systemBalance: toNonNegativeNumber(inlineEditValues.systemBalance)
+        systemBalance: toNonNegativeNumber(inlineEditValues.systemBalance),
+        responsible: String(inlineEditValues.responsible || '').trim(),
+        notes: inlineEditValues.notes || '',
+        date: inlineEditValues.date,
       };
       const diff = calculateClosureDifference(sanitizedValues);
       await updateDoc(doc(db, 'closures', inlineEditingId), {
@@ -2063,15 +2030,16 @@ function AppContent() {
       for (const [id, values] of Object.entries(bulkEditValues)) {
         const original = closures.find(c => c.id === id);
         if (!original) continue;
-        const sanitizedValues = {
-          ...values,
-          physicalAmount: values.physicalAmount === undefined ? undefined : toNonNegativeNumber(values.physicalAmount),
-          systemAmount: values.systemAmount === undefined ? undefined : toNonNegativeNumber(values.systemAmount),
-          systemBalance: values.systemBalance === undefined ? undefined : toNonNegativeNumber(values.systemBalance)
-        };
+        const sanitizedValues: Partial<Pick<ShiftClosure, 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'notes'>> = {};
+        if (values.date !== undefined) sanitizedValues.date = values.date;
+        if (values.responsible !== undefined) sanitizedValues.responsible = String(values.responsible).trim();
+        if (values.notes !== undefined) sanitizedValues.notes = values.notes;
+        if (values.physicalAmount !== undefined) sanitizedValues.physicalAmount = toNonNegativeNumber(values.physicalAmount);
+        if (values.systemAmount !== undefined) sanitizedValues.systemAmount = toNonNegativeNumber(values.systemAmount);
+        if (values.systemBalance !== undefined) sanitizedValues.systemBalance = toNonNegativeNumber(values.systemBalance);
         const diff = calculateClosureDifference({
-          physicalAmount: sanitizedValues.physicalAmount || original.physicalAmount,
-          systemBalance: sanitizedValues.systemBalance || original.systemBalance
+          physicalAmount: sanitizedValues.physicalAmount ?? original.physicalAmount,
+          systemBalance: sanitizedValues.systemBalance ?? original.systemBalance
         });
         await updateDoc(doc(db, 'closures', id), {
           ...sanitizedValues,
@@ -2779,7 +2747,6 @@ Notas: ${closure.notes || 'N/A'}`;
               <option value="safe">Tienda</option>
               <option value="transit">Transito</option>
               <option value="bank">Banco</option>
-              <option value="banquitos">Banquitos</option>
             </select>
           </td>
         );
@@ -2855,11 +2822,18 @@ Notas: ${closure.notes || 'N/A'}`;
         return <td key={column} className={cellClass(column, amountCellClass)}>${(group.totals.reportedAmount || 0).toLocaleString('es-CL')}</td>;
       case 'difference':
         return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(group.totals.difference)}</td>;
-      case 'status':
+      case 'status': {
+        const containsBanquitos = group.items.some(item => {
+          if (!item.id) return normalizeClosureCashBoxStatus(item.status) === 'banquitos';
+          return (derivedClosureStatusById[item.id] || normalizeClosureCashBoxStatus(item.status)) === 'banquitos';
+        });
+        const visibleStatuses: ClosureCashBoxStatus[] = containsBanquitos
+          ? ['banquitos']
+          : closureCashBoxStatuses.filter(status => status !== 'banquitos');
         return (
           <td key={column} className={cellClass(column)}>
             <div className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
-              {closureCashBoxStatuses.map(status => {
+              {visibleStatuses.map(status => {
                 const statusInfo = getDayStatusInfo(status);
                 const StatusIcon = statusInfo.Icon;
                 const active = group.status === status;
@@ -2869,8 +2843,8 @@ Notas: ${closure.notes || 'N/A'}`;
                     key={status}
                     type="button"
                     onClick={() => setDayStatus(group.date, status)}
-                    title={`Enviar todos los cierres del dia a ${statusInfo.label}`}
-                    disabled={active || isUpdating}
+                    title={containsBanquitos ? 'Gestiona este dinero desde Banquitos' : `Enviar todos los cierres del dia a ${statusInfo.label}`}
+                    disabled={active || isUpdating || containsBanquitos}
                     className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 transition-all disabled:cursor-not-allowed ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10 disabled:opacity-40'}`}
                   >
                     {isUpdating && active
@@ -2883,6 +2857,7 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
           </td>
         );
+      }
       case 'actions':
         return (
           <td key={column} className={cellClass(column)}>
@@ -2957,21 +2932,19 @@ Notas: ${closure.notes || 'N/A'}`;
         return <td key={column} className={cellClass(column, amountCellClass)}>{moneyText(inlineEditValues.reportedAmount || 0)}</td>;
       case 'difference':
         return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(difference)}</td>;
-      case 'status':
+      case 'status': {
+        const currentStatus = normalizeClosureCashBoxStatus(inlineEditValues.status);
+        const statusInfo = getDayStatusInfo(currentStatus);
+        const StatusIcon = statusInfo.Icon;
         return (
           <td key={column} className={cellClass(column)}>
-            <select
-              value={inlineEditValues.status || 'safe'}
-              onChange={e => setInlineEditValues({ ...inlineEditValues, status: e.target.value as ClosureCashBoxStatus })}
-              className="bg-[#0F172A] border border-white/10 rounded-lg px-2 py-1.5 text-[10px] font-black uppercase text-white outline-none"
-            >
-              <option value="safe">Tienda</option>
-              <option value="transit">Transito</option>
-              <option value="bank">Banco</option>
-              <option value="banquitos">Banquitos</option>
-            </select>
+            <span className={`px-2 py-1.5 rounded-lg border text-[8px] font-black uppercase inline-flex items-center gap-1 ${statusInfo.className}`}>
+              <StatusIcon className="w-3 h-3" />
+              {statusButtonLabel(currentStatus)}
+            </span>
           </td>
         );
+      }
       case 'actions':
         return (
           <td key={column} className={cellClass(column)}>
@@ -3022,9 +2995,17 @@ Notas: ${closure.notes || 'N/A'}`;
         return (
           <td key={column} className={cellClass(column)}>
             <div className="flex items-center gap-2">
-              <div className="w-7 h-7 bg-white/5 rounded-full flex items-center justify-center border border-white/5">
-                <UserIcon className="w-3.5 h-3.5 text-slate-500" />
-              </div>
+              <ClosurePhotoThumbnail
+                closureId={closure.id}
+                telegramFileId={closure.telegramFileId}
+                responsible={closure.responsible}
+                date={closure.date}
+              />
+              {!closure.telegramFileId && (
+                <div className="w-7 h-7 bg-white/5 rounded-full flex items-center justify-center border border-white/5">
+                  <UserIcon className="w-3.5 h-3.5 text-slate-500" />
+                </div>
+              )}
               <div className="flex flex-col gap-1.5">
                 <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
                 {(() => {
@@ -3060,14 +3041,17 @@ Notas: ${closure.notes || 'N/A'}`;
         return <td key={column} className={cellClass(column, amountCellClass)}>${displayReportedAmount.toLocaleString('es-CL')}</td>;
       case 'difference':
         return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(displayDifference)}</td>;
-      case 'status':
+      case 'status': {
+        const currentStatus = closure.id
+          ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
+          : normalizeClosureCashBoxStatus(closure.status);
+        const visibleStatuses: ClosureCashBoxStatus[] = currentStatus === 'banquitos'
+          ? ['banquitos']
+          : closureCashBoxStatuses.filter(status => status !== 'banquitos');
         return (
           <td key={column} className={cellClass(column)}>
             <div className="flex items-center justify-center gap-1">
-              {closureCashBoxStatuses.map(status => {
-                const currentStatus = closure.id
-                  ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
-                  : normalizeClosureCashBoxStatus(closure.status);
+              {visibleStatuses.map(status => {
                 const statusInfo = getDayStatusInfo(status);
                 const StatusIcon = statusInfo.Icon;
                 const active = currentStatus === status;
@@ -3092,6 +3076,7 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
           </td>
         );
+      }
       case 'actions':
         return (
           <td key={column} className={cellClass(column)}>

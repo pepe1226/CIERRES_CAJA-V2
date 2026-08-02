@@ -612,11 +612,12 @@ export async function processTelegramPhotoMessage(params: {
   });
 
   if (
-    potentialDuplicate?.duplicateType === "same-day-cashier"
-    && Number(potentialDuplicate.amountDifference || 0) > 1
+    potentialDuplicate
+    && potentialDuplicate.duplicateType !== "same-day-cashier-amount"
+    && Number(potentialDuplicate.amountDifference || 0) > 0.10
   ) {
     const error: any = new Error(
-      "La fecha OCR coincide con otro cierre del mismo cajero, pero el monto es diferente. Esperando reporte Perseo."
+      "La fecha OCR coincide con otro cierre del mismo cajero, pero el monto difiere por mas de USD 0.10. Esperando reporte Perseo."
     );
     error.code = "PHOTO_AWAITING_PERSEO_REPORT";
     throw error;

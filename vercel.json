@@ -10,7 +10,7 @@
   "crons": [
     {
       "path": "/api/telegram/retry-pending",
-      "schedule": "0 9 * * *"
+      "schedule": "15 2 * * *"
     },
     {
       "path": "/api/gmail/scan",

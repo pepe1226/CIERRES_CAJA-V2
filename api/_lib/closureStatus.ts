@@ -138,123 +138,140 @@ export async function handleClosureStatus(req: any, res: any) {
           .map((item: any) => [item.id, item])
       ).values()
     ) as any[];
+    if (uniqueItems.length === 0 || uniqueItems.length !== items.length) {
+      return res.status(400).json({ ok: false, error: "La lista de cierres contiene elementos invalidos o repetidos." });
+    }
     const refs = uniqueItems.map(item => db.collection("closures").doc(item.id));
-    const snapshots = await db.getAll(...refs);
     const storeSnapshotRef = db.collection(STORE_SNAPSHOT_COLLECTION).doc(STORE_SNAPSHOT_ID);
-    const publishedStoreSnapshot = await storeSnapshotRef.get();
+    const result = await db.runTransaction(async transaction => {
+      const snapshots = await transaction.getAll(...refs);
+      const publishedStoreSnapshot = await transaction.get(storeSnapshotRef);
 
-    for (const snapshot of snapshots) {
-      if (!snapshot.exists) {
-        return res.status(404).json({ ok: false, error: `Cierre no encontrado: ${snapshot.id}` });
+      for (const snapshot of snapshots) {
+        if (!snapshot.exists) {
+          throw Object.assign(new Error(`Cierre no encontrado: ${snapshot.id}`), { statusCode: 404 });
+        }
+        if (!isAdmin && snapshot.data()?.createdBy !== decoded.uid) {
+          throw Object.assign(new Error("No autorizado para modificar este cierre."), { statusCode: 403 });
+        }
       }
-      if (!isAdmin && snapshot.data()?.createdBy !== decoded.uid) {
-        return res.status(403).json({ ok: false, error: "No autorizado para modificar este cierre." });
-      }
-    }
 
-    const preparedChanges = snapshots.map(snapshot => {
-      const data = snapshot.data() || {};
-      const currentBalances = getStoredBalances(data);
-      const targetBalances = normalizeBalances(currentBalances, status);
-      const tripChanged = shouldUpdateTripId && (data.tripId || null) !== tripId;
-      const changed = data.status !== status || !balancesMatch(currentBalances, targetBalances) || tripChanged;
-      return { snapshot, data, currentBalances, targetBalances, changed };
-    });
-    const changedEntries = preparedChanges.filter(entry => entry.changed);
+      const preparedChanges = snapshots.map(snapshot => {
+        const data = snapshot.data() || {};
+        const currentBalances = getStoredBalances(data);
+        const nonBanquitosAmount = currentBalances.safe + currentBalances.transit + currentBalances.bank;
 
-    if (changedEntries.length === 0) {
-      return res.status(200).json({
-        ok: true,
-        updated: 0,
-        unchanged: snapshots.length,
-        status,
+        if (currentBalances.banquitos > 0.009 && status !== "banquitos") {
+          throw Object.assign(
+            new Error("Este cierre tiene dinero en Banquitos. Usa Reversar a Tienda desde Banquitos."),
+            { statusCode: 409 }
+          );
+        }
+        if (status === "banquitos" && nonBanquitosAmount > 0.009) {
+          throw Object.assign(
+            new Error("El ingreso a Banquitos debe realizarse desde Banquitos para conservar el movimiento vinculado."),
+            { statusCode: 409 }
+          );
+        }
+        if (data.tripId && !shouldUpdateTripId) {
+          throw Object.assign(
+            new Error("Este cierre pertenece a un viaje. Cambia su estado desde el modulo de Recolecciones."),
+            { statusCode: 409 }
+          );
+        }
+
+        const targetBalances = normalizeBalances(currentBalances, status);
+        const tripChanged = shouldUpdateTripId && (data.tripId || null) !== tripId;
+        const changed = data.status !== status || !balancesMatch(currentBalances, targetBalances) || tripChanged;
+        return { snapshot, data, currentBalances, targetBalances, changed };
       });
-    }
-
-    const changedAt = FieldValue.serverTimestamp();
-    const batch = db.batch();
-
-    changedEntries.forEach(({ snapshot, currentBalances, targetBalances }) => {
-      const updateData: Record<string, unknown> = {
-        status,
-        cashBoxBalances: targetBalances,
-        cashBoxBalancesUpdatedAt: changedAt,
-        statusUpdatedAt: changedAt,
-      };
-      if (shouldUpdateTripId) updateData.tripId = tripId;
-      batch.update(snapshot.ref, updateData);
-
-      for (const from of ["safe", "transit", "bank", "banquitos"]) {
-        const amount = Math.max(0, Number(currentBalances[from]) || 0);
-        if (from === status || amount <= 0.009) continue;
-        const historyRef = db.collection("closure_status_history").doc();
-        batch.set(historyRef, {
-          closureId: snapshot.id,
-          changedAt,
-          amount: Number(amount.toFixed(2)),
-          responsible: String(snapshot.data()?.responsible || ""),
-          createdBy: decoded.uid,
-          from,
-          to: status,
-          createdAt: changedAt,
-        });
+      const changedEntries = preparedChanges.filter(entry => entry.changed);
+      if (changedEntries.length === 0) {
+        return { updated: 0, unchanged: snapshots.length };
       }
-    });
 
-    if (publishedStoreSnapshot.exists) {
-      const changedIds = new Set(changedEntries.map(entry => entry.snapshot.id));
-      const publishedData = publishedStoreSnapshot.data() || {};
-      const nextClosures = (Array.isArray(publishedData.closures) ? publishedData.closures : [])
-        .filter((closure: any) => !changedIds.has(String(closure?.id || "")));
+      const changedAt = FieldValue.serverTimestamp();
+      changedEntries.forEach(({ snapshot, currentBalances, targetBalances }) => {
+        const updateData: Record<string, unknown> = {
+          status,
+          cashBoxBalances: targetBalances,
+          cashBoxBalancesUpdatedAt: changedAt,
+          statusUpdatedAt: changedAt,
+        };
+        if (shouldUpdateTripId) updateData.tripId = tripId;
+        transaction.update(snapshot.ref, updateData);
 
-      if (status === "safe" && !tripId) {
-        changedEntries.forEach(({ snapshot, data, targetBalances }) => {
-          if (targetBalances.safe <= 0.009) return;
-
-          const physicalAmount = roundMoney(data.physicalAmount);
-          const systemBalance = roundMoney(data.systemBalance);
-          nextClosures.push({
-            id: snapshot.id,
-            date: toIso(data.date),
-            responsible: String(data.responsible || "SIN RESPONSABLE"),
-            amount: roundMoney(targetBalances.safe),
-            physicalAmount,
-            systemBalance,
-            difference: roundMoney(data.difference ?? physicalAmount - systemBalance),
-            systemSource: data.systemSource ? String(data.systemSource) : null,
-            auditStatus: data.perseoAuditStatus ? String(data.perseoAuditStatus) : null,
-            source: data.source ? String(data.source) : null,
+        for (const from of ["safe", "transit", "bank", "banquitos"]) {
+          const amount = Math.max(0, Number(currentBalances[from]) || 0);
+          if (from === status || amount <= 0.009) continue;
+          transaction.set(db.collection("closure_status_history").doc(), {
+            closureId: snapshot.id,
+            changedAt,
+            amount: Number(amount.toFixed(2)),
+            responsible: String(snapshot.data()?.responsible || ""),
+            createdBy: decoded.uid,
+            from,
+            to: status,
+            createdAt: changedAt,
           });
+        }
+      });
+
+      if (publishedStoreSnapshot.exists) {
+        const changedIds = new Set(changedEntries.map(entry => entry.snapshot.id));
+        const publishedData = publishedStoreSnapshot.data() || {};
+        const nextClosures = (Array.isArray(publishedData.closures) ? publishedData.closures : [])
+          .filter((closure: any) => !changedIds.has(String(closure?.id || "")));
+
+        if (status === "safe" && !tripId) {
+          changedEntries.forEach(({ snapshot, data, targetBalances }) => {
+            if (targetBalances.safe <= 0.009) return;
+            const physicalAmount = roundMoney(data.physicalAmount);
+            const systemBalance = roundMoney(data.systemBalance);
+            nextClosures.push({
+              id: snapshot.id,
+              date: toIso(data.date),
+              responsible: String(data.responsible || "SIN RESPONSABLE"),
+              amount: roundMoney(targetBalances.safe),
+              physicalAmount,
+              systemBalance,
+              difference: roundMoney(data.difference ?? physicalAmount - systemBalance),
+              systemSource: data.systemSource ? String(data.systemSource) : null,
+              auditStatus: data.perseoAuditStatus ? String(data.perseoAuditStatus) : null,
+              source: data.source ? String(data.source) : null,
+            });
+          });
+        }
+
+        nextClosures.sort((left: any, right: any) => String(right.date).localeCompare(String(left.date)));
+        const limitedClosures = nextClosures.slice(0, 100);
+        transaction.set(storeSnapshotRef, {
+          schemaVersion: 1,
+          source: "cierres-caja-v2",
+          signature: buildStoreSnapshotSignature(limitedClosures),
+          generatedAt: changedAt,
+          generatedBy: decoded.uid,
+          count: limitedClosures.length,
+          totalAmount: roundMoney(limitedClosures.reduce(
+            (total: number, closure: any) => total + roundMoney(closure?.amount),
+            0,
+          )),
+          closures: limitedClosures,
         });
       }
 
-      nextClosures.sort((left: any, right: any) => String(right.date).localeCompare(String(left.date)));
-      const limitedClosures = nextClosures.slice(0, 100);
-      batch.set(storeSnapshotRef, {
-        schemaVersion: 1,
-        source: "cierres-caja-v2",
-        signature: buildStoreSnapshotSignature(limitedClosures),
-        generatedAt: changedAt,
-        generatedBy: decoded.uid,
-        count: limitedClosures.length,
-        totalAmount: roundMoney(limitedClosures.reduce(
-          (total: number, closure: any) => total + roundMoney(closure?.amount),
-          0,
-        )),
-        closures: limitedClosures,
-      });
-    }
+      return { updated: changedEntries.length, unchanged: snapshots.length - changedEntries.length };
+    });
 
-    await batch.commit();
     return res.status(200).json({
       ok: true,
-      updated: changedEntries.length,
-      unchanged: snapshots.length - changedEntries.length,
+      updated: result.updated,
+      unchanged: result.unchanged,
       status,
     });
   } catch (error: any) {
     console.error("closure-status failed", error);
-    return res.status(500).json({
+    return res.status(Number(error?.statusCode) || 500).json({
       ok: false,
       error: error?.message || "No se pudo cambiar el estado.",
     });
