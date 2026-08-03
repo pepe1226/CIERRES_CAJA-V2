@@ -38,7 +38,6 @@ import {
   startOfWeek
 } from 'date-fns';
 import { es } from 'date-fns/locale';
-import html2pdf from 'html2pdf.js';
 import {
   Plus,
   LogOut,
@@ -90,12 +89,23 @@ import {
   Boxes
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Dashboard } from './components/Dashboard';
-import { PersonalFinance } from './components/PersonalFinance';
-import { PayrollModule } from './components/PayrollModule';
-import { InventoryModule } from './components/InventoryModule';
-import { BusinessCreditsModule } from './components/BusinessCreditsModule';
 import { ClosurePhotoThumbnail } from './components/ClosurePhotoThumbnail';
+
+const Dashboard = React.lazy(() => import('./components/Dashboard').then(module => ({ default: module.Dashboard })));
+const PersonalFinance = React.lazy(() => import('./components/PersonalFinance').then(module => ({ default: module.PersonalFinance })));
+const PayrollModule = React.lazy(() => import('./components/PayrollModule').then(module => ({ default: module.PayrollModule })));
+const InventoryModule = React.lazy(() => import('./components/InventoryModule').then(module => ({ default: module.InventoryModule })));
+const BusinessCreditsModule = React.lazy(() => import('./components/BusinessCreditsModule').then(module => ({ default: module.BusinessCreditsModule })));
+
+const ModuleLoading = () => (
+  <div className="min-h-screen bg-[#0F172A] flex items-center justify-center p-6">
+    <div className="w-full max-w-md rounded-[2rem] border border-white/10 bg-[#1E293B] p-8 text-center shadow-2xl">
+      <RefreshCw className="w-8 h-8 text-blue-400 animate-spin mx-auto" />
+      <p className="mt-4 text-sm font-black text-white uppercase tracking-widest">Cargando modulo</p>
+      <p className="mt-2 text-xs font-bold text-slate-500">Solo descargamos esta seccion cuando la necesitas.</p>
+    </div>
+  </div>
+);
 
 
 type ClosureColumnKey = 'date' | 'responsible' | 'physicalAmount' | 'systemAmount' | 'systemBalance' | 'difference' | 'status' | 'notes';
@@ -272,10 +282,10 @@ const normalizeCashierName = (value: unknown) => {
   if (!compact) return '';
 
   const definitions: Array<[string, string[]]> = [
-    ['JOHANNA', ['johanna', 'johana', 'joha', 'yoha', 'soha']],
+    ['JOHANNA', ['johanna', 'johana', 'joha', 'yoha', 'soha', 'jaha', 'jdha', 'joho', 'jolla', 'scha']],
     ['YULEXI', ['yulexi', 'yulex', 'yule', 'yuli', 'juli', 'yul', 'pdv3esquina']],
-    ['DAYELI', ['dayeli', 'daye', 'dayi', 'dayveli', 'deyli', 'deili', 'daili']],
-    ['ERICK', ['erick', 'eric', 'erik']],
+    ['DAYELI', ['dayeli', 'daye', 'dayi', 'dayveli', 'dahely', 'danieli', 'deyli', 'deili', 'daili']],
+    ['ERICK', ['erick', 'eric', 'erik', 'eick', 'evick', 'magaly', 'nagaly', 'maga']],
   ];
 
   for (const [canonical, aliases] of definitions) {
@@ -776,6 +786,7 @@ function AppContent() {
   const [expandedDays, setExpandedDays] = useState<Record<string, boolean>>({});
   const [historyView, setHistoryView] = useState<{ type: string; title: string } | null>(null);
   const reportRef = useRef<HTMLDivElement>(null);
+  const historySectionRef = useRef<HTMLDivElement>(null);
 
   const adminModules: AdminModule[] = [
     {
@@ -1226,6 +1237,29 @@ function AppContent() {
     .slice(0, 100),
   [closures, closureLedgerById, isClosureAvailableForTrip]);
 
+  const storePendingClosures = useMemo(() => closures
+    .map(closure => {
+      if (!closure.id || !isClosureAvailableForTrip(closure)) return null;
+      const safeAmount = roundMoney(closureLedgerById[closure.id]?.balances.safe);
+      if (safeAmount <= 0.009) return null;
+      return { closure, safeAmount };
+    })
+    .filter((entry): entry is { closure: ShiftClosure; safeAmount: number } => Boolean(entry))
+    .sort((left, right) => right.closure.date.localeCompare(left.closure.date)),
+  [closures, closureLedgerById, isClosureAvailableForTrip]);
+
+  const storePendingTotal = useMemo(
+    () => roundMoney(storePendingClosures.reduce((total, entry) => total + entry.safeAmount, 0)),
+    [storePendingClosures]
+  );
+
+  const showAllStoreClosures = useCallback(() => {
+    setFilterDateRangeType('siempre');
+    setFilterStatus('all');
+    setShowOnlyStoreClosures(true);
+    window.requestAnimationFrame(() => historySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }, []);
+
   useEffect(() => {
     if (!user || !closuresLoaded || !movementsLoaded) return;
 
@@ -1284,7 +1318,7 @@ function AppContent() {
         : normalizeClosureCashBoxStatus(c.status);
 
       const matchesStatus = filterStatus === 'all' || derivedStatus === filterStatus;
-      const matchesResponsible = filterResponsible === 'all' || c.responsible === filterResponsible;
+      const matchesResponsible = filterResponsible === 'all' || normalizeCashierName(c.responsible) === filterResponsible;
       const matchesSearch = !normalizedGlobalSearch || getClosureSearchValues(c, derivedStatus).some(value =>
         normalizeSearchText(value).includes(normalizedGlobalSearch)
       );
@@ -1301,7 +1335,7 @@ function AppContent() {
   }, [closures, filterStartDate, filterEndDate, filterStatus, filterResponsible, filterAudit, debouncedSearchTerm, columnFilters, hideCollected, showOnlyStoreClosures, filterDateRangeType, derivedClosureStatusById, isClosureAvailableForTrip]);
 
   const uniqueResponsibles = useMemo(() => {
-    return Array.from(new Set(closures.map(c => c.responsible))).sort();
+    return Array.from(new Set(closures.map(c => normalizeCashierName(c.responsible)).filter(Boolean))).sort();
   }, [closures]);
 
   const selectedTripClosures = useMemo(() =>
@@ -1532,6 +1566,83 @@ function AppContent() {
       return result;
     }, {});
   }, [closures, latestPerseoRowsByDate, perseoClosureMatchById]);
+
+  const todayAuditSummary = useMemo(() => {
+    const businessDate = format(new Date(), 'yyyy-MM-dd');
+    const items = closures
+      .filter(closure => format(parseISO(closure.date), 'yyyy-MM-dd') === businessDate)
+      .sort((left, right) => right.date.localeCompare(left.date));
+    const reportTotals = perseoDailyTotalsByDate[businessDate] || null;
+    const missingRows = missingPerseoClosuresByDate[businessDate] || [];
+    const physicalAmount = roundMoney(items.reduce((total, closure) => total + (Number(closure.physicalAmount) || 0), 0));
+    const systemAmount = roundMoney(reportTotals?.systemAmount ?? items.reduce((total, closure) => total + (Number(closure.systemAmount) || 0), 0));
+    const systemBalance = roundMoney(reportTotals?.systemBalance ?? items.reduce((total, closure) => total + (Number(closure.systemBalance) || 0), 0));
+    const reportedAmount = roundMoney(reportTotals?.reportedAmount ?? items.reduce((total, closure) => total + (Number(closure.reportedAmount) || 0), 0));
+    const transferAmount = roundMoney(reportTotals?.transferAmount ?? items.reduce((total, closure) => total + transferPdvAmount(closure.transferAmount), 0));
+    const difference = roundMoney(physicalAmount - systemBalance);
+    const latestPhoto = items.find(closure => Boolean(closure.id && closure.telegramFileId)) || null;
+    const photoCount = items.filter(closure => Boolean(closure.telegramFileId)).length;
+    const responsibles = Array.from(new Set(items.map(item => normalizeCashierName(item.responsible)).filter(Boolean)));
+
+    let status: 'empty' | 'pending_report' | 'pending_photo' | 'difference' | 'matched' = 'empty';
+    if (items.length > 0 && !reportTotals) status = 'pending_report';
+    if (reportTotals && (items.length === 0 || missingRows.length > 0 || photoCount === 0)) status = 'pending_photo';
+    if (reportTotals && items.length > 0 && missingRows.length === 0 && photoCount > 0) {
+      status = Math.abs(difference) > closureMatchTolerance ? 'difference' : 'matched';
+    }
+
+    const presentation = status === 'matched'
+      ? {
+          label: 'Cierre correcto',
+          detail: 'Foto Telegram y reporte Perseo coinciden',
+          className: 'border-emerald-500/30 bg-emerald-500/[0.07]',
+          badgeClassName: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300',
+        }
+      : status === 'difference'
+        ? {
+            label: 'Revisar diferencia',
+            detail: 'El valor fisico no coincide con el saldo esperado',
+            className: 'border-rose-500/30 bg-rose-500/[0.07]',
+            badgeClassName: 'bg-rose-500/15 border-rose-500/30 text-rose-300',
+          }
+        : status === 'pending_photo'
+          ? {
+              label: 'Falta foto',
+              detail: 'Perseo ya reporto la venta, pero falta evidencia fisica',
+              className: 'border-amber-500/30 bg-amber-500/[0.07]',
+              badgeClassName: 'bg-amber-500/15 border-amber-500/30 text-amber-300',
+            }
+          : status === 'pending_report'
+            ? {
+                label: 'Falta reporte Perseo',
+                detail: 'La foto fue recibida y espera el reporte del sistema',
+                className: 'border-amber-500/30 bg-amber-500/[0.07]',
+                badgeClassName: 'bg-amber-500/15 border-amber-500/30 text-amber-300',
+              }
+            : {
+                label: 'Sin cierre registrado',
+                detail: 'Todavia no hay foto ni reporte para hoy',
+                className: 'border-white/10 bg-white/[0.03]',
+                badgeClassName: 'bg-white/5 border-white/10 text-slate-400',
+              };
+
+    return {
+      businessDate,
+      items,
+      missingRows,
+      physicalAmount,
+      systemAmount,
+      systemBalance,
+      reportedAmount,
+      transferAmount,
+      difference,
+      latestPhoto,
+      photoCount,
+      responsibles,
+      status,
+      ...presentation,
+    };
+  }, [closures, missingPerseoClosuresByDate, perseoDailyTotalsByDate]);
 
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
@@ -2431,6 +2542,7 @@ function AppContent() {
       jsPDF: { unit: 'mm' as const, format: 'a4', orientation: 'portrait' as const }
     };
     try {
+      const { default: html2pdf } = await import('html2pdf.js');
       await html2pdf().set(opt).from(reportRef.current).save();
     } catch (err) {
       setPrintError('Error al generar PDF. Intente imprimir directamente.');
@@ -2511,22 +2623,23 @@ Notas: ${closure.notes || 'N/A'}`;
 
   const closureTableColumns: Record<ClosureTableColumnKey, {
     label: string;
+    description: string;
     icon: React.ReactNode;
     align: 'left' | 'center' | 'right';
     widthClass: string;
     filterable?: boolean;
   }> = {
-    date: { label: 'Fecha y Hora', icon: <Calendar className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[145px]', filterable: true },
-    responsible: { label: 'Responsable', icon: <UserIcon className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[180px]', filterable: true },
-    physicalAmount: { label: '$ Fisico', icon: <Banknote className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]', filterable: true },
-    systemBalance: { label: 'Saldo Esperado', icon: <Wallet className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[135px]', filterable: true },
-    transferAmount: { label: 'Transf. PDV', icon: <ArrowRightLeft className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]' },
-    systemAmount: { label: 'Venta Sistema', icon: <Calculator className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[135px]', filterable: true },
-    reportedAmount: { label: 'Reportado', icon: <FileText className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]' },
-    difference: { label: 'Diferencia', icon: <AlertCircle className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]', filterable: true },
-    status: { label: 'Estado', icon: <ShieldCheck className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[155px]', filterable: true },
-    actions: { label: 'Acciones', icon: <Edit2 className="w-3 h-3" />, align: 'right', widthClass: 'min-w-[105px]' },
-    notes: { label: 'Notas', icon: <MessageSquare className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[150px]', filterable: true },
+    date: { label: 'Fecha y Hora', description: 'Fecha operativa del cierre.', icon: <Calendar className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[145px]', filterable: true },
+    responsible: { label: 'Responsable', description: 'Cajero identificado y normalizado.', icon: <UserIcon className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[180px]', filterable: true },
+    physicalAmount: { label: '$ Fisico', description: 'Dinero contado en la foto de Telegram.', icon: <Banknote className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]', filterable: true },
+    systemBalance: { label: 'Saldo Esperado', description: 'Venta del sistema menos transferencias COMPRA PDV.', icon: <Wallet className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[135px]', filterable: true },
+    transferAmount: { label: 'Transf. PDV', description: 'Valor transferido a COMPRA PDV.', icon: <ArrowRightLeft className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]' },
+    systemAmount: { label: 'Venta Sistema', description: 'Venta total informada por Perseo.', icon: <Calculator className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[135px]', filterable: true },
+    reportedAmount: { label: 'Reportado', description: 'Efectivo declarado en el reporte de Perseo.', icon: <FileText className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]' },
+    difference: { label: 'Diferencia', description: 'Fisico menos saldo esperado; tolerancia de USD 0,10.', icon: <AlertCircle className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[120px]', filterable: true },
+    status: { label: 'Estado', description: 'Ubicacion contable actual del dinero.', icon: <ShieldCheck className="w-3 h-3" />, align: 'center', widthClass: 'min-w-[155px]', filterable: true },
+    actions: { label: 'Acciones', description: 'Editar, copiar, compartir o eliminar el cierre.', icon: <Edit2 className="w-3 h-3" />, align: 'right', widthClass: 'min-w-[105px]' },
+    notes: { label: 'Notas', description: 'Observaciones asociadas al cierre.', icon: <MessageSquare className="w-3 h-3" />, align: 'left', widthClass: 'min-w-[150px]', filterable: true },
   };
 
   const moveClosureColumn = (from: ClosureTableColumnKey, to: ClosureTableColumnKey) => {
@@ -2567,7 +2680,7 @@ Notas: ${closure.notes || 'N/A'}`;
         }}
         onDragEnd={() => setDraggedClosureColumn(null)}
         className={`px-3 py-3 text-[9px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 ${alignClass} ${config.widthClass} select-none ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${isDragging ? 'bg-blue-500/10 text-blue-300' : ''}`}
-        title={canDrag ? 'Arrastra para mover esta columna' : 'Columna fija'}
+        title={`${config.description} ${canDrag ? 'Arrastra para mover esta columna.' : 'Columna fija.'}`}
       >
         {isFilterable
           ? renderColumnHeader(column as ClosureColumnKey, config.label, config.icon, config.align === 'left' ? 'left' : 'center')
@@ -3007,7 +3120,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 </div>
               )}
               <div className="flex flex-col gap-1.5">
-                <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{closure.responsible}</span>
+                <span className="text-xs font-black text-slate-200 uppercase tracking-wider">{normalizeCashierName(closure.responsible) || closure.responsible}</span>
                 {(() => {
                   const auditInfo = getClosureAuditInfo(displayClosureForAudit);
                   if (auditInfo.status === 'not_audited') return null;
@@ -3406,43 +3519,59 @@ Notas: ${closure.notes || 'N/A'}`;
   }
 
   if (currentView === 'dashboard') {
-    return <Dashboard closures={closures} movements={movements} onBack={() => setCurrentView('main')} />;
+    return (
+      <React.Suspense fallback={<ModuleLoading />}>
+        <Dashboard closures={closures} movements={movements} onBack={() => setCurrentView('main')} />
+      </React.Suspense>
+    );
   }
 
   if (currentView === 'personal') {
-    return <PersonalFinance user={user} onBack={() => setCurrentView('main')} />;
+    return (
+      <React.Suspense fallback={<ModuleLoading />}>
+        <PersonalFinance user={user} onBack={() => setCurrentView('main')} />
+      </React.Suspense>
+    );
   }
 
   if (currentView === 'payroll') {
     return (
-      <PayrollModule
-        user={user}
-        onBack={() => setCurrentView('main')}
-        balances={{
-          safe: accumulatedSafeTotal,
-          transit: accumulatedTransitTotal,
-          bank: accumulatedBankTotal,
-          personal: accumulatedPersonalTotal,
-        }}
-      />
+      <React.Suspense fallback={<ModuleLoading />}>
+        <PayrollModule
+          user={user}
+          onBack={() => setCurrentView('main')}
+          balances={{
+            safe: accumulatedSafeTotal,
+            transit: accumulatedTransitTotal,
+            bank: accumulatedBankTotal,
+            personal: accumulatedPersonalTotal,
+          }}
+        />
+      </React.Suspense>
     );
   }
 
   if (currentView === 'inventory') {
-    return <InventoryModule onBack={() => setCurrentView('main')} />;
+    return (
+      <React.Suspense fallback={<ModuleLoading />}>
+        <InventoryModule onBack={() => setCurrentView('main')} />
+      </React.Suspense>
+    );
   }
 
   if (currentView === 'credits') {
     return (
-      <BusinessCreditsModule
-        user={user}
-        onBack={() => setCurrentView('main')}
-        balances={{
-          safe: accumulatedSafeTotal,
-          transit: accumulatedTransitTotal,
-          bank: accumulatedBankTotal,
-        }}
-      />
+      <React.Suspense fallback={<ModuleLoading />}>
+        <BusinessCreditsModule
+          user={user}
+          onBack={() => setCurrentView('main')}
+          balances={{
+            safe: accumulatedSafeTotal,
+            transit: accumulatedTransitTotal,
+            bank: accumulatedBankTotal,
+          }}
+        />
+      </React.Suspense>
     );
   }
 
@@ -3756,6 +3885,93 @@ Notas: ${closure.notes || 'N/A'}`;
             )}
           </AnimatePresence>
 
+          <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(280px,0.8fr)] gap-6 mb-8 text-left">
+            <div className={`rounded-[2rem] border p-5 sm:p-7 shadow-2xl ${todayAuditSummary.className}`}>
+              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-5">
+                <div className="flex items-center gap-4 min-w-0">
+                  {todayAuditSummary.latestPhoto ? (
+                    <ClosurePhotoThumbnail
+                      closureId={todayAuditSummary.latestPhoto.id}
+                      telegramFileId={todayAuditSummary.latestPhoto.telegramFileId}
+                      responsible={todayAuditSummary.latestPhoto.responsible}
+                      date={todayAuditSummary.latestPhoto.date}
+                    />
+                  ) : (
+                    <div className="w-10 h-10 rounded-xl border border-white/10 bg-white/5 flex items-center justify-center text-slate-500 shrink-0">
+                      <Eye className="w-5 h-5" />
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-500">Auditoria de hoy</p>
+                    <h2 className="mt-1 text-xl sm:text-2xl font-black text-white truncate">
+                      {todayAuditSummary.responsibles.length > 0 ? todayAuditSummary.responsibles.join(' / ') : 'Cierre pendiente'}
+                    </h2>
+                    <p className="mt-1 text-xs font-bold text-slate-400">
+                      {format(parseISO(todayAuditSummary.businessDate), 'EEEE, dd MMMM', { locale: es })}
+                      {' · '}{todayAuditSummary.photoCount} foto{todayAuditSummary.photoCount === 1 ? '' : 's'} recibida{todayAuditSummary.photoCount === 1 ? '' : 's'}
+                    </p>
+                  </div>
+                </div>
+                <div className={`inline-flex items-center gap-2 self-start px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest ${todayAuditSummary.badgeClassName}`}>
+                  {todayAuditSummary.status === 'matched'
+                    ? <CheckCircle2 className="w-4 h-4" />
+                    : todayAuditSummary.status === 'difference'
+                      ? <ShieldAlert className="w-4 h-4" />
+                      : <AlertCircle className="w-4 h-4" />}
+                  {todayAuditSummary.label}
+                </div>
+              </div>
+
+              <p className="mt-4 text-xs font-bold text-slate-400">{todayAuditSummary.detail}</p>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mt-6">
+                {[
+                  { label: 'Venta sistema', value: todayAuditSummary.systemAmount, color: 'text-white' },
+                  { label: 'Transf. PDV', value: todayAuditSummary.transferAmount, color: 'text-blue-300' },
+                  { label: 'Saldo esperado', value: todayAuditSummary.systemBalance, color: 'text-white' },
+                  { label: 'Foto / fisico', value: todayAuditSummary.physicalAmount, color: 'text-white' },
+                  { label: 'Diferencia', value: todayAuditSummary.difference, color: Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300' },
+                ].map(metric => (
+                  <div key={metric.label} className="rounded-2xl border border-white/5 bg-slate-950/20 px-4 py-3">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{metric.label}</p>
+                    <p className={`mt-2 text-lg font-black font-sans ${metric.color}`}>
+                      {metric.label === 'Diferencia' && metric.value >= 0 ? '+' : ''}${metric.value.toLocaleString('es-CL')}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-[2rem] border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.09] to-[#1E293B] p-6 shadow-2xl flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between gap-4">
+                  <div className="w-11 h-11 rounded-2xl bg-blue-500/15 border border-blue-500/20 flex items-center justify-center text-blue-300">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <span className="px-3 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-[9px] font-black text-blue-300 uppercase tracking-widest">
+                    Incluye meses anteriores
+                  </span>
+                </div>
+                <p className="mt-5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-300/70">Cortes aun en Tienda</p>
+                <div className="mt-2 flex items-end justify-between gap-4">
+                  <div>
+                    <p className="text-4xl font-black text-white">{storePendingClosures.length}</p>
+                    <p className="mt-1 text-xs font-bold text-slate-400">cortes pendientes de retiro</p>
+                  </div>
+                  <p className="text-xl font-black text-blue-200 font-sans">${storePendingTotal.toLocaleString('es-CL')}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={showAllStoreClosures}
+                className="mt-6 w-full rounded-2xl bg-blue-600 hover:bg-blue-500 px-4 py-3 text-xs font-black text-white uppercase tracking-widest transition-colors flex items-center justify-center gap-2"
+              >
+                <Eye className="w-4 h-4" />
+                Ver todos en historial
+              </button>
+            </div>
+          </section>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6 mb-12 text-left">
             <div
               onDoubleClick={() => setViewingCajaMovements('safe')}
@@ -3838,7 +4054,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 GASTOS TOTALES
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedOutflowTotal.toLocaleString('es-CL')}</p>
-              <p className="text-[10px] font-black text-rose-300/70 uppercase tracking-widest mt-2">Periodo: ${outflowPeriodLabel}</p>
+              <p className="text-[10px] font-black text-rose-300/70 uppercase tracking-widest mt-2">Periodo: {outflowPeriodLabel}</p>
               <div className="grid grid-cols-2 gap-2 mt-4 relative z-10">
                 {[
                   { label: 'Este mes', value: 'este_mes' as const },
@@ -4008,7 +4224,7 @@ Notas: ${closure.notes || 'N/A'}`;
             )}
           </AnimatePresence>
 
-          <div className="flex flex-col lg:flex-row items-center justify-between gap-6 mb-8 text-left">
+          <div ref={historySectionRef} className="flex flex-col lg:flex-row items-center justify-between gap-6 mb-8 text-left scroll-mt-28">
              <div className="flex-1">
               <h2 className="text-3xl font-black text-white mb-1 flex items-center gap-3"><History className="w-8 h-8 text-blue-500" /> Historial</h2>
               <p className="text-slate-500 text-sm">Registro de cierres contables.</p>
@@ -4169,7 +4385,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="bg-[#1E293B] rounded-[2.5rem] shadow-2xl border border-white/5 overflow-hidden">
             <div className="overflow-x-auto text-left">
               <table className="w-full text-left border-collapse">
-                <thead>
+                <thead className="sticky top-20 z-20 shadow-lg shadow-slate-950/20">
                   <tr className="bg-[#1D283A] border-b border-white/5 align-top">
                     {closureTableColumnOrder.map(renderDraggableClosureHeader)}
                   </tr>
