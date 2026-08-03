@@ -698,6 +698,7 @@ function AppContent() {
   const [outflowEndDate, setOutflowEndDate] = useState(format(endOfMonth(new Date()), 'yyyy-MM-dd'));
   const [hideCollected, setHideCollected] = useState(false);
   const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
+  const [showMobileHistoryFilters, setShowMobileHistoryFilters] = useState(false);
 
   const [movementValues, setMovementValues] = useState<Partial<Movement>>({
     type: 'outflow',
@@ -1578,7 +1579,16 @@ function AppContent() {
   }, [closures, latestPerseoRowsByDate, perseoClosureMatchById]);
 
   const todayAuditSummary = useMemo(() => {
-    const businessDate = format(new Date(), 'yyyy-MM-dd');
+    const currentBusinessDate = format(new Date(), 'yyyy-MM-dd');
+    const availableBusinessDates = Array.from(new Set([
+      ...closures.map(closure => format(parseISO(closure.date), 'yyyy-MM-dd')),
+      ...Array.from(latestPerseoRowsByDate.keys()),
+    ]))
+      .filter(date => date <= currentBusinessDate)
+      .sort((left, right) => right.localeCompare(left));
+    const hasCurrentData = availableBusinessDates.includes(currentBusinessDate);
+    const businessDate = hasCurrentData ? currentBusinessDate : (availableBusinessDates[0] || currentBusinessDate);
+    const isCurrentBusinessDate = businessDate === currentBusinessDate;
     const items = closures
       .filter(closure => format(parseISO(closure.date), 'yyyy-MM-dd') === businessDate)
       .sort((left, right) => right.date.localeCompare(left.date));
@@ -1639,6 +1649,7 @@ function AppContent() {
 
     return {
       businessDate,
+      isCurrentBusinessDate,
       items,
       missingRows,
       physicalAmount,
@@ -1654,7 +1665,7 @@ function AppContent() {
       status,
       ...presentation,
     };
-  }, [closures, missingPerseoClosuresByDate, perseoDailyTotalsByDate]);
+  }, [closures, latestPerseoRowsByDate, missingPerseoClosuresByDate, perseoDailyTotalsByDate]);
 
   const groupedClosures = useMemo(() => {
     const groups: Record<string, ShiftClosure[]> = {};
@@ -3601,42 +3612,53 @@ Notas: ${closure.notes || 'N/A'}`;
   return (
     <>
       <div className={`min-h-screen bg-[#0F172A] text-slate-200 pb-20 select-none ${showPrintPreview ? 'hidden' : 'block'} print:hidden`}>
-        <header className="bg-[#1E293B]/50 backdrop-blur-md border-b border-white/5 sticky top-0 z-30">
-          <div className="w-full px-4 h-20 flex items-center justify-between">
-            <div className="flex items-center gap-4">
+        <header className="bg-[#1E293B]/90 backdrop-blur-md border-b border-white/5 sticky top-0 z-50">
+          <div className="w-full max-w-[1800px] mx-auto px-3 sm:px-4 h-16 sm:h-20 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 sm:gap-4 min-w-0">
               <button
                 onClick={() => setIsModuleSidebarOpen(prev => !prev)}
-                className="w-11 h-11 rounded-2xl bg-white/5 border border-white/5 text-slate-400 hover:text-white hover:bg-white/10 transition-all flex items-center justify-center"
+                className="w-10 h-10 sm:w-11 sm:h-11 shrink-0 rounded-xl sm:rounded-2xl bg-white/5 border border-white/5 text-slate-300 hover:text-white hover:bg-white/10 transition-all flex items-center justify-center"
                 title={isModuleSidebarOpen ? 'Ocultar menu' : 'Mostrar menu'}
+                aria-label={isModuleSidebarOpen ? 'Ocultar menu' : 'Mostrar menu'}
               >
                 {isModuleSidebarOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
               </button>
-              <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center">
-                <Calculator className="text-white w-7 h-7" />
+              <div className="w-9 h-9 sm:w-12 sm:h-12 shrink-0 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl sm:rounded-2xl flex items-center justify-center">
+                <Calculator className="text-white w-5 h-5 sm:w-7 sm:h-7" />
               </div>
-              <div>
-                <h1 className="text-xl font-black text-white">CIERRES 1.1</h1>
-                <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.24em]">Plataforma administrativa</p>
+              <div className="min-w-0">
+                <h1 className="text-base sm:text-xl font-black text-white leading-tight whitespace-nowrap">CIERRES 1.1</h1>
+                <p className="hidden sm:block text-[10px] font-black text-slate-500 uppercase tracking-[0.24em]">Plataforma administrativa</p>
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              <button onClick={() => setShowPrintPreview(true)} className="p-3 bg-white/5 hover:bg-blue-500/10 text-slate-400 rounded-2xl border border-white/5"><Printer className="w-5 h-5" /></button>
-              <button onClick={handleExportCSV} className="p-3 bg-white/5 hover:bg-emerald-500/10 text-slate-400 rounded-2xl border border-white/5"><Download className="w-5 h-5" /></button>
-              <button onClick={logOut} className="p-3 bg-white/5 hover:bg-red-500/10 text-slate-400 rounded-2xl border border-white/5"><LogOut className="w-5 h-5" /></button>
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+              <button aria-label="Imprimir reporte" title="Imprimir reporte" onClick={() => setShowPrintPreview(true)} className="hidden sm:flex w-11 h-11 items-center justify-center bg-white/5 hover:bg-blue-500/10 text-slate-400 rounded-2xl border border-white/5"><Printer className="w-5 h-5" /></button>
+              <button aria-label="Exportar CSV" title="Exportar CSV" onClick={handleExportCSV} className="hidden sm:flex w-11 h-11 items-center justify-center bg-white/5 hover:bg-emerald-500/10 text-slate-400 rounded-2xl border border-white/5"><Download className="w-5 h-5" /></button>
+              <button aria-label="Cerrar sesion" title="Cerrar sesion" onClick={logOut} className="w-10 h-10 sm:w-11 sm:h-11 flex items-center justify-center bg-white/5 hover:bg-red-500/10 text-slate-300 rounded-xl sm:rounded-2xl border border-white/5"><LogOut className="w-5 h-5" /></button>
             </div>
           </div>
         </header>
 
-        <div className="w-full px-4 py-6 flex gap-6 relative">
+        <div className="w-full max-w-[1800px] mx-auto px-3 sm:px-4 py-4 sm:py-6 flex gap-6 relative">
           <AnimatePresence>
             {isModuleSidebarOpen && (
-              <motion.aside
-                initial={{ opacity: 0, width: 0 }}
-                animate={{ opacity: 1, width: 280 }}
-                exit={{ opacity: 0, width: 0 }}
-                className="sticky top-24 z-30 max-h-[calc(100vh-7rem)] shrink-0 overflow-hidden rounded-[2rem] border border-white/5 bg-[#1E293B]/95 backdrop-blur-xl shadow-2xl"
-              >
-                <div className="w-[280px] p-4">
+              <>
+                <motion.button
+                  type="button"
+                  aria-label="Cerrar menu"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  onClick={() => setIsModuleSidebarOpen(false)}
+                  className="fixed inset-0 top-16 z-30 bg-slate-950/70 lg:hidden"
+                />
+                <motion.aside
+                  initial={{ opacity: 0, x: -24 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -24 }}
+                  className="fixed left-3 right-3 top-20 z-40 max-h-[calc(100vh-6rem)] overflow-y-auto rounded-[1.5rem] border border-white/10 bg-[#1E293B]/98 backdrop-blur-xl shadow-2xl lg:sticky lg:left-auto lg:right-auto lg:top-24 lg:w-[280px] lg:max-h-[calc(100vh-7rem)] lg:shrink-0 lg:rounded-[2rem]"
+                >
+                <div className="w-full p-4">
                   <div className="px-2 pb-4 border-b border-white/5">
                     <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.28em]">Navegacion</p>
                     <h3 className="mt-2 text-lg font-black text-white">Modulos</h3>
@@ -3650,6 +3672,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           key={module.id}
                           onClick={() => {
                             module.action();
+                            setIsModuleSidebarOpen(false);
                           }}
                           className={`w-full text-left rounded-2xl border px-3 py-3 transition-all ${isActive ? 'bg-white/10 border-white/15' : 'bg-white/[0.03] border-white/5 hover:bg-white/5 hover:border-white/10'}`}
                         >
@@ -3667,7 +3690,8 @@ Notas: ${closure.notes || 'N/A'}`;
                     })}
                   </div>
                 </div>
-              </motion.aside>
+                </motion.aside>
+              </>
             )}
           </AnimatePresence>
 
@@ -3908,8 +3932,8 @@ Notas: ${closure.notes || 'N/A'}`;
             )}
           </AnimatePresence>
 
-          <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(280px,0.8fr)] gap-6 mb-8 text-left">
-            <div className={`rounded-[2rem] border p-5 sm:p-7 shadow-2xl ${todayAuditSummary.className}`}>
+          <section className="grid grid-cols-1 xl:grid-cols-[minmax(0,2fr)_minmax(280px,0.8fr)] gap-4 sm:gap-6 mb-6 sm:mb-8 text-left">
+            <div className={`rounded-3xl sm:rounded-[2rem] border p-4 sm:p-7 shadow-2xl ${todayAuditSummary.className}`}>
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-5">
                 <div className="flex items-center gap-4 min-w-0">
                   {todayAuditSummary.latestPhoto ? (
@@ -3925,7 +3949,9 @@ Notas: ${closure.notes || 'N/A'}`;
                     </div>
                   )}
                   <div className="min-w-0">
-                    <p className="text-[10px] font-black uppercase tracking-[0.24em] text-slate-500">Auditoria de hoy</p>
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                      {todayAuditSummary.isCurrentBusinessDate ? 'Cierre de hoy' : 'Ultimo cierre disponible'}
+                    </p>
                     <h2 className="mt-1 text-xl sm:text-2xl font-black text-white truncate">
                       {todayAuditSummary.responsibles.length > 0 ? todayAuditSummary.responsibles.join(' / ') : 'Cierre pendiente'}
                     </h2>
@@ -3945,14 +3971,15 @@ Notas: ${closure.notes || 'N/A'}`;
                 </div>
               </div>
 
-              <p className="mt-4 text-xs font-bold text-slate-400">{todayAuditSummary.detail}</p>
+              <p className="mt-4 text-xs font-bold text-slate-300">{todayAuditSummary.detail}</p>
+              <p className="mt-1 text-[10px] font-bold text-slate-500">Comparacion: foto enviada por Telegram contra reporte diario de Perseo.</p>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mt-6">
                 {[
-                  { label: 'Venta sistema', value: todayAuditSummary.systemAmount, color: 'text-white' },
-                  { label: 'Transf. PDV', value: todayAuditSummary.transferAmount, color: 'text-blue-300' },
-                  { label: 'Saldo esperado', value: todayAuditSummary.systemBalance, color: 'text-white' },
-                  { label: 'Foto / fisico', value: todayAuditSummary.physicalAmount, color: 'text-white' },
+                  { label: 'Venta registrada', value: todayAuditSummary.systemAmount, color: 'text-white' },
+                  { label: 'Enviado a compras', value: todayAuditSummary.transferAmount, color: 'text-blue-300' },
+                  { label: 'Efectivo esperado', value: todayAuditSummary.systemBalance, color: 'text-white' },
+                  { label: 'Efectivo en foto', value: todayAuditSummary.physicalAmount, color: 'text-white' },
                   { label: 'Diferencia', value: todayAuditSummary.difference, color: Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300' },
                 ].map(metric => (
                   <div key={metric.label} className="rounded-2xl border border-white/5 bg-slate-950/20 px-4 py-3">
@@ -3979,7 +4006,7 @@ Notas: ${closure.notes || 'N/A'}`;
                     {todayAuditSummary.purchaseDetails.map((detail, index) => (
                       <div key={`${detail.document || 'detalle'}-${detail.amount}-${index}`} className="rounded-xl border border-white/5 bg-white/[0.035] px-3 py-3 flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="text-xs font-black text-white uppercase leading-snug">{detail.description}</p>
+                          <p className="text-xs font-black text-white uppercase leading-snug break-words">{detail.description}</p>
                           <p className="mt-1 text-[9px] font-bold text-slate-500 uppercase truncate">
                             {detail.beneficiary || detail.responsible || 'COMPRA PDV'}
                           </p>
@@ -3997,17 +4024,17 @@ Notas: ${closure.notes || 'N/A'}`;
               ) : null}
             </div>
 
-            <div className="rounded-[2rem] border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.09] to-[#1E293B] p-6 shadow-2xl flex flex-col justify-between">
+            <div className="rounded-3xl sm:rounded-[2rem] border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.09] to-[#1E293B] p-5 sm:p-6 shadow-2xl flex flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between gap-4">
                   <div className="w-11 h-11 rounded-2xl bg-blue-500/15 border border-blue-500/20 flex items-center justify-center text-blue-300">
                     <ShieldCheck className="w-5 h-5" />
                   </div>
                   <span className="px-3 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-[9px] font-black text-blue-300 uppercase tracking-widest">
-                    Incluye meses anteriores
+                    Incluye cortes anteriores
                   </span>
                 </div>
-                <p className="mt-5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-300/70">Cortes aun en Tienda</p>
+                <p className="mt-5 text-[10px] font-black uppercase tracking-[0.22em] text-blue-300/70">Cortes pendientes en Tienda</p>
                 <div className="mt-2 flex items-end justify-between gap-4">
                   <div>
                     <p className="text-4xl font-black text-white">{storePendingClosures.length}</p>
@@ -4027,14 +4054,15 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
           </section>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-6 mb-12 text-left">
+          <div className="grid grid-cols-2 xl:grid-cols-5 gap-3 sm:gap-6 mb-8 sm:mb-12 text-left">
             <div
+              onClick={() => window.matchMedia('(max-width: 767px)').matches && setViewingCajaMovements('safe')}
               onDoubleClick={() => setViewingCajaMovements('safe')}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setContextMenu({ x: e.clientX, y: e.clientY, caja: 'safe' });
               }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-blue-500/50 transition-colors"
+              className="col-span-2 xl:col-span-1 bg-[#1E293B] p-5 sm:p-8 rounded-3xl sm:rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-blue-500/50 transition-colors"
             >
               <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
                 <ShieldCheck className="w-16 h-16 text-blue-400" />
@@ -4043,15 +4071,16 @@ Notas: ${closure.notes || 'N/A'}`;
                 <ShieldCheck className="w-3 h-3 text-blue-400" />
                 En Tienda
               </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
+              <p className="text-3xl sm:text-4xl font-black text-white font-sans tracking-tight">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
             </div>
             <div
+              onClick={() => window.matchMedia('(max-width: 767px)').matches && setViewingCajaMovements('transit')}
               onDoubleClick={() => setViewingCajaMovements('transit')}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setContextMenu({ x: e.clientX, y: e.clientY, caja: 'transit' });
               }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-amber-500/50 transition-colors"
+              className="bg-[#1E293B] p-4 sm:p-8 rounded-3xl sm:rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-amber-500/50 transition-colors"
             >
               <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
                 <Truck className="w-16 h-16 text-amber-400" />
@@ -4060,15 +4089,16 @@ Notas: ${closure.notes || 'N/A'}`;
                 <Truck className="w-3 h-3 text-amber-400" />
                 En Transito
               </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedTransitTotal.toLocaleString('es-CL')}</p>
+              <p className="text-2xl sm:text-4xl font-black text-white font-sans tracking-tight">${accumulatedTransitTotal.toLocaleString('es-CL')}</p>
             </div>
             <div
+              onClick={() => window.matchMedia('(max-width: 767px)').matches && setViewingCajaMovements('bank')}
               onDoubleClick={() => setViewingCajaMovements('bank')}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setContextMenu({ x: e.clientX, y: e.clientY, caja: 'bank' });
               }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-emerald-500/50 transition-colors"
+              className="bg-[#1E293B] p-4 sm:p-8 rounded-3xl sm:rounded-[2rem] border border-white/5 relative overflow-hidden group cursor-pointer hover:border-emerald-500/50 transition-colors"
             >
               <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
                 <Building2 className="w-16 h-16 text-emerald-400" />
@@ -4077,15 +4107,16 @@ Notas: ${closure.notes || 'N/A'}`;
                 <Building2 className="w-3 h-3 text-emerald-400" />
                 Banco
               </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBankTotal.toLocaleString('es-CL')}</p>
+              <p className="text-2xl sm:text-4xl font-black text-white font-sans tracking-tight">${accumulatedBankTotal.toLocaleString('es-CL')}</p>
             </div>
             <div
+              onClick={() => window.matchMedia('(max-width: 767px)').matches && setViewingCajaMovements('banquitos')}
               onDoubleClick={() => setViewingCajaMovements('banquitos')}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setContextMenu({ x: e.clientX, y: e.clientY, caja: 'banquitos' });
               }}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-blue-500/20 relative overflow-hidden group cursor-pointer hover:border-blue-500/50 transition-colors"
+              className="bg-[#1E293B] p-4 sm:p-8 rounded-3xl sm:rounded-[2rem] border border-blue-500/20 relative overflow-hidden group cursor-pointer hover:border-blue-500/50 transition-colors"
             >
               <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
                 <DollarSign className="w-16 h-16 text-blue-400" />
@@ -4094,11 +4125,12 @@ Notas: ${closure.notes || 'N/A'}`;
                 <DollarSign className="w-3 h-3 text-blue-400" />
                 Banquitos
               </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedBanquitosTotal.toLocaleString('es-CL')}</p>
+              <p className="text-2xl sm:text-4xl font-black text-white font-sans tracking-tight">${accumulatedBanquitosTotal.toLocaleString('es-CL')}</p>
             </div>
             <div
+              onClick={() => window.matchMedia('(max-width: 767px)').matches && setHistoryView({ type: 'outflow', title: 'GASTOS TOTALES' })}
               onDoubleClick={() => setHistoryView({ type: 'outflow', title: 'GASTOS TOTALES' })}
-              className="bg-[#1E293B] p-8 rounded-[2rem] border border-rose-500/20 relative overflow-hidden group cursor-pointer hover:border-rose-500/50 transition-colors shadow-2xl"
+              className="bg-[#1E293B] p-4 sm:p-8 rounded-3xl sm:rounded-[2rem] border border-rose-500/20 relative overflow-hidden group cursor-pointer hover:border-rose-500/50 transition-colors shadow-2xl"
               title="Doble clic para ver historial"
             >
               <div className="absolute top-0 right-0 p-6 opacity-10 group-hover:opacity-20 transition-opacity">
@@ -4108,9 +4140,9 @@ Notas: ${closure.notes || 'N/A'}`;
                 <ArrowUpRight className="w-3 h-3" />
                 GASTOS TOTALES
               </p>
-              <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedOutflowTotal.toLocaleString('es-CL')}</p>
+              <p className="text-2xl sm:text-4xl font-black text-white font-sans tracking-tight">${accumulatedOutflowTotal.toLocaleString('es-CL')}</p>
               <p className="text-[10px] font-black text-rose-300/70 uppercase tracking-widest mt-2">Periodo: {outflowPeriodLabel}</p>
-              <div className="grid grid-cols-2 gap-2 mt-4 relative z-10">
+              <div className="hidden sm:grid grid-cols-2 gap-2 mt-4 relative z-10">
                 {[
                   { label: 'Este mes', value: 'este_mes' as const },
                   { label: 'Mes pasado', value: 'mes_pasado' as const },
@@ -4279,13 +4311,13 @@ Notas: ${closure.notes || 'N/A'}`;
             )}
           </AnimatePresence>
 
-          <div ref={historySectionRef} className="flex flex-col lg:flex-row items-center justify-between gap-6 mb-8 text-left scroll-mt-28">
-             <div className="flex-1">
-              <h2 className="text-3xl font-black text-white mb-1 flex items-center gap-3"><History className="w-8 h-8 text-blue-500" /> Historial</h2>
-              <p className="text-slate-500 text-sm">Registro de cierres contables.</p>
+          <div ref={historySectionRef} className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 sm:gap-6 mb-6 sm:mb-8 text-left scroll-mt-20 sm:scroll-mt-28">
+             <div className="flex-1 min-w-0">
+              <h2 className="text-2xl sm:text-3xl font-black text-white mb-1 flex items-center gap-3"><History className="w-7 h-7 sm:w-8 sm:h-8 text-blue-500" /> Historial de cierres</h2>
+              <p className="text-slate-500 text-xs sm:text-sm">Consulta cada cierre, su auditoria y el detalle enviado a compras.</p>
             </div>
-            <div className="flex flex-wrap items-center gap-4">
-              <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest mr-2">Periodo:</span>
+            <div className="w-full lg:w-auto">
+              <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={() => {
                   setFilterStartDate(format(subDays(new Date(), 7), 'yyyy-MM-dd'));
@@ -4314,8 +4346,17 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 Siempre
               </button>
-              <div className="h-8 w-[1px] bg-white/10 hidden sm:block" />
-              <div className="flex items-center bg-[#1E293B] rounded-2xl border border-white/5 p-1">
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMobileHistoryFilters(value => !value)}
+                className="mt-2 w-full lg:hidden rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center justify-center gap-2"
+              >
+                <ChevronDown className={`w-4 h-4 transition-transform ${showMobileHistoryFilters ? 'rotate-180' : ''}`} />
+                {showMobileHistoryFilters ? 'Ocultar filtros' : 'Mas filtros'}
+              </button>
+              <div className={`${showMobileHistoryFilters ? 'grid' : 'hidden'} mt-3 grid-cols-1 sm:grid-cols-2 gap-2 lg:mt-3 lg:flex lg:flex-wrap lg:items-center lg:justify-end lg:gap-3`}>
+              <div className="grid grid-cols-[1fr_auto_1fr] items-center bg-[#1E293B] rounded-2xl border border-white/5 p-1 min-w-0">
                 <input
                   type="date"
                   value={filterStartDate}
@@ -4323,7 +4364,7 @@ Notas: ${closure.notes || 'N/A'}`;
                     setFilterStartDate(e.target.value);
                     setFilterDateRangeType('custom');
                   }}
-                  className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
+                  className="min-w-0 w-full bg-transparent px-2 py-2 text-[11px] font-sans font-bold text-white outline-none"
                 />
                 <ArrowRight className="w-3 h-3 text-slate-600" />
                 <input
@@ -4333,13 +4374,13 @@ Notas: ${closure.notes || 'N/A'}`;
                     setFilterEndDate(e.target.value);
                     setFilterDateRangeType('custom');
                   }}
-                  className="bg-transparent px-3 py-2 text-xs font-sans font-bold text-white outline-none"
+                  className="min-w-0 w-full bg-transparent px-2 py-2 text-[11px] font-sans font-bold text-white outline-none"
                 />
               </div>
               <select
                 value={filterResponsible}
                 onChange={e => setFilterResponsible(e.target.value)}
-                className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
+                className="w-full lg:w-auto bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
                 <option value="all">Todos los Responsables</option>
                 {uniqueResponsibles.map(r => <option key={r} value={r}>{r}</option>)}
@@ -4347,7 +4388,7 @@ Notas: ${closure.notes || 'N/A'}`;
               <select
                 value={filterStatus}
                 onChange={e => setFilterStatus(e.target.value)}
-                className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
+                className="w-full lg:w-auto bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
                 <option value="all">Todos los Estados</option>
                 <option value="safe">En Tienda</option>
@@ -4358,7 +4399,7 @@ Notas: ${closure.notes || 'N/A'}`;
               <select
                 value={filterAudit}
                 onChange={e => setFilterAudit(e.target.value as ClosureAuditStatus)}
-                className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
+                className="w-full lg:w-auto bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
                 <option value="all">Toda Auditoria</option>
                 <option value="difference">Con Diferencia</option>
@@ -4368,7 +4409,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </select>
               <button
                 onClick={() => setHideCollected(!hideCollected)}
-                className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${hideCollected ? 'bg-amber-500/10 border-amber-500/50 text-amber-500' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
+                className={`w-full lg:w-auto flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border transition-all ${hideCollected ? 'bg-amber-500/10 border-amber-500/50 text-amber-500' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
               >
                 <div className={`w-4 h-4 rounded-md border flex items-center justify-center ${hideCollected ? 'bg-amber-500 border-amber-500' : 'border-slate-600'}`}>
                   {hideCollected && <Check className="w-3 h-3 text-slate-950 font-black" />}
@@ -4377,18 +4418,19 @@ Notas: ${closure.notes || 'N/A'}`;
               </button>
               <button
                 onClick={() => setShowOnlyStoreClosures(!showOnlyStoreClosures)}
-                className={`flex items-center gap-2 px-4 py-3 rounded-2xl border transition-all ${showOnlyStoreClosures ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
+                className={`w-full lg:w-auto flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border transition-all ${showOnlyStoreClosures ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-white/5 border-white/5 text-slate-500 hover:bg-white/10'}`}
               >
                 <div className={`w-4 h-4 rounded-md border flex items-center justify-center ${showOnlyStoreClosures ? 'bg-blue-500 border-blue-500' : 'border-slate-600'}`}>
                   {showOnlyStoreClosures && <Check className="w-3 h-3 text-slate-950 font-black" />}
                 </div>
                 <span className="text-[10px] font-black uppercase tracking-widest whitespace-nowrap">Solo en tienda</span>
               </button>
+              </div>
             </div>
           </div>
 
-          <div className="flex flex-col lg:flex-row items-center justify-between gap-6 mb-8 text-left">
-            <div className="flex-1">
+          <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 sm:gap-6 mb-6 sm:mb-8 text-left">
+            <div className="flex-1 min-w-0">
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 bg-white/5 p-2 rounded-[2rem] w-full lg:w-fit">
                  <div className="relative flex-1 sm:flex-none">
                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
@@ -4414,7 +4456,7 @@ Notas: ${closure.notes || 'N/A'}`;
                  )}
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-stretch sm:items-center gap-2 sm:gap-4 w-full lg:w-auto">
               <button
                 onClick={() => {
                   if (!isInlineAdding && !inlineAddValues.date) {
@@ -4423,21 +4465,104 @@ Notas: ${closure.notes || 'N/A'}`;
                   }
                   setIsInlineAdding(!isInlineAdding);
                 }}
-                className={`px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-lg ${isInlineAdding ? 'bg-slate-700 text-white shadow-slate-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'}`}
+                className={`px-3 sm:px-6 py-3 sm:py-4 rounded-2xl text-[11px] sm:text-base font-black flex items-center justify-center gap-2 transition-all shadow-xl shadow-lg ${isInlineAdding ? 'bg-slate-700 text-white shadow-slate-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'}`}
               >
                 {isInlineAdding ? <X className="w-5 h-5" /> : <Plus className="w-5 h-5" />}
                 {isInlineAdding ? 'Cancelar Registro' : 'Registrar Cierre'}
               </button>
-              <button onClick={() => setIsCreatingTrip(true)} className="bg-amber-600 hover:bg-amber-500 text-white px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-amber-500/20 shadow-lg">
+              <button onClick={() => setIsCreatingTrip(true)} className="bg-amber-600 hover:bg-amber-500 text-white px-3 sm:px-6 py-3 sm:py-4 rounded-2xl text-[11px] sm:text-base font-black flex items-center justify-center gap-2 transition-all shadow-xl shadow-amber-500/20 shadow-lg">
                 <Truck className="w-5 h-5" />
                 Retiro / Viaje
               </button>
-              <button onClick={() => openMovementForm('outflow')} className="bg-rose-600 hover:bg-rose-500 text-white px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-rose-500/20 shadow-lg"><ArrowUpRight className="w-5 h-5" /> Gasto / Salida</button>
-              <button onClick={() => openMovementForm('internal_transfer')} className="bg-purple-600 hover:bg-purple-500 text-white px-6 py-4 rounded-2xl font-black flex items-center gap-2 transition-all shadow-xl shadow-purple-500/20 shadow-lg"><ArrowRightLeft className="w-5 h-5" /> Traspaso Interno</button>
+              <button onClick={() => openMovementForm('outflow')} className="bg-rose-600 hover:bg-rose-500 text-white px-3 sm:px-6 py-3 sm:py-4 rounded-2xl text-[11px] sm:text-base font-black flex items-center justify-center gap-2 transition-all shadow-xl shadow-rose-500/20 shadow-lg"><ArrowUpRight className="w-5 h-5" /> Gasto / Salida</button>
+              <button onClick={() => openMovementForm('internal_transfer')} className="bg-purple-600 hover:bg-purple-500 text-white px-3 sm:px-6 py-3 sm:py-4 rounded-2xl text-[11px] sm:text-base font-black flex items-center justify-center gap-2 transition-all shadow-xl shadow-purple-500/20 shadow-lg"><ArrowRightLeft className="w-5 h-5" /> Traspaso</button>
             </div>
           </div>
 
-          <div className="bg-[#1E293B] rounded-[2.5rem] shadow-2xl border border-white/5 overflow-hidden">
+          {isInlineAdding && (
+            <div className="md:hidden mb-4 rounded-3xl border border-blue-500/25 bg-blue-950/20 p-4 text-left">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-blue-300">Nuevo cierre</p>
+                  <p className="mt-1 text-xs font-bold text-slate-400">Ingresa los datos principales del corte.</p>
+                </div>
+                <button type="button" onClick={() => setIsInlineAdding(false)} aria-label="Cancelar registro" className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-slate-400"><X className="w-5 h-5" /></button>
+              </div>
+              <div className="grid grid-cols-1 gap-3">
+                <input
+                  type="datetime-local"
+                  value={inlineAddValues.date ? format(parseISO(inlineAddValues.date), "yyyy-MM-dd'T'HH:mm") : ''}
+                  onChange={event => event.target.value && setInlineAddValues({ ...inlineAddValues, date: new Date(event.target.value).toISOString() })}
+                  className="w-full rounded-xl border border-white/10 bg-[#1E293B] px-4 py-3 text-sm font-bold text-white outline-none focus:border-blue-500"
+                />
+                <input
+                  type="text"
+                  value={inlineAddValues.responsible}
+                  onChange={event => setInlineAddValues({ ...inlineAddValues, responsible: event.target.value.toUpperCase() })}
+                  placeholder="RESPONSABLE"
+                  className="w-full rounded-xl border border-white/10 bg-[#1E293B] px-4 py-3 text-sm font-black uppercase text-white outline-none focus:border-blue-500"
+                />
+                <div className="grid grid-cols-2 gap-3">
+                  <input type="number" min="0" value={inlineAddValues.physicalAmount || ''} onChange={event => setInlineAddValues({ ...inlineAddValues, physicalAmount: toNonNegativeNumber(event.target.value) })} placeholder="EFECTIVO FISICO" className="min-w-0 rounded-xl border border-white/10 bg-[#1E293B] px-3 py-3 text-sm font-bold text-white outline-none focus:border-blue-500" />
+                  <input type="number" min="0" value={inlineAddValues.systemBalance || ''} onChange={event => setInlineAddValues({ ...inlineAddValues, systemBalance: toNonNegativeNumber(event.target.value) })} placeholder="EFECTIVO ESPERADO" className="min-w-0 rounded-xl border border-white/10 bg-[#1E293B] px-3 py-3 text-sm font-bold text-white outline-none focus:border-blue-500" />
+                </div>
+                <input type="number" min="0" value={inlineAddValues.systemAmount || ''} onChange={event => setInlineAddValues({ ...inlineAddValues, systemAmount: toNonNegativeNumber(event.target.value) })} placeholder="VENTA REGISTRADA" className="w-full rounded-xl border border-white/10 bg-[#1E293B] px-4 py-3 text-sm font-bold text-white outline-none focus:border-blue-500" />
+                <textarea value={inlineAddValues.notes || ''} onChange={event => setInlineAddValues({ ...inlineAddValues, notes: event.target.value })} placeholder="NOTAS (OPCIONAL)" rows={2} className="w-full resize-none rounded-xl border border-white/10 bg-[#1E293B] px-4 py-3 text-sm font-bold text-white outline-none focus:border-blue-500" />
+                <button type="button" onClick={handleSaveInlineAdd} disabled={isSaving} className="w-full rounded-xl bg-blue-600 px-4 py-3.5 text-xs font-black uppercase tracking-widest text-white disabled:opacity-50">
+                  {isSaving ? 'Guardando...' : 'Guardar cierre'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="md:hidden space-y-3">
+            {groupedClosures.map(group => {
+              const containsBanquitos = group.items.some(item => item.id
+                ? (derivedClosureStatusById[item.id] || normalizeClosureCashBoxStatus(item.status)) === 'banquitos'
+                : normalizeClosureCashBoxStatus(item.status) === 'banquitos');
+              const visibleStatuses: ClosureCashBoxStatus[] = containsBanquitos ? ['banquitos'] : ['safe', 'transit', 'bank'];
+              return (
+                <article key={`mobile-${group.date}`} className="overflow-hidden rounded-3xl border border-white/5 bg-[#1E293B] text-left shadow-xl">
+                  <button type="button" onClick={() => toggleDay(group.date)} className="w-full p-4 text-left">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-black capitalize text-white">{format(parseISO(group.date), 'EEEE, dd MMMM', { locale: es })}</p>
+                        <p className="mt-1 text-[9px] font-black uppercase tracking-widest text-blue-400">{group.items.length} cierre{group.items.length === 1 ? '' : 's'}</p>
+                      </div>
+                      <ChevronDown className={`mt-1 h-5 w-5 shrink-0 text-slate-500 transition-transform ${expandedDays[group.date] ? 'rotate-180' : ''}`} />
+                    </div>
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                      <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Efectivo foto</p><p className="mt-1 text-lg font-black text-white">${group.totals.physicalAmount.toLocaleString('es-CL')}</p></div>
+                      <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Efectivo esperado</p><p className="mt-1 text-lg font-black text-white">${group.totals.systemBalance.toLocaleString('es-CL')}</p></div>
+                      <div className="rounded-xl bg-blue-500/[0.06] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-blue-400">Enviado a compras</p><p className="mt-1 text-lg font-black text-blue-200">${Math.abs(group.totals.transferAmount).toLocaleString('es-CL')}</p></div>
+                      <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Diferencia</p><p className={`mt-1 text-lg font-black ${Math.abs(group.totals.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300'}`}>{group.totals.difference >= 0 ? '+' : ''}${group.totals.difference.toLocaleString('es-CL')}</p></div>
+                    </div>
+                    {group.purchaseDetails.length > 0 && <p className="mt-3 text-[9px] font-black uppercase tracking-widest text-blue-400">{group.purchaseDetails.length} detalle{group.purchaseDetails.length === 1 ? '' : 's'} de compra · toca para abrir</p>}
+                  </button>
+                  <div className="grid grid-cols-3 gap-2 border-t border-white/5 p-3" onClick={event => event.stopPropagation()}>
+                    {visibleStatuses.map(status => {
+                      const info = getDayStatusInfo(status);
+                      const active = group.status === status;
+                      return <button key={status} type="button" disabled={active || containsBanquitos} onClick={() => setDayStatus(group.date, status)} className={`rounded-xl border px-2 py-2 text-[9px] font-black uppercase ${active ? info.className : 'border-white/5 bg-white/5 text-slate-500'}`}>{statusButtonLabel(status)}</button>;
+                    })}
+                  </div>
+                  {expandedDays[group.date] && (
+                    <div className="space-y-3 border-t border-white/5 bg-slate-950/20 p-4">
+                      {group.purchaseDetails.length > 0 && (
+                        <div>
+                          <p className="mb-2 text-[9px] font-black uppercase tracking-widest text-blue-300">Detalle enviado a COMPRA PDV</p>
+                          <div className="space-y-2">{group.purchaseDetails.map((detail, index) => <div key={`${detail.document || 'detalle'}-${index}`} className="flex items-start justify-between gap-3 rounded-xl border border-blue-500/10 bg-blue-500/[0.05] p-3"><div className="min-w-0"><p className="text-[11px] font-black uppercase text-white break-words">{detail.description}</p><p className="mt-1 text-[8px] font-bold uppercase text-slate-500">{detail.document ? `Ref. ${detail.document}` : detail.beneficiary || 'COMPRA PDV'}</p></div><p className="shrink-0 text-sm font-black text-blue-200">${detail.amount.toLocaleString('es-CL')}</p></div>)}</div>
+                        </div>
+                      )}
+                      {group.items.map(item => <div key={item.id || item.date} className="flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/[0.03] p-3"><div className="min-w-0"><p className="text-xs font-black uppercase text-white truncate">{normalizeCashierName(item.responsible)}</p><p className="mt-1 text-[9px] font-bold text-slate-500">{format(parseISO(item.date), 'HH:mm')} · {getClosureAuditInfo(item).label}</p></div><p className="shrink-0 text-sm font-black text-white">${item.physicalAmount.toLocaleString('es-CL')}</p></div>)}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:block bg-[#1E293B] rounded-[2.5rem] shadow-2xl border border-white/5 overflow-hidden">
             <div className="overflow-x-auto text-left">
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-20 z-20 shadow-lg shadow-slate-950/20">
