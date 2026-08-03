@@ -1,6 +1,6 @@
 import { getAuth } from "firebase-admin/auth";
 import { getFirebaseAdminDb } from "./_lib/firebaseAdmin.js";
-import { handleBanquitosClosures } from "./_lib/banquitosClosures.js";
+import { handleBanquitosClosures, sendClosurePhoto } from "./_lib/banquitosClosures.js";
 import { parsePerseoInventory, savePerseoInventory } from "./_lib/perseoInventory.js";
 
 async function verifyUser(req: any) {
@@ -64,6 +64,9 @@ export default async function handler(req: any, res: any) {
     const user = await verifyUser(req);
 
     if (req.method === "GET") {
+      if (String(req.query?.action || "") === "closure-photo") {
+        return await sendClosurePhoto(req, res);
+      }
       return res.status(200).json({ ok: true, snapshots: await listSnapshots(), user: user.uid });
     }
 

@@ -196,7 +196,7 @@ const getAvailableStoreClosures = async (
   }
 };
 
-const sendClosurePhoto = async (req: any, res: any) => {
+export const sendClosurePhoto = async (req: any, res: any) => {
   const closureId = String(req.query?.closureId || "").trim();
   if (!closureId || closureId.length > 180 || closureId.includes("/")) {
     return res.status(400).json({ ok: false, error: "Corte no valido." });

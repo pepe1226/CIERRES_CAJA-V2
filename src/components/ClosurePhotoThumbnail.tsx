@@ -41,7 +41,7 @@ export function ClosurePhotoThumbnail({ closureId, telegramFileId, responsible, 
         const user = auth.currentUser;
         if (!user) throw new Error('Sesion no disponible.');
         const token = await user.getIdToken();
-        const response = await fetch(`/api/closure-photo?closureId=${encodeURIComponent(closureId)}`, {
+        const response = await fetch(`/api/inventory-admin?action=closure-photo&closureId=${encodeURIComponent(closureId)}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!response.ok) throw new Error('Foto no disponible.');
