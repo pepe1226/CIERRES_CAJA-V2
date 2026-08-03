@@ -1648,6 +1648,8 @@ function AppContent() {
     });
 
     Object.keys(missingPerseoClosuresByDate).forEach(day => {
+      if (showOnlyStoreClosures) return;
+
       const dayDate = parseISO(`${day}T12:00:00.000Z`);
       const start = startOfDay(parseISO(filterStartDate));
       const end = endOfDay(parseISO(filterEndDate));
@@ -1703,7 +1705,7 @@ function AppContent() {
 
         return { date, items: sortedItems, missingRows, totals, status };
       });
-  }, [filteredClosures, derivedClosureStatusById, closureLedgerById, missingPerseoClosuresByDate, perseoDailyTotalsByDate, filterStartDate, filterEndDate, filterDateRangeType, filterResponsible, debouncedSearchTerm, filterAudit, filterStatus]);
+  }, [filteredClosures, derivedClosureStatusById, closureLedgerById, missingPerseoClosuresByDate, perseoDailyTotalsByDate, filterStartDate, filterEndDate, filterDateRangeType, filterResponsible, debouncedSearchTerm, filterAudit, filterStatus, showOnlyStoreClosures]);
 
 
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
