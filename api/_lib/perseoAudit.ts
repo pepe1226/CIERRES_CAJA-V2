@@ -2,6 +2,7 @@ import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { normalizeCashierName } from "./cashierNames.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import { buildPerseoReportFingerprint } from "./perseoReportFingerprint.js";
+import { parsePerseoPurchaseDetails, type PerseoPurchaseDetail } from "./perseoPurchaseDetails.js";
 import { getTelegramConfig } from "./telegramMovement.js";
 
 type PerseoReportRow = {
@@ -15,6 +16,7 @@ type PerseoReportRow = {
   systemBalance: number;
   reportedAmount: number;
   transferAmount: number;
+  purchaseDetails: PerseoPurchaseDetail[];
   raw: Record<string, unknown>;
 };
 
@@ -400,6 +402,12 @@ export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
         ])
       );
       const transferAmount = parseMoney(getExplicitTransferAmountValue(raw));
+      const purchaseDetails = parsePerseoPurchaseDetails(getFirst(raw, [
+        "purchase_details",
+        "purchases_details",
+        "detalle_compras",
+        "detalles_compra_pdv",
+      ]));
       const date = parseBusinessDate(dateValue, fallbackDate);
       const cashBoxKey = normalizeResponsible(cashBox);
       const responsibleKey = normalizeResponsible(responsible);
@@ -424,6 +432,7 @@ export function parsePerseoReport(input: unknown, fallbackDate = new Date()) {
         systemBalance,
         reportedAmount,
         transferAmount,
+        purchaseDetails,
         raw: normalizedRaw,
       };
     })
@@ -632,6 +641,7 @@ export async function savePerseoReport(params: {
         systemBalance: row.systemBalance,
         reportedAmount: row.reportedAmount,
         transferAmount: row.transferAmount,
+        purchaseDetails: row.purchaseDetails,
         raw: row.raw,
       })),
     });

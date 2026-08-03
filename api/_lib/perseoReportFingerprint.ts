@@ -8,6 +8,14 @@ export type PerseoReportFingerprintRow = {
   systemBalance: number;
   reportedAmount: number;
   transferAmount: number;
+  purchaseDetails?: Array<{
+    date?: string;
+    description?: string;
+    amount?: number;
+    beneficiary?: string;
+    document?: string;
+    responsible?: string;
+  }>;
 };
 
 function normalizedRow(row: PerseoReportFingerprintRow) {
@@ -19,6 +27,16 @@ function normalizedRow(row: PerseoReportFingerprintRow) {
     systemBalance: Number(row.systemBalance.toFixed(2)),
     reportedAmount: Number(row.reportedAmount.toFixed(2)),
     transferAmount: Number(row.transferAmount.toFixed(2)),
+    purchaseDetails: (row.purchaseDetails || [])
+      .map(detail => ({
+        date: String(detail.date || ''),
+        description: String(detail.description || ''),
+        amount: Number(Number(detail.amount || 0).toFixed(2)),
+        beneficiary: String(detail.beneficiary || ''),
+        document: String(detail.document || ''),
+        responsible: String(detail.responsible || ''),
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
   };
 }
 

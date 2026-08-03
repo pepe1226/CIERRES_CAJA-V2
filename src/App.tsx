@@ -152,7 +152,16 @@ type PerseoReportRow = {
   systemBalance?: number;
   reportedAmount?: number;
   transferAmount?: number;
+  purchaseDetails?: PerseoPurchaseDetail[];
   raw?: Record<string, unknown>;
+};
+type PerseoPurchaseDetail = {
+  date?: string;
+  description: string;
+  amount: number;
+  beneficiary?: string;
+  document?: string;
+  responsible?: string;
 };
 type PerseoReport = {
   id: string;
@@ -1393,14 +1402,20 @@ function AppContent() {
   }, [perseoReports]);
 
   const perseoDailyTotalsByDate = useMemo(() => {
-    return Array.from(latestPerseoRowsByDate.entries()).reduce<Record<string, { systemAmount: number; systemBalance: number; reportedAmount: number; transferAmount: number; reportId: string }>>((result, [day, report]) => {
+    return Array.from(latestPerseoRowsByDate.entries()).reduce<Record<string, { systemAmount: number; systemBalance: number; reportedAmount: number; transferAmount: number; purchaseDetails: PerseoPurchaseDetail[]; reportId: string }>>((result, [day, report]) => {
+      const purchaseDetails = Array.from(new Map(
+        report.rows
+          .flatMap(row => row.purchaseDetails || [])
+          .map(detail => [[detail.date, detail.description, detail.amount, detail.document, detail.responsible].join('|'), detail] as const)
+      ).values());
       result[day] = report.rows.reduce((acc, row) => ({
         systemAmount: acc.systemAmount + (Number(row.systemAmount) || 0),
         systemBalance: acc.systemBalance + (Number(row.systemBalance) || 0),
         reportedAmount: acc.reportedAmount + (Number(row.reportedAmount) || 0),
         transferAmount: acc.transferAmount + getExplicitPerseoTransferAmount(row),
+        purchaseDetails,
         reportId: report.reportId,
-      }), { systemAmount: 0, systemBalance: 0, reportedAmount: 0, transferAmount: 0, reportId: report.reportId });
+      }), { systemAmount: 0, systemBalance: 0, reportedAmount: 0, transferAmount: 0, purchaseDetails, reportId: report.reportId });
       return result;
     }, {});
   }, [latestPerseoRowsByDate]);
@@ -1574,6 +1589,7 @@ function AppContent() {
     const systemBalance = roundMoney(reportTotals?.systemBalance ?? items.reduce((total, closure) => total + (Number(closure.systemBalance) || 0), 0));
     const reportedAmount = roundMoney(reportTotals?.reportedAmount ?? items.reduce((total, closure) => total + (Number(closure.reportedAmount) || 0), 0));
     const transferAmount = roundMoney(reportTotals?.transferAmount ?? items.reduce((total, closure) => total + transferPdvAmount(closure.transferAmount), 0));
+    const purchaseDetails = reportTotals?.purchaseDetails || [];
     const difference = roundMoney(physicalAmount - systemBalance);
     const latestPhoto = items.find(closure => Boolean(closure.id && closure.telegramFileId)) || null;
     const photoCount = items.filter(closure => Boolean(closure.telegramFileId)).length;
@@ -1630,6 +1646,7 @@ function AppContent() {
       systemBalance,
       reportedAmount,
       transferAmount,
+      purchaseDetails,
       difference,
       latestPhoto,
       photoCount,
@@ -1703,7 +1720,7 @@ function AppContent() {
 
         const status = getDayStatusFromItems(sortedItems);
 
-        return { date, items: sortedItems, missingRows, totals, status };
+        return { date, items: sortedItems, missingRows, totals, purchaseDetails: perseoDailyTotals?.purchaseDetails || [], status };
       });
   }, [filteredClosures, derivedClosureStatusById, closureLedgerById, missingPerseoClosuresByDate, perseoDailyTotalsByDate, filterStartDate, filterEndDate, filterDateRangeType, filterResponsible, debouncedSearchTerm, filterAudit, filterStatus, showOnlyStoreClosures]);
 
@@ -2925,7 +2942,16 @@ Notas: ${closure.notes || 'N/A'}`;
       case 'systemBalance':
         return <td key={column} className={cellClass(column, amountCellClass)}>${(group.totals.systemBalance || 0).toLocaleString('es-CL')}</td>;
       case 'transferAmount':
-        return <td key={column} className={cellClass(column, amountCellClass)}>{renderTransferValue(group.totals.transferAmount, group.totals.systemAmount, group.totals.systemBalance)}</td>;
+        return (
+          <td key={column} className={cellClass(column, amountCellClass)}>
+            {renderTransferValue(group.totals.transferAmount, group.totals.systemAmount, group.totals.systemBalance)}
+            {group.purchaseDetails.length > 0 && (
+              <span className="mt-1 block text-[8px] font-black uppercase tracking-widest text-blue-400">
+                {group.purchaseDetails.length} detalle{group.purchaseDetails.length === 1 ? '' : 's'}
+              </span>
+            )}
+          </td>
+        );
       case 'systemAmount':
         return <td key={column} className={cellClass(column, amountCellClass)}>${group.totals.systemAmount.toLocaleString('es-CL')}</td>;
       case 'reportedAmount':
@@ -3937,6 +3963,38 @@ Notas: ${closure.notes || 'N/A'}`;
                   </div>
                 ))}
               </div>
+
+              {todayAuditSummary.purchaseDetails.length > 0 ? (
+                <div className="mt-5 rounded-2xl border border-blue-500/20 bg-slate-950/25 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                    <div>
+                      <p className="text-[9px] font-black uppercase tracking-[0.2em] text-blue-300">Detalle COMPRA PDV</p>
+                      <p className="mt-1 text-[11px] font-bold text-slate-500">Conceptos que componen el valor transferido</p>
+                    </div>
+                    <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-blue-300">
+                      {todayAuditSummary.purchaseDetails.length} movimiento{todayAuditSummary.purchaseDetails.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+                    {todayAuditSummary.purchaseDetails.map((detail, index) => (
+                      <div key={`${detail.document || 'detalle'}-${detail.amount}-${index}`} className="rounded-xl border border-white/5 bg-white/[0.035] px-3 py-3 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-black text-white uppercase leading-snug">{detail.description}</p>
+                          <p className="mt-1 text-[9px] font-bold text-slate-500 uppercase truncate">
+                            {detail.beneficiary || detail.responsible || 'COMPRA PDV'}
+                          </p>
+                          {detail.document && <p className="mt-1 text-[8px] font-black text-slate-600 uppercase">Ref. {detail.document}</p>}
+                        </div>
+                        <p className="shrink-0 text-sm font-black font-sans text-blue-200">${detail.amount.toLocaleString('es-CL')}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : todayAuditSummary.transferAmount > 0 ? (
+                <div className="mt-5 rounded-2xl border border-amber-500/20 bg-amber-500/[0.05] px-4 py-3 text-[10px] font-bold text-amber-200">
+                  El total COMPRA PDV ya esta conciliado; el detalle se incorporara en la siguiente sincronizacion de Perseo.
+                </div>
+              ) : null}
             </div>
 
             <div className="rounded-[2rem] border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.09] to-[#1E293B] p-6 shadow-2xl flex flex-col justify-between">
@@ -4398,6 +4456,21 @@ Notas: ${closure.notes || 'N/A'}`;
                       <tr onClick={() => toggleDay(group.date)} className="bg-white/[0.03] cursor-pointer hover:bg-white/[0.06] transition-colors border-y border-white/5">
                         {closureTableColumnOrder.map(column => renderGroupSummaryCell(group, column))}
                       </tr>
+                      {expandedDays[group.date] && group.purchaseDetails.length > 0 && (
+                        <tr className="bg-blue-500/[0.035] border-b border-blue-500/10">
+                          <td colSpan={closureTableColumnOrder.length} className="px-5 py-4">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="mr-2 text-[9px] font-black uppercase tracking-widest text-blue-300">Detalle COMPRA PDV</span>
+                              {group.purchaseDetails.map((detail, index) => (
+                                <span key={`${detail.document || 'detalle'}-${detail.amount}-${index}`} className="inline-flex items-center gap-2 rounded-xl border border-blue-500/15 bg-blue-500/[0.07] px-3 py-2">
+                                  <span className="text-[9px] font-black uppercase text-slate-300">{detail.description}</span>
+                                  <span className="text-[10px] font-black font-sans text-blue-200">${detail.amount.toLocaleString('es-CL')}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
                       {expandedDays[group.date] && group.items.map(closure => (
                         inlineEditingId === closure.id ? (
                           <tr key={closure.id} className="bg-blue-950/30 border-y border-blue-500/20">

@@ -37,3 +37,24 @@ test('la huella cambia si cambia un valor auditado', () => {
   ]);
   assert.notEqual(first, changed);
 });
+
+test('la huella cambia cuando se incorpora el detalle de COMPRA PDV', () => {
+  const first = buildPerseoReportFingerprint(rows);
+  const withPurchaseDetail = buildPerseoReportFingerprint([
+    {
+      ...rows[0],
+      purchaseDetails: [
+        {
+          date: '2026-07-18',
+          description: 'LEGUMBRES',
+          amount: 71,
+          beneficiary: 'PROVEEDOR LOCAL',
+          document: 'RC001',
+          responsible: 'DAYELI',
+        },
+      ],
+    },
+    rows[1],
+  ]);
+  assert.notEqual(first, withPurchaseDetail);
+});
