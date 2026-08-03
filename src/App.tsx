@@ -1248,11 +1248,6 @@ function AppContent() {
     .sort((left, right) => right.closure.date.localeCompare(left.closure.date)),
   [closures, closureLedgerById, isClosureAvailableForTrip]);
 
-  const storePendingTotal = useMemo(
-    () => roundMoney(storePendingClosures.reduce((total, entry) => total + entry.safeAmount, 0)),
-    [storePendingClosures]
-  );
-
   const showAllStoreClosures = useCallback(() => {
     setFilterDateRangeType('siempre');
     setFilterStatus('all');
@@ -3958,7 +3953,7 @@ Notas: ${closure.notes || 'N/A'}`;
                     <p className="text-4xl font-black text-white">{storePendingClosures.length}</p>
                     <p className="mt-1 text-xs font-bold text-slate-400">cortes pendientes de retiro</p>
                   </div>
-                  <p className="text-xl font-black text-blue-200 font-sans">${storePendingTotal.toLocaleString('es-CL')}</p>
+                  <p className="text-xl font-black text-blue-200 font-sans">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
                 </div>
               </div>
               <button
