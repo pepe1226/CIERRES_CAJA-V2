@@ -91,6 +91,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ClosurePhotoThumbnail } from './components/ClosurePhotoThumbnail';
+import { computeTripSpend, reconcileTrip } from './lib/tripReconciliation';
 
 const Dashboard = React.lazy(() => import('./components/Dashboard').then(module => ({ default: module.Dashboard })));
 const PersonalFinance = React.lazy(() => import('./components/PersonalFinance').then(module => ({ default: module.PersonalFinance })));
@@ -1308,31 +1309,15 @@ function AppContent() {
     return coverage;
   }, [closures]);
 
-  // Cuanto se gasto del dinero que se llevaba encima en cada viaje. Los movimientos no
-  // guardan a que viaje pertenecen (las reglas de Firestore no admiten ese campo), asi
-  // que se atribuyen por ventana de fechas: los viajes son secuenciales, solo uno esta
-  // en transito a la vez. Si algun dia el movimiento trae tripId, ese manda.
+  // Cuanto se gasto del dinero que se llevaba encima en cada viaje. La atribucion vive
+  // en src/lib/tripReconciliation.ts y esta cubierta por tests.
   const tripSpendById = useMemo(() => {
-    const spend: Record<string, number> = {};
+    const isTransit = (box?: string | null) => normalizeCashBoxStatus(box) === 'transit';
 
-    trips.forEach(trip => {
-      if (!trip.id) return;
-      const start = new Date(trip.startDate).getTime();
-      const end = trip.completionDate ? new Date(trip.completionDate).getTime() : Date.now();
-      if (Number.isNaN(start)) return;
-
-      spend[trip.id] = roundMoney(movements.reduce((total, movement) => {
-        if (movement.type !== 'outflow') return total;
-        if (normalizeCashBoxStatus(movement.from) !== 'transit') return total;
-        if (movement.tripId) return movement.tripId === trip.id ? total + (Number(movement.amount) || 0) : total;
-
-        const when = new Date(movement.date).getTime();
-        if (Number.isNaN(when) || when < start || when > end) return total;
-        return total + (Number(movement.amount) || 0);
-      }, 0));
-    });
-
-    return spend;
+    return trips.reduce<Record<string, number>>((spend, trip) => {
+      if (trip.id) spend[trip.id] = computeTripSpend(trip, movements, isTransit);
+      return spend;
+    }, {});
   }, [trips, movements]);
 
   const lastTripCoverage = useMemo(() => {
@@ -5018,11 +5003,12 @@ Notas: ${closure.notes || 'N/A'}`;
                        </div>
                        <div className="p-8 overflow-y-auto space-y-8 bg-[#0F172A]/50">
                          {(() => {
-                           const recogido = roundMoney(trip.totalAmount);
-                           const gastado = roundMoney(trip.id ? tripSpendById[trip.id] : 0);
-                           const resto = roundMoney(recogido - gastado);
                            const completado = trip.status === 'completed';
-                           const descuadre = completado && gastado > 0.009;
+                           const cuadre = reconcileTrip(trip, trip.id ? tripSpendById[trip.id] : 0, completado);
+                           const recogido = cuadre.collected;
+                           const gastado = cuadre.spent;
+                           const resto = cuadre.expectedDeposit;
+                           const descuadre = cuadre.overstatedDeposit;
                            return (
                              <div className={`rounded-[2rem] border p-6 shadow-xl ${descuadre ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-white/5 bg-[#1E293B]'}`}>
                                <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">Cuadre del viaje</p>
