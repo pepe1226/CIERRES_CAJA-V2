@@ -67,27 +67,6 @@ export type TripBalance = {
   overstatedDeposit: boolean;
 };
 
-/**
- * Saldos que quedan en Banco y Transito al cerrar un viaje.
- *
- * Los cierres del viaje pasan enteros a Banco, pero el gasto del camino se registro
- * como salida desde Transito. Sin corregir, Banco queda inflado por lo gastado y
- * Transito arrastra un negativo. El cierre añade un ajuste Banco -> Transito por ese
- * mismo monto, que devuelve ambas cajas a la realidad.
- */
-export function completionBoxBalances(collected: number, spent: number) {
-  const safeSpent = Math.max(0, roundMoney(spent));
-
-  return {
-    /** Lo que realmente llego al banco. */
-    bank: roundMoney(roundMoney(collected) - safeSpent),
-    /** Ya no se lleva nada encima. */
-    transit: roundMoney(-safeSpent + safeSpent),
-    /** Monto del movimiento de ajuste; cero significa que no hace falta. */
-    adjustment: safeSpent
-  };
-}
-
 export function reconcileTrip(
   trip: TripLike,
   spent: number,

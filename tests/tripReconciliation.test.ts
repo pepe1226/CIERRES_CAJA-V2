@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { completionBoxBalances, computeTripSpend, reconcileTrip, roundMoney, type MovementLike } from '../src/lib/tripReconciliation.ts';
+import { computeTripSpend, reconcileTrip, type MovementLike } from '../src/lib/tripReconciliation.ts';
 
 const isTransit = (box?: string | null) => String(box || '').toLowerCase() === 'transit';
 
@@ -91,38 +91,6 @@ test('sin gasto no hay descuadre', () => {
 
 test('un viaje en curso no se marca como descuadrado: aun no deposita', () => {
   assert.equal(reconcileTrip(viaje, 750, false).overstatedDeposit, false);
-});
-
-test('al cerrar, Banco queda con lo depositado y Transito en cero', () => {
-  const cajas = completionBoxBalances(3000, 750);
-
-  assert.equal(cajas.bank, 2250);
-  assert.equal(cajas.transit, 0);
-  assert.equal(cajas.adjustment, 750);
-});
-
-test('sin gasto no hace falta ajuste y Banco recibe todo', () => {
-  const cajas = completionBoxBalances(3000, 0);
-
-  assert.equal(cajas.bank, 3000);
-  assert.equal(cajas.transit, 0);
-  assert.equal(cajas.adjustment, 0);
-});
-
-test('gastar todo el viaje deja Banco en cero, no en negativo', () => {
-  const cajas = completionBoxBalances(500, 500);
-
-  assert.equal(cajas.bank, 0);
-  assert.equal(cajas.transit, 0);
-});
-
-test('las cajas cuadran contra lo recogido en centavos sueltos', () => {
-  const cajas = completionBoxBalances(1000.05, 333.35);
-
-  assert.equal(cajas.bank, 666.7);
-  assert.equal(cajas.transit, 0);
-  // Suma redondeada: 666.7 + 333.35 da 1000.0500000000001 en coma flotante cruda.
-  assert.equal(roundMoney(cajas.bank + cajas.adjustment), 1000.05);
 });
 
 test('un gasto negativo no aumenta el deposito esperado', () => {

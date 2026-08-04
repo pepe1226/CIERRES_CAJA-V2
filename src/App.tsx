@@ -91,7 +91,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ClosurePhotoThumbnail } from './components/ClosurePhotoThumbnail';
-import { completionBoxBalances, computeTripSpend, reconcileTrip } from './lib/tripReconciliation';
+import { computeTripSpend, reconcileTrip } from './lib/tripReconciliation';
 
 const Dashboard = React.lazy(() => import('./components/Dashboard').then(module => ({ default: module.Dashboard })));
 const PersonalFinance = React.lazy(() => import('./components/PersonalFinance').then(module => ({ default: module.PersonalFinance })));
@@ -731,7 +731,6 @@ function AppContent() {
   const [hideCollected, setHideCollected] = useState(false);
   const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
   const [showMobileHistoryFilters, setShowMobileHistoryFilters] = useState(false);
-  const [completingTripId, setCompletingTripId] = useState<string | null>(null);
 
   const [movementValues, setMovementValues] = useState<Partial<Movement>>({
     type: 'outflow',
@@ -2113,15 +2112,7 @@ function AppContent() {
   };
 
   const handleCompleteTrip = async (tripId: string) => {
-    if (!user) return;
-
     try {
-      // Los cierres del viaje pasan enteros a banco, pero lo que se gasto por el camino
-      // salio de Transito. Sin corregirlo, Banco queda inflado por ese gasto y Transito
-      // arrastra un saldo negativo. El ajuste devuelve cada caja a lo que realmente tiene.
-      const trip = trips.find(t => t.id === tripId);
-      const { adjustment } = completionBoxBalances(trip?.totalAmount || 0, tripSpendById[tripId] || 0);
-
       await updateDoc(doc(db, 'trips', tripId), {
         status: 'completed',
         completionDate: serverTimestamp()
@@ -2129,21 +2120,6 @@ function AppContent() {
 
       const tripClosures = closures.filter(c => c.tripId === tripId);
       await persistClosureStatusChanges(tripClosures, 'bank', tripId);
-
-      if (adjustment > 0.009) {
-        await addDoc(collection(db, 'movements'), {
-          date: Timestamp.fromDate(new Date()),
-          type: 'internal_transfer',
-          amount: adjustment,
-          description: 'AJUSTE CIERRE DE VIAJE: GASTADO EN TRANSITO',
-          createdBy: user.uid,
-          from: 'bank',
-          to: 'transit',
-          createdAt: serverTimestamp()
-        });
-      }
-
-      setCompletingTripId(null);
     } catch (err) {
        handleFirestoreError(err, OperationType.UPDATE, `trips/${tripId}`);
     }
@@ -4945,52 +4921,6 @@ Notas: ${closure.notes || 'N/A'}`;
         </AnimatePresence>
 
         <AnimatePresence>
-          {completingTripId && (() => {
-            const trip = trips.find(t => t.id === completingTripId);
-            if (!trip) return null;
-            const cuadre = reconcileTrip(trip, tripSpendById[completingTripId] || 0, false);
-            return (
-              <div className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm text-left">
-                <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full max-w-lg bg-[#1E293B] rounded-[2rem] border border-white/10 shadow-2xl p-7">
-                  <h3 className="text-xl font-black text-white uppercase tracking-tight">Confirmar deposito</h3>
-                  <p className="mt-1 text-xs font-bold text-slate-500">{trip.description}</p>
-
-                  <div className="mt-5 space-y-2">
-                    <div className="flex items-center justify-between rounded-2xl bg-white/[0.04] px-4 py-3">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Recogido</span>
-                      <span className="text-lg font-black text-white font-sans">${cuadre.collected.toLocaleString('es-CL')}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-2xl bg-white/[0.04] px-4 py-3">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Gastado en transito</span>
-                      <span className={`text-lg font-black font-sans ${cuadre.spent > 0.009 ? 'text-rose-300' : 'text-slate-500'}`}>-${cuadre.spent.toLocaleString('es-CL')}</span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-2xl border border-emerald-500/25 bg-emerald-500/[0.08] px-4 py-3">
-                      <span className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Debe llegar al banco</span>
-                      <span className="text-xl font-black text-emerald-300 font-sans">${cuadre.expectedDeposit.toLocaleString('es-CL')}</span>
-                    </div>
-                  </div>
-
-                  {cuadre.spent > 0.009 && (
-                    <p className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-[11px] font-bold text-amber-200">
-                      Se registrara un ajuste de ${cuadre.spent.toLocaleString('es-CL')} para que Banco refleje solo lo depositado y Transito no quede en negativo.
-                    </p>
-                  )}
-
-                  <div className="mt-6 flex gap-3">
-                    <button type="button" onClick={() => setCompletingTripId(null)} className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-300 hover:bg-white/10 transition-colors">
-                      Cancelar
-                    </button>
-                    <button type="button" onClick={() => handleCompleteTrip(completingTripId)} className="flex-1 rounded-2xl bg-emerald-600 hover:bg-emerald-500 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-white transition-colors">
-                      Confirmar deposito
-                    </button>
-                  </div>
-                </motion.div>
-              </div>
-            );
-          })()}
-        </AnimatePresence>
-
-        <AnimatePresence>
           {viewingTripId && (
             <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm text-left">
               <motion.div initial={{ opacity:0, scale:0.95 }} animate={{ opacity:1, scale:1 }} className="w-full max-w-4xl bg-[#1E293B] rounded-[2.5rem] border border-white/5 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -5063,7 +4993,7 @@ Notas: ${closure.notes || 'N/A'}`;
                          </div>
                          <div className="flex gap-3">
                            {trip.status === 'in_transit' && (
-                             <button onClick={() => setCompletingTripId(trip.id!)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-500/20 flex items-center gap-2">
+                             <button onClick={() => handleCompleteTrip(trip.id!)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-500/20 flex items-center gap-2">
                                <CheckCircle2 className="w-4 h-4" />
                                Confirmar Deposito
                              </button>
