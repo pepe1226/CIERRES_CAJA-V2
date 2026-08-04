@@ -53,6 +53,9 @@ export interface Movement {
   from?: string;
   to?: string;
   closureId?: string;
+  // Viaje al que pertenece el gasto hecho con el dinero en transito. Sin esto el
+  // viaje no puede cuadrar lo recogido contra lo gastado y lo depositado.
+  tripId?: string;
   employeeId?: string;
   employeeName?: string;
   payrollKind?: 'advance' | 'salary' | 'bonus' | 'loan' | 'discount' | 'settlement' | string;

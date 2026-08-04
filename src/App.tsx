@@ -1308,6 +1308,33 @@ function AppContent() {
     return coverage;
   }, [closures]);
 
+  // Cuanto se gasto del dinero que se llevaba encima en cada viaje. Los movimientos no
+  // guardan a que viaje pertenecen (las reglas de Firestore no admiten ese campo), asi
+  // que se atribuyen por ventana de fechas: los viajes son secuenciales, solo uno esta
+  // en transito a la vez. Si algun dia el movimiento trae tripId, ese manda.
+  const tripSpendById = useMemo(() => {
+    const spend: Record<string, number> = {};
+
+    trips.forEach(trip => {
+      if (!trip.id) return;
+      const start = new Date(trip.startDate).getTime();
+      const end = trip.completionDate ? new Date(trip.completionDate).getTime() : Date.now();
+      if (Number.isNaN(start)) return;
+
+      spend[trip.id] = roundMoney(movements.reduce((total, movement) => {
+        if (movement.type !== 'outflow') return total;
+        if (normalizeCashBoxStatus(movement.from) !== 'transit') return total;
+        if (movement.tripId) return movement.tripId === trip.id ? total + (Number(movement.amount) || 0) : total;
+
+        const when = new Date(movement.date).getTime();
+        if (Number.isNaN(when) || when < start || when > end) return total;
+        return total + (Number(movement.amount) || 0);
+      }, 0));
+    });
+
+    return spend;
+  }, [trips, movements]);
+
   const lastTripCoverage = useMemo(() => {
     let latest: { to: string; description: string } | null = null;
     trips.forEach(trip => {
@@ -4990,6 +5017,41 @@ Notas: ${closure.notes || 'N/A'}`;
                          </div>
                        </div>
                        <div className="p-8 overflow-y-auto space-y-8 bg-[#0F172A]/50">
+                         {(() => {
+                           const recogido = roundMoney(trip.totalAmount);
+                           const gastado = roundMoney(trip.id ? tripSpendById[trip.id] : 0);
+                           const resto = roundMoney(recogido - gastado);
+                           const completado = trip.status === 'completed';
+                           const descuadre = completado && gastado > 0.009;
+                           return (
+                             <div className={`rounded-[2rem] border p-6 shadow-xl ${descuadre ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-white/5 bg-[#1E293B]'}`}>
+                               <p className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-500">Cuadre del viaje</p>
+                               <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                 <div className="rounded-2xl bg-white/[0.035] p-4">
+                                   <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Recogido</p>
+                                   <p className="mt-1 text-2xl font-black text-white font-sans">${recogido.toLocaleString('es-CL')}</p>
+                                 </div>
+                                 <div className="rounded-2xl bg-white/[0.035] p-4">
+                                   <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Gastado en transito</p>
+                                   <p className={`mt-1 text-2xl font-black font-sans ${gastado > 0.009 ? 'text-rose-300' : 'text-slate-500'}`}>${gastado.toLocaleString('es-CL')}</p>
+                                 </div>
+                                 <div className="rounded-2xl bg-white/[0.035] p-4">
+                                   <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{completado ? 'Deberia haberse depositado' : 'Queda por depositar'}</p>
+                                   <p className="mt-1 text-2xl font-black text-emerald-300 font-sans">${resto.toLocaleString('es-CL')}</p>
+                                 </div>
+                               </div>
+                               {descuadre ? (
+                                 <p className="mt-4 text-[11px] font-bold text-amber-200">
+                                   Este viaje marco los ${recogido.toLocaleString('es-CL')} completos como depositados en banco, pero ${gastado.toLocaleString('es-CL')} se gastaron mientras el dinero iba en transito. Al banco solo debieron llegar ${resto.toLocaleString('es-CL')}.
+                                 </p>
+                               ) : (
+                                 <p className="mt-4 text-[11px] font-bold text-slate-500">
+                                   Gasto atribuido por fecha: salidas desde Transito entre el inicio del viaje y {completado ? 'su cierre' : 'hoy'}.
+                                 </p>
+                               )}
+                             </div>
+                           );
+                         })()}
                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                            <div className="bg-[#1E293B] p-8 rounded-[2rem] border border-white/5 shadow-xl">
                              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3">Monto Total Recolectado</p>
