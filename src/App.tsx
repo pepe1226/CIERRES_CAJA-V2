@@ -2359,7 +2359,6 @@ function AppContent() {
 
     let currentCategory = movementValues.category;
     let currentSubcategory = movementValues.subcategory;
-    const currentTags = mergeExpenseTags(movementValues.tags || []);
 
     // Auto-commit pending new category
     if (isAddingNewCategory && newCategoryName.trim()) {
@@ -2444,7 +2443,11 @@ function AppContent() {
         createdBy: user.uid,
         category: movementType === 'outflow' ? currentCategory || 'Sueldos' : null,
         subcategory: movementType === 'outflow' ? currentSubcategory || null : null,
-        tags: movementType === 'outflow' ? currentTags : null,
+        // `tags` NO se envia: isValidMovement en firestore.rules valida con
+        // keys().hasOnly(...) y esa lista no incluye el campo, asi que Firestore
+        // rechazaba el movimiento entero con "Missing or insufficient permissions".
+        // La clasificacion automatica sigue sirviendo: llena category y subcategory,
+        // que si estan permitidos y si se guardan.
         from: normalizedFrom || null,
         to: movementType === 'outflow' ? null : normalizedTo || null,
       };
