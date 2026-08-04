@@ -267,6 +267,9 @@ const defaultClosureTableColumnOrder: ClosureTableColumnKey[] = [
 ];
 
 const fixedClosureTableTrailingColumns: ClosureTableColumnKey[] = ['status', 'actions'];
+// Detalle fino del reporte de Perseo. Con las diez columnas la tabla mide 1449px y
+// obliga a desplazamiento horizontal; se ocultan salvo que se pidan.
+const perseoDetailColumns: ClosureTableColumnKey[] = ['transferAmount', 'systemAmount', 'reportedAmount'];
 const closureMatchTolerance = 0.1001;
 
 const normalizeClosureTableColumnOrder = (value: unknown): ClosureTableColumnKey[] => {
@@ -672,6 +675,14 @@ function AppContent() {
     }
   });
   const [draggedClosureColumn, setDraggedClosureColumn] = useState<ClosureTableColumnKey | null>(null);
+  const [showPerseoDetailColumns, setShowPerseoDetailColumns] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage.getItem('showPerseoDetailColumns') === '1';
+    } catch {
+      return false;
+    }
+  });
   const [currentView, setCurrentView] = useState<'main' | 'dashboard' | 'personal' | 'payroll' | 'inventory' | 'credits'>('main');
   const [isModuleSidebarOpen, setIsModuleSidebarOpen] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -783,6 +794,19 @@ function AppContent() {
       // localStorage can be unavailable in restricted browser modes.
     }
   }, [closureTableColumnOrder]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('showPerseoDetailColumns', showPerseoDetailColumns ? '1' : '0');
+    } catch {
+      // localStorage can be unavailable in restricted browser modes.
+    }
+  }, [showPerseoDetailColumns]);
+  const visibleClosureTableColumns = useMemo(
+    () => showPerseoDetailColumns
+      ? closureTableColumnOrder
+      : closureTableColumnOrder.filter(column => !perseoDetailColumns.includes(column)),
+    [closureTableColumnOrder, showPerseoDetailColumns]
+  );
   const [inlineAddValues, setInlineAddValues] = useState<Partial<ShiftClosure>>({
     date: new Date().toISOString(),
     responsible: '',
@@ -2601,6 +2625,17 @@ Notas: ${closure.notes || 'N/A'}`;
 
   const activeColumnFilterCount = Object.values(columnFilters).filter(value => normalizeSearchText(value)).length;
 
+  // Los filtros avanzados se pueden colapsar: sin este contador quedarian activos
+  // y fuera de vista.
+  const activeHistoryFilterCount = [
+    filterResponsible !== 'all',
+    filterStatus !== 'all',
+    filterAudit !== 'all',
+    filterDateRangeType === 'custom',
+    hideCollected,
+    showOnlyStoreClosures
+  ].filter(Boolean).length;
+
   const updateColumnFilter = (column: ClosureColumnKey, value: string) => {
     setColumnFilters(prev => ({ ...prev, [column]: value }));
   };
@@ -4412,12 +4447,17 @@ Notas: ${closure.notes || 'N/A'}`;
               <button
                 type="button"
                 onClick={() => setShowMobileHistoryFilters(value => !value)}
-                className="mt-2 w-full lg:hidden rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center justify-center gap-2"
+                className="mt-2 w-full lg:w-auto lg:ml-auto rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center justify-center gap-2"
               >
                 <ChevronDown className={`w-4 h-4 transition-transform ${showMobileHistoryFilters ? 'rotate-180' : ''}`} />
                 {showMobileHistoryFilters ? 'Ocultar filtros' : 'Mas filtros'}
+                {!showMobileHistoryFilters && activeHistoryFilterCount > 0 && (
+                  <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-blue-500 px-1 text-[9px] font-black text-white">
+                    {activeHistoryFilterCount}
+                  </span>
+                )}
               </button>
-              <div className={`${showMobileHistoryFilters ? 'grid' : 'hidden'} mt-3 grid-cols-1 sm:grid-cols-2 gap-2 lg:mt-3 lg:flex lg:flex-wrap lg:items-center lg:justify-end lg:gap-3`}>
+              <div className={`${showMobileHistoryFilters ? 'grid lg:flex' : 'hidden'} mt-3 grid-cols-1 sm:grid-cols-2 gap-2 lg:mt-3 lg:flex-wrap lg:items-center lg:justify-end lg:gap-3`}>
               <div className="grid grid-cols-[1fr_auto_1fr] items-center bg-[#1E293B] rounded-2xl border border-white/5 p-1 min-w-0">
                 <input
                   type="date"
@@ -4625,27 +4665,37 @@ Notas: ${closure.notes || 'N/A'}`;
           </div>
 
           <div className="hidden md:block bg-[#1E293B] rounded-[2.5rem] shadow-2xl border border-white/5 overflow-hidden">
+            <div className="flex items-center justify-end border-b border-white/5 px-5 py-3">
+              <button
+                type="button"
+                onClick={() => setShowPerseoDetailColumns(value => !value)}
+                title="Transf. PDV, Venta Sistema y Reportado son el detalle fino del reporte de Perseo."
+                className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[9px] font-black uppercase tracking-widest text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+              >
+                {showPerseoDetailColumns ? 'Ocultar detalle Perseo' : 'Ver detalle Perseo'}
+              </button>
+            </div>
             <div className="overflow-x-auto text-left">
               <table className="w-full text-left border-collapse">
                 <thead className="sticky top-20 z-20 shadow-lg shadow-slate-950/20">
                   <tr className="bg-[#1D283A] border-b border-white/5 align-top">
-                    {closureTableColumnOrder.map(renderDraggableClosureHeader)}
+                    {visibleClosureTableColumns.map(renderDraggableClosureHeader)}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
                   {isInlineAdding && (
                     <tr className="bg-blue-950/20 border-y-2 border-blue-500/30">
-                      {closureTableColumnOrder.map(renderInlineAddCell)}
+                      {visibleClosureTableColumns.map(renderInlineAddCell)}
                     </tr>
                   )}
                   {groupedClosures.map(group => (
                     <React.Fragment key={group.date}>
                       <tr onClick={() => toggleDay(group.date)} className="bg-white/[0.03] cursor-pointer hover:bg-white/[0.06] transition-colors border-y border-white/5">
-                        {closureTableColumnOrder.map(column => renderGroupSummaryCell(group, column))}
+                        {visibleClosureTableColumns.map(column => renderGroupSummaryCell(group, column))}
                       </tr>
                       {expandedDays[group.date] && group.purchaseDetails.length > 0 && (
                         <tr className="bg-blue-500/[0.035] border-b border-blue-500/10">
-                          <td colSpan={closureTableColumnOrder.length} className="px-5 py-4">
+                          <td colSpan={visibleClosureTableColumns.length} className="px-5 py-4">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="mr-2 text-[9px] font-black uppercase tracking-widest text-blue-300">Detalle COMPRA PDV</span>
                               {group.purchaseDetails.map((detail, index) => (
@@ -4661,17 +4711,17 @@ Notas: ${closure.notes || 'N/A'}`;
                       {expandedDays[group.date] && group.items.map(closure => (
                         inlineEditingId === closure.id ? (
                           <tr key={closure.id} className="bg-blue-950/30 border-y border-blue-500/20">
-                            {closureTableColumnOrder.map(renderInlineEditCell)}
+                            {visibleClosureTableColumns.map(renderInlineEditCell)}
                           </tr>
                         ) : (
                           <tr key={closure.id} className="hover:bg-white/[0.02] border-b border-white/5 group">
-                            {closureTableColumnOrder.map(column => renderClosureCell(closure, column))}
+                            {visibleClosureTableColumns.map(column => renderClosureCell(closure, column))}
                           </tr>
                         )
                       ))}
                       {expandedDays[group.date] && group.missingRows.map(row => (
                         <tr key={`missing-${row.key}`} className="bg-amber-500/[0.04] border-b border-amber-500/10">
-                          {closureTableColumnOrder.map(column => renderMissingRowCell(row, column))}
+                          {visibleClosureTableColumns.map(column => renderMissingRowCell(row, column))}
                         </tr>
                       ))}
                     </React.Fragment>
