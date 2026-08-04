@@ -2831,7 +2831,7 @@ Notas: ${closure.notes || 'N/A'}`;
           setDraggedClosureColumn(null);
         }}
         onDragEnd={() => setDraggedClosureColumn(null)}
-        className={`px-3 py-3 text-[9px] font-black text-slate-500 uppercase tracking-widest border-r border-white/5 ${alignClass} ${config.widthClass} select-none ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${isDragging ? 'bg-blue-500/10 text-blue-300' : ''}`}
+        className={`sticky top-20 z-20 px-3 py-3 text-[9px] font-black text-slate-500 uppercase tracking-widest border-r border-b border-white/5 bg-[#1D283A] ${alignClass} ${config.widthClass} select-none ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${isDragging ? 'bg-blue-500/10 text-blue-300' : ''}`}
         title={`${config.description} ${canDrag ? 'Arrastra para mover esta columna.' : 'Columna fija.'}`}
       >
         {isFilterable
@@ -4758,8 +4758,8 @@ Notas: ${closure.notes || 'N/A'}`;
             </div>
             <div className="overflow-x-auto text-left">
               <table className="w-full text-left border-collapse">
-                <thead className="sticky top-20 z-20 shadow-lg shadow-slate-950/20">
-                  <tr className="bg-[#1D283A] border-b border-white/5 align-top">
+                <thead>
+                  <tr className="bg-[#1D283A] align-top">
                     {visibleClosureTableColumns.map(renderDraggableClosureHeader)}
                   </tr>
                 </thead>
