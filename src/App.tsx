@@ -35,7 +35,8 @@ import {
   subMonths,
   startOfYear,
   endOfYear,
-  startOfWeek
+  startOfWeek,
+  differenceInCalendarDays
 } from 'date-fns';
 import { es } from 'date-fns/locale';
 import {
@@ -183,6 +184,9 @@ const PERSEO_REPORTS_LIVE_LIMIT = 180;
 const PERSEO_REPORTS_REFRESH_MS = 5 * 60_000;
 const TRIPS_LIVE_LIMIT = 250;
 const BANQUITOS_STORE_SNAPSHOT_ID = 'banquitos_store_closures';
+// Un corte que lleva mas de este tiempo en tienda es un rezagado olvidado, no parte
+// del efectivo que se esta acumulando para el proximo viaje.
+const STALE_STORE_CLOSURE_DAYS = 60;
 
 const roundMoney = (value: unknown) => {
   const amount = Number(value || 0);
@@ -451,6 +455,22 @@ const getClosureAuditInfo = (closure: ShiftClosure) => {
 
 const calculateClosureDifference = (closure: Partial<ShiftClosure>) =>
   (Number(closure.physicalAmount) || 0) - (Number(closure.systemBalance) || 0);
+
+// El saldo esperado solo se conoce si Perseo reporto o si se cargo a mano. Sin ese dato
+// la diferencia no existe: restar contra cero convierte el efectivo contado en un
+// "sobrante" que nunca ocurrio.
+const hasKnownExpectedBalance = (closure: Partial<ShiftClosure>) => {
+  const systemAmount = Math.abs(Number(closure.systemAmount) || 0);
+  const systemBalance = Math.abs(Number(closure.systemBalance) || 0);
+  const transferAmount = transferPdvAmount(closure.transferAmount);
+
+  // Saldo esperado en cero con venta registrada y sin transferencia declarada: el reporte
+  // de Perseo llego incompleto. No es un cuadre real en cero.
+  if (systemBalance <= 0.009 && systemAmount > 0.009 && transferAmount <= 0.009) return false;
+
+  if (closure.systemSource === 'perseo' || closure.perseoReportId) return true;
+  return systemAmount > 0.009 || systemBalance > 0.009;
+};
 
 const toNonNegativeNumber = (value: unknown) => {
   const parsed = Number(value);
@@ -929,6 +949,9 @@ function AppContent() {
           date: (raw.date as Timestamp).toDate().toISOString(),
           cashBoxBalancesUpdatedAt: raw.cashBoxBalancesUpdatedAt?.toDate
             ? raw.cashBoxBalancesUpdatedAt.toDate().toISOString()
+            : undefined,
+          statusUpdatedAt: raw.statusUpdatedAt?.toDate
+            ? raw.statusUpdatedAt.toDate().toISOString()
             : undefined
         };
       }) as ShiftClosure[];
@@ -1057,13 +1080,6 @@ function AppContent() {
 
     oscillator.start();
     oscillator.stop(audioContext.currentTime + 0.2);
-  };
-
-  const getNextStatus = (currentStatus: string) => {
-    if (currentStatus === 'safe') return 'transit';
-    if (currentStatus === 'transit') return 'bank';
-    if (currentStatus === 'bank') return 'banquitos';
-    return 'safe';
   };
 
   const handleExportCSV = async () => {
@@ -1257,6 +1273,29 @@ function AppContent() {
     .filter((entry): entry is { closure: ShiftClosure; safeAmount: number } => Boolean(entry))
     .sort((left, right) => right.closure.date.localeCompare(left.closure.date)),
   [closures, closureLedgerById, isClosureAvailableForTrip]);
+
+  // Desde cuando se esta acumulando efectivo en tienda. Los cortes muy viejos se apartan
+  // para que no arrastren la fecha de inicio meses hacia atras.
+  const storePendingWindow = useMemo(() => {
+    const today = new Date();
+    const dated = storePendingClosures
+      .map(entry => ({ entry, parsed: parseISO(entry.closure.date) }))
+      .filter(item => !Number.isNaN(item.parsed.getTime()));
+    if (dated.length === 0) return null;
+
+    const recent = dated.filter(item => differenceInCalendarDays(today, item.parsed) <= STALE_STORE_CLOSURE_DAYS);
+    const stale = dated.filter(item => differenceInCalendarDays(today, item.parsed) > STALE_STORE_CLOSURE_DAYS);
+    const reference = recent.length > 0 ? recent : dated;
+    const oldest = reference[reference.length - 1];
+
+    return {
+      since: oldest.parsed,
+      days: differenceInCalendarDays(today, oldest.parsed),
+      count: reference.length,
+      staleCount: recent.length > 0 ? stale.length : 0,
+      staleAmount: recent.length > 0 ? roundMoney(stale.reduce((total, item) => total + item.entry.safeAmount, 0)) : 0
+    };
+  }, [storePendingClosures]);
 
   const showAllStoreClosures = useCallback(() => {
     setFilterDateRangeType('siempre');
@@ -1659,6 +1698,7 @@ function AppContent() {
       transferAmount,
       purchaseDetails,
       difference,
+      hasExpected: Boolean(reportTotals) || items.some(hasKnownExpectedBalance),
       latestPhoto,
       photoCount,
       responsibles,
@@ -1728,13 +1768,22 @@ function AppContent() {
           difference: 0
         });
         totals.difference = Number((totals.physicalAmount - totals.systemBalance).toFixed(2));
+        const hasExpected = Boolean(perseoDailyTotals) || sortedItems.some(hasKnownExpectedBalance);
 
         const status = getDayStatusFromItems(sortedItems);
 
-        return { date, items: sortedItems, missingRows, totals, purchaseDetails: perseoDailyTotals?.purchaseDetails || [], status };
+        return { date, items: sortedItems, missingRows, totals, hasExpected, purchaseDetails: perseoDailyTotals?.purchaseDetails || [], status };
       });
   }, [filteredClosures, derivedClosureStatusById, closureLedgerById, missingPerseoClosuresByDate, perseoDailyTotalsByDate, filterStartDate, filterEndDate, filterDateRangeType, filterResponsible, debouncedSearchTerm, filterAudit, filterStatus, showOnlyStoreClosures]);
 
+  // Los dias sin saldo esperado no aportan diferencia: sumarlos convierte el efectivo
+  // contado en un sobrante inexistente.
+  const auditedDays = useMemo(() => groupedClosures.filter(group => group.hasExpected), [groupedClosures]);
+  const auditedDayCount = auditedDays.length;
+  const auditedDifferenceTotal = useMemo(
+    () => Number(auditedDays.reduce((acc, group) => acc + group.totals.difference, 0).toFixed(2)),
+    [auditedDays]
+  );
 
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
     const closureMoney = status === 'personal'
@@ -2450,21 +2499,6 @@ function AppContent() {
     setStatusUpdateError(message);
   };
 
-  const toggleStatus = async (id: string) => {
-    const closure = closures.find(c => c.id === id);
-    if (!closure) return;
-
-    const currentStatus = derivedClosureStatusById[id] || normalizeClosureCashBoxStatus(closure.status);
-    const nextStatus = getNextStatus(currentStatus);
-    playSound(nextStatus);
-
-    try {
-      await persistClosureStatusChanges([closure], nextStatus);
-    } catch (err) {
-      showClosureStatusError(err);
-    }
-  };
-
   const setClosureStatus = async (id: string, status: ClosureCashBoxStatus) => {
     const closure = closures.find(c => c.id === id);
     if (!closure) return;
@@ -2481,24 +2515,6 @@ function AppContent() {
   const toggleDay = (day: string) => {
     setExpandedDays(prev => ({ ...prev, [day]: !prev[day] }));
   };
-  const toggleDayStatus = async (dayString: string) => {
-    const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
-    const currentStatus = getDayStatusFromItems(items);
-    if (currentStatus === 'mixed') {
-      alert('Este dia tiene cierres en estado mixto. Ajusta cada movimiento parcial antes de cambiar todo el dia.');
-      return;
-    }
-    const nextStatus = getNextStatus(currentStatus);
-
-    playSound(nextStatus);
-
-    try {
-      await persistClosureStatusChanges(items, nextStatus);
-    } catch (err) {
-      showClosureStatusError(err);
-    }
-  };
-
   const setDayStatus = async (dayString: string, status: ClosureCashBoxStatus) => {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
     if (!items.length) return;
@@ -2736,11 +2752,22 @@ Notas: ${closure.notes || 'N/A'}`;
           ? 'Banco'
           : 'Banquitos';
 
-  const renderDifferenceBadge = (value: number | undefined, pending = false) => {
+  const renderDifferenceBadge = (value: number | null | undefined, pending = false) => {
     if (pending) {
       return (
         <div className="inline-flex px-2.5 py-1 rounded-full text-[9px] font-black border bg-amber-500/10 text-amber-400 border-amber-500/20 whitespace-nowrap">
           Falta revisar
+        </div>
+      );
+    }
+
+    if (value === null) {
+      return (
+        <div
+          title="Sin saldo esperado: falta el reporte de Perseo, no hay diferencia que calcular."
+          className="inline-flex px-2.5 py-1 rounded-full text-[9px] font-black border bg-slate-500/10 text-slate-500 border-slate-500/20 whitespace-nowrap"
+        >
+          Sin dato
         </div>
       );
     }
@@ -2968,7 +2995,7 @@ Notas: ${closure.notes || 'N/A'}`;
       case 'reportedAmount':
         return <td key={column} className={cellClass(column, amountCellClass)}>${(group.totals.reportedAmount || 0).toLocaleString('es-CL')}</td>;
       case 'difference':
-        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(group.totals.difference)}</td>;
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(group.hasExpected ? group.totals.difference : null)}</td>;
       case 'status': {
         const containsBanquitos = group.items.some(item => {
           if (!item.id) return normalizeClosureCashBoxStatus(item.status) === 'banquitos';
@@ -3187,7 +3214,7 @@ Notas: ${closure.notes || 'N/A'}`;
       case 'reportedAmount':
         return <td key={column} className={cellClass(column, amountCellClass)}>${displayReportedAmount.toLocaleString('es-CL')}</td>;
       case 'difference':
-        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(displayDifference)}</td>;
+        return <td key={column} className={cellClass(column)}>{renderDifferenceBadge(hasKnownExpectedBalance(displayClosureForAudit) ? displayDifference : null)}</td>;
       case 'status': {
         const currentStatus = closure.id
           ? derivedClosureStatusById[closure.id] || normalizeClosureCashBoxStatus(closure.status)
@@ -3221,6 +3248,18 @@ Notas: ${closure.notes || 'N/A'}`;
                 );
               })}
             </div>
+            {(() => {
+              const movedAt = closure.statusUpdatedAt ? parseISO(closure.statusUpdatedAt) : null;
+              if (!movedAt || Number.isNaN(movedAt.getTime())) return null;
+              return (
+                <p
+                  className="mt-1 text-center text-[8px] font-bold uppercase tracking-widest text-slate-600"
+                  title={`Ultimo cambio de estado: ${format(movedAt, "d 'de' MMMM yyyy, HH:mm", { locale: es })}`}
+                >
+                  Movido {format(movedAt, 'd MMM', { locale: es })}
+                </p>
+              );
+            })()}
           </td>
         );
       }
@@ -3980,13 +4019,19 @@ Notas: ${closure.notes || 'N/A'}`;
                   { label: 'Enviado a compras', value: todayAuditSummary.transferAmount, color: 'text-blue-300' },
                   { label: 'Efectivo esperado', value: todayAuditSummary.systemBalance, color: 'text-white' },
                   { label: 'Efectivo en foto', value: todayAuditSummary.physicalAmount, color: 'text-white' },
-                  { label: 'Diferencia', value: todayAuditSummary.difference, color: Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300' },
+                  { label: 'Diferencia', value: todayAuditSummary.difference, color: Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300', unknown: !todayAuditSummary.hasExpected },
                 ].map(metric => (
                   <div key={metric.label} className="rounded-2xl border border-white/5 bg-slate-950/20 px-4 py-3">
                     <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{metric.label}</p>
-                    <p className={`mt-2 text-lg font-black font-sans ${metric.color}`}>
-                      {metric.label === 'Diferencia' && metric.value >= 0 ? '+' : ''}${metric.value.toLocaleString('es-CL')}
-                    </p>
+                    {metric.unknown ? (
+                      <p className="mt-2 text-lg font-black text-slate-500" title="Sin saldo esperado: falta el reporte de Perseo.">
+                        Sin dato
+                      </p>
+                    ) : (
+                      <p className={`mt-2 text-lg font-black font-sans ${metric.color}`}>
+                        {metric.label === 'Diferencia' && metric.value >= 0 ? '+' : ''}${metric.value.toLocaleString('es-CL')}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
@@ -4042,6 +4087,23 @@ Notas: ${closure.notes || 'N/A'}`;
                   </div>
                   <p className="text-xl font-black text-blue-200 font-sans">${accumulatedSafeTotal.toLocaleString('es-CL')}</p>
                 </div>
+                {storePendingWindow && (
+                  <div className="mt-4 rounded-2xl border border-blue-500/15 bg-blue-500/[0.06] px-3 py-2.5">
+                    <p className="text-[11px] font-black text-blue-100">
+                      Acumulando desde el {format(storePendingWindow.since, "EEEE d 'de' MMMM", { locale: es })}
+                    </p>
+                    <p className="mt-0.5 text-[11px] font-bold text-slate-400">
+                      {storePendingWindow.days <= 0
+                        ? 'Retirado hoy mismo'
+                        : `${storePendingWindow.days} ${storePendingWindow.days === 1 ? 'dia' : 'dias'} sin retirar`}
+                    </p>
+                    {storePendingWindow.staleCount > 0 && (
+                      <p className="mt-2 text-[10px] font-bold text-amber-300/90">
+                        Aparte: {storePendingWindow.staleCount} {storePendingWindow.staleCount === 1 ? 'corte rezagado' : 'cortes rezagados'} de mas de {STALE_STORE_CLOSURE_DAYS} dias · ${storePendingWindow.staleAmount.toLocaleString('es-CL')}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
               <button
                 type="button"
@@ -4312,11 +4374,11 @@ Notas: ${closure.notes || 'N/A'}`;
           </AnimatePresence>
 
           <div ref={historySectionRef} className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 sm:gap-6 mb-6 sm:mb-8 text-left scroll-mt-20 sm:scroll-mt-28">
-             <div className="flex-1 min-w-0">
+             <div className="flex-1 min-w-0 lg:min-w-[340px]">
               <h2 className="text-2xl sm:text-3xl font-black text-white mb-1 flex items-center gap-3"><History className="w-7 h-7 sm:w-8 sm:h-8 text-blue-500" /> Historial de cierres</h2>
               <p className="text-slate-500 text-xs sm:text-sm">Consulta cada cierre, su auditoria y el detalle enviado a compras.</p>
             </div>
-            <div className="w-full lg:w-auto">
+            <div className="w-full lg:w-auto lg:min-w-0">
               <div className="grid grid-cols-3 gap-2">
               <button
                 onClick={() => {
@@ -4535,7 +4597,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Efectivo foto</p><p className="mt-1 text-lg font-black text-white">${group.totals.physicalAmount.toLocaleString('es-CL')}</p></div>
                       <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Efectivo esperado</p><p className="mt-1 text-lg font-black text-white">${group.totals.systemBalance.toLocaleString('es-CL')}</p></div>
                       <div className="rounded-xl bg-blue-500/[0.06] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-blue-400">Enviado a compras</p><p className="mt-1 text-lg font-black text-blue-200">${Math.abs(group.totals.transferAmount).toLocaleString('es-CL')}</p></div>
-                      <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Diferencia</p><p className={`mt-1 text-lg font-black ${Math.abs(group.totals.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300'}`}>{group.totals.difference >= 0 ? '+' : ''}${group.totals.difference.toLocaleString('es-CL')}</p></div>
+                      <div className="rounded-xl bg-white/[0.035] p-3"><p className="text-[8px] font-black uppercase tracking-widest text-slate-500">Diferencia</p>{group.hasExpected ? <p className={`mt-1 text-lg font-black ${Math.abs(group.totals.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300'}`}>{group.totals.difference >= 0 ? '+' : ''}${group.totals.difference.toLocaleString('es-CL')}</p> : <p className="mt-1 text-lg font-black text-slate-500" title="Sin saldo esperado: falta el reporte de Perseo.">Sin dato</p>}</div>
                     </div>
                     {group.purchaseDetails.length > 0 && <p className="mt-3 text-[9px] font-black uppercase tracking-widest text-blue-400">{group.purchaseDetails.length} detalle{group.purchaseDetails.length === 1 ? '' : 's'} de compra · toca para abrir</p>}
                   </button>
@@ -4979,8 +5041,11 @@ Notas: ${closure.notes || 'N/A'}`;
                 </div>
                 <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
                   <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Total Diferencias</p>
-                  <p className={`text-3xl font-black font-sans ${groupedClosures.reduce((a,b) => a+b.totals.difference, 0) < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                    ${groupedClosures.reduce((a,b) => a+b.totals.difference, 0).toLocaleString('es-CL')}
+                  <p className={`text-3xl font-black font-sans ${auditedDifferenceTotal < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                    ${auditedDifferenceTotal.toLocaleString('es-CL')}
+                  </p>
+                  <p className="mt-1 text-[10px] font-bold text-slate-400">
+                    Solo dias con saldo esperado ({auditedDayCount} de {groupedClosures.length})
                   </p>
                 </div>
                 <div className="bg-slate-50 p-6 rounded-3xl border border-slate-100">

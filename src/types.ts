@@ -14,6 +14,7 @@ export interface ShiftClosure {
   tripId?: string;
   cashBoxBalances?: Partial<Record<'safe' | 'transit' | 'bank' | 'banquitos', number>>;
   cashBoxBalancesUpdatedAt?: string;
+  statusUpdatedAt?: string;
   systemSource?: 'perseo' | 'manual' | string;
   perseoReportId?: string | null;
   perseoMatchedAt?: string;
