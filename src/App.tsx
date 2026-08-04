@@ -2831,7 +2831,7 @@ Notas: ${closure.notes || 'N/A'}`;
           setDraggedClosureColumn(null);
         }}
         onDragEnd={() => setDraggedClosureColumn(null)}
-        className={`sticky top-20 z-20 px-3 py-3 text-[9px] font-black text-slate-500 uppercase tracking-widest border-r border-b border-white/5 bg-[#1D283A] ${alignClass} ${config.widthClass} select-none ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${isDragging ? 'bg-blue-500/10 text-blue-300' : ''}`}
+        className={`sticky top-0 z-20 px-3 py-3 text-[9px] font-black text-slate-500 uppercase tracking-widest border-r border-b border-white/5 bg-[#1D283A] ${alignClass} ${config.widthClass} select-none ${canDrag ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'} ${isDragging ? 'bg-blue-500/10 text-blue-300' : ''}`}
         title={`${config.description} ${canDrag ? 'Arrastra para mover esta columna.' : 'Columna fija.'}`}
       >
         {isFilterable
