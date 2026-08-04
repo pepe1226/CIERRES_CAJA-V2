@@ -1287,6 +1287,37 @@ function AppContent() {
     .slice(0, 100),
   [closures, closureLedgerById, isClosureAvailableForTrip]);
 
+  // El viaje no guarda que dias se llevo, solo la fecha que se tecleo al crearlo.
+  // El rango real se deriva de los cierres que arrastro.
+  const tripCoverageById = useMemo(() => {
+    const coverage: Record<string, { from: string; to: string; count: number }> = {};
+    closures.forEach(closure => {
+      if (!closure.tripId) return;
+      const parsed = parseISO(closure.date);
+      if (Number.isNaN(parsed.getTime())) return;
+      const day = format(parsed, 'yyyy-MM-dd');
+      const current = coverage[closure.tripId];
+      if (!current) {
+        coverage[closure.tripId] = { from: day, to: day, count: 1 };
+        return;
+      }
+      if (day < current.from) current.from = day;
+      if (day > current.to) current.to = day;
+      current.count += 1;
+    });
+    return coverage;
+  }, [closures]);
+
+  const lastTripCoverage = useMemo(() => {
+    let latest: { to: string; description: string } | null = null;
+    trips.forEach(trip => {
+      const coverage = trip.id ? tripCoverageById[trip.id] : undefined;
+      if (!coverage) return;
+      if (!latest || coverage.to > latest.to) latest = { to: coverage.to, description: trip.description };
+    });
+    return latest as { to: string; description: string } | null;
+  }, [trips, tripCoverageById]);
+
   const storePendingClosures = useMemo(() => closures
     .map(closure => {
       if (!closure.id || !isClosureAvailableForTrip(closure)) return null;
@@ -1320,6 +1351,15 @@ function AppContent() {
       staleAmount: recent.length > 0 ? roundMoney(stale.reduce((total, item) => total + item.entry.safeAmount, 0)) : 0
     };
   }, [storePendingClosures]);
+
+  const formatCoverageRange = (coverage: { from: string; to: string } | null | undefined) => {
+    if (!coverage) return null;
+    const from = parseISO(`${coverage.from}T12:00:00`);
+    const to = parseISO(`${coverage.to}T12:00:00`);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null;
+    if (coverage.from === coverage.to) return format(to, "d 'de' MMMM", { locale: es });
+    return `${format(from, 'd MMM', { locale: es })} al ${format(to, "d 'de' MMMM", { locale: es })}`;
+  };
 
   const showAllStoreClosures = useCallback(() => {
     setFilterDateRangeType('siempre');
@@ -4132,6 +4172,11 @@ Notas: ${closure.notes || 'N/A'}`;
                         ? 'Retirado hoy mismo'
                         : `${storePendingWindow.days} ${storePendingWindow.days === 1 ? 'dia' : 'dias'} sin retirar`}
                     </p>
+                    {lastTripCoverage && (
+                      <p className="mt-2 border-t border-blue-500/10 pt-2 text-[10px] font-bold text-slate-400">
+                        Ultimo retiro: se llevo hasta el {formatCoverageRange({ from: lastTripCoverage.to, to: lastTripCoverage.to })}
+                      </p>
+                    )}
                     {storePendingWindow.staleCount > 0 && (
                       <p className="mt-2 text-[10px] font-bold text-amber-300/90">
                         Aparte: {storePendingWindow.staleCount} {storePendingWindow.staleCount === 1 ? 'corte rezagado' : 'cortes rezagados'} de mas de {STALE_STORE_CLOSURE_DAYS} dias · ${storePendingWindow.staleAmount.toLocaleString('es-CL')}
@@ -4888,6 +4933,16 @@ Notas: ${closure.notes || 'N/A'}`;
                                  <Calendar className="w-3 h-3" />
                                  {format(parseISO(trip.startDate), 'dd MMMM yyyy', { locale: es })}
                                </div>
+                               {(() => {
+                                 const coverage = trip.id ? tripCoverageById[trip.id] : undefined;
+                                 const range = formatCoverageRange(coverage);
+                                 if (!range || !coverage) return null;
+                                 return (
+                                   <p className="mt-1 text-[10px] font-bold text-blue-300/80">
+                                     Se llevo los cortes del {range} · {coverage.count} {coverage.count === 1 ? 'corte' : 'cortes'}
+                                   </p>
+                                 );
+                               })()}
                              </div>
                            </div>
                            <div className="text-right">
@@ -4912,6 +4967,16 @@ Notas: ${closure.notes || 'N/A'}`;
                            <div>
                              <h3 className="text-2xl font-black text-white uppercase tracking-tight">{trip.description}</h3>
                              <p className="text-xs text-blue-400 font-black uppercase tracking-widest mt-1">{format(parseISO(trip.startDate), 'dd MMMM yyyy', { locale: es })}</p>
+                             {(() => {
+                               const coverage = trip.id ? tripCoverageById[trip.id] : undefined;
+                               const range = formatCoverageRange(coverage);
+                               if (!range || !coverage) return null;
+                               return (
+                                 <p className="mt-1 text-[11px] font-bold text-slate-400">
+                                   Se llevo los cortes del {range} · {coverage.count} {coverage.count === 1 ? 'corte' : 'cortes'}
+                                 </p>
+                               );
+                             })()}
                            </div>
                          </div>
                          <div className="flex gap-3">
