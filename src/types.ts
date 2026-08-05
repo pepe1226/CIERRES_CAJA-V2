@@ -46,7 +46,6 @@ export interface Movement {
   type: 'inflow' | 'outflow' | 'transfer' | 'internal_transfer';
   category?: string;
   subcategory?: string;
-  tags?: string[];
   amount: number;
   description: string;
   createdBy: string;

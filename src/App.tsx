@@ -484,21 +484,20 @@ const toNonNegativeNumber = (value: unknown) => {
 type ExpenseClassificationRule = {
   category: string;
   subcategory: string;
-  tags: string[];
   terms: string[];
 };
 const EXPENSE_CLASSIFICATION_RULES: ExpenseClassificationRule[] = [
-  { category: 'Gastos personales', subcategory: 'GENERAL PERSONAL', tags: ['PERSONAL'], terms: ['gasto personal', 'gastos personales', 'retiro personal', 'para mi', 'mio', 'personal mio', 'personal jose', 'uso personal'] },
-  { category: 'Sueldos', subcategory: 'NOMINA', tags: ['PERSONAL', 'SUELDOS'], terms: ['sueldo', 'salario', 'nomina', 'pago empleado', 'anticipo', 'decimo', 'beneficio'] },
-  { category: 'Arriendo', subcategory: 'LOCAL', tags: ['LOCAL', 'FIJO'], terms: ['arriendo', 'alquiler', 'renta', 'local'] },
-  { category: 'Luz', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['luz', 'energia', 'electrica', 'empresa electrica'] },
-  { category: 'Agua', subcategory: 'SERVICIOS BASICOS', tags: ['SERVICIOS', 'FIJO'], terms: ['agua', 'interagua'] },
-  { category: 'Internet', subcategory: 'CONECTIVIDAD', tags: ['SERVICIOS', 'FIJO'], terms: ['internet', 'wifi', 'cnt', 'claro', 'netlife', 'fibra'] },
-  { category: 'Transporte', subcategory: 'MOVILIZACION', tags: ['OPERACION', 'TRANSPORTE'], terms: ['taxi', 'uber', 'flete', 'envio', 'gasolina', 'combustible', 'parqueo', 'peaje', 'bus'] },
-  { category: 'Insumos', subcategory: 'COMPRAS', tags: ['OPERACION', 'INSUMOS'], terms: ['insumo', 'compra', 'proveedor', 'material', 'fundas', 'papeleria', 'limpieza', 'cinta'] },
-  { category: 'Mantenimiento', subcategory: 'REPARACION', tags: ['OPERACION', 'MANTENIMIENTO'], terms: ['mantenimiento', 'reparacion', 'arreglo', 'tecnico', 'equipo'] },
-  { category: 'Banco', subcategory: 'COMISIONES', tags: ['BANCO', 'COMISION'], terms: ['comision', 'banco', 'transferencia bancaria', 'deposito', 'retiro'] },
-  { category: 'Impuestos', subcategory: 'SRI', tags: ['IMPUESTOS'], terms: ['sri', 'iva', 'impuesto', 'patente', 'municipio'] },
+  { category: 'Gastos personales', subcategory: 'GENERAL PERSONAL', terms: ['gasto personal', 'gastos personales', 'retiro personal', 'para mi', 'mio', 'personal mio', 'personal jose', 'uso personal'] },
+  { category: 'Sueldos', subcategory: 'NOMINA', terms: ['sueldo', 'salario', 'nomina', 'pago empleado', 'anticipo', 'decimo', 'beneficio'] },
+  { category: 'Arriendo', subcategory: 'LOCAL', terms: ['arriendo', 'alquiler', 'renta', 'local'] },
+  { category: 'Luz', subcategory: 'SERVICIOS BASICOS', terms: ['luz', 'energia', 'electrica', 'empresa electrica'] },
+  { category: 'Agua', subcategory: 'SERVICIOS BASICOS', terms: ['agua', 'interagua'] },
+  { category: 'Internet', subcategory: 'CONECTIVIDAD', terms: ['internet', 'wifi', 'cnt', 'claro', 'netlife', 'fibra'] },
+  { category: 'Transporte', subcategory: 'MOVILIZACION', terms: ['taxi', 'uber', 'flete', 'envio', 'gasolina', 'combustible', 'parqueo', 'peaje', 'bus'] },
+  { category: 'Insumos', subcategory: 'COMPRAS', terms: ['insumo', 'compra', 'proveedor', 'material', 'fundas', 'papeleria', 'limpieza', 'cinta'] },
+  { category: 'Mantenimiento', subcategory: 'REPARACION', terms: ['mantenimiento', 'reparacion', 'arreglo', 'tecnico', 'equipo'] },
+  { category: 'Banco', subcategory: 'COMISIONES', terms: ['comision', 'banco', 'transferencia bancaria', 'deposito', 'retiro'] },
+  { category: 'Impuestos', subcategory: 'SRI', terms: ['sri', 'iva', 'impuesto', 'patente', 'municipio'] },
 ];
 const normalizeExpenseText = (value: string) =>
   value
@@ -508,13 +507,6 @@ const normalizeExpenseText = (value: string) =>
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-const normalizeExpenseTag = (value: string) =>
-  normalizeExpenseText(value)
-    .toUpperCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-const mergeExpenseTags = (tags: Array<string | undefined | null>) =>
-  Array.from(new Set(tags.map(tag => tag ? normalizeExpenseTag(tag) : '').filter(Boolean))).slice(0, 8);
 const classifyExpenseDescription = (description: string) => {
   const normalized = normalizeExpenseText(description);
   if (!normalized) return null;
@@ -527,14 +519,12 @@ const classifyExpenseDescription = (description: string) => {
   if (!matchedRule || matchedRule.score === 0) {
     return {
       category: 'Otros',
-      subcategory: 'GENERAL',
-      tags: mergeExpenseTags(['SIN CLASIFICAR'])
+      subcategory: 'GENERAL'
     };
   }
   return {
     category: matchedRule.rule.category,
-    subcategory: matchedRule.rule.subcategory,
-    tags: mergeExpenseTags(matchedRule.rule.tags)
+    subcategory: matchedRule.rule.subcategory
   };
 };
 const getMovementDefaults = (
@@ -545,8 +535,7 @@ const getMovementDefaults = (
   const base = {
     amount: toNonNegativeNumber(current.amount),
     description: current.description || '',
-    date: current.date || new Date().toISOString(),
-    tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : []
+    date: current.date || new Date().toISOString()
   };
 
   if (type === 'outflow') {
@@ -559,8 +548,7 @@ const getMovementDefaults = (
       category: current.category || (isPersonalOutflow ? 'Gastos personales' : 'Sueldos'),
       subcategory: current.subcategory || (isPersonalOutflow ? 'GENERAL PERSONAL' : ''),
       from: outflowFrom,
-      to: undefined,
-      tags: Array.isArray(current.tags) ? mergeExpenseTags(current.tags) : isPersonalOutflow ? ['PERSONAL'] : []
+      to: undefined
     };
   }
 
@@ -577,7 +565,6 @@ const getMovementDefaults = (
       type,
       category: undefined,
       subcategory: '',
-      tags: [],
       from,
       to: 'bank'
     };
@@ -595,7 +582,6 @@ const getMovementDefaults = (
     type,
     category: undefined,
     subcategory: '',
-    tags: [],
     from,
     to
   };
@@ -715,7 +701,6 @@ function AppContent() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isAddingNewSubcategory, setIsAddingNewSubcategory] = useState(false);
   const [newSubcategoryName, setNewSubcategoryName] = useState('');
-  const [newExpenseTag, setNewExpenseTag] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [isEditingCategories, setIsEditingCategories] = useState(false);
 
@@ -738,8 +723,7 @@ function AppContent() {
     description: '',
     date: new Date().toISOString(),
     category: 'Sueldos',
-    subcategory: '',
-    tags: []
+    subcategory: ''
   });
 
   const applySmartExpenseDescription = (description: string) => {
@@ -749,25 +733,8 @@ function AppContent() {
       description,
       ...(prev.type === 'outflow' && suggestion ? {
         category: suggestion.category,
-        subcategory: suggestion.subcategory,
-        tags: mergeExpenseTags([...(prev.tags || []), ...suggestion.tags])
+        subcategory: suggestion.subcategory
       } : {})
-    }));
-  };
-  const addExpenseTag = () => {
-    const tag = normalizeExpenseTag(newExpenseTag);
-    if (!tag) return;
-    setMovementValues(prev => ({
-      ...prev,
-      tags: mergeExpenseTags([...(prev.tags || []), tag])
-    }));
-    setNewExpenseTag('');
-  };
-  const removeExpenseTag = (tagToRemove: string) => {
-    const normalized = normalizeExpenseTag(tagToRemove);
-    setMovementValues(prev => ({
-      ...prev,
-      tags: (prev.tags || []).filter(tag => normalizeExpenseTag(tag) !== normalized)
     }));
   };
 
@@ -2000,7 +1967,6 @@ function AppContent() {
       tripId: c.tripId,
       category: undefined,
       subcategory: undefined,
-      tags: undefined,
       from: undefined,
       to: displayStatus
     };
@@ -2494,7 +2460,6 @@ function AppContent() {
       setNewCategoryName('');
       setIsAddingNewSubcategory(false);
       setNewSubcategoryName('');
-      setNewExpenseTag('');
       setFormError(null);
     } catch (err: any) {
       console.error('Error saving movement:', err);
@@ -3610,7 +3575,6 @@ Notas: ${closure.notes || 'N/A'}`;
                         </span>
                         {m.category && <span>{m.category}</span>}
                         {m.subcategory && <span>{m.subcategory}</span>}
-                        {m.tags?.map(tag => <span key={tag}>{tag}</span>)}
                       </div>
                       <p className="text-[10px] font-bold text-slate-400 uppercase mt-2">
                         {m.source === 'closure'
@@ -5537,38 +5501,6 @@ Notas: ${closure.notes || 'N/A'}`;
                         </button>
                       )}
 
-                      <div>
-                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Etiquetas para reportes</label>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={newExpenseTag}
-                            onChange={e => setNewExpenseTag(e.target.value)}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                addExpenseTag();
-                              }
-                            }}
-                            placeholder="Ej: OPERACION, FIJO, BANCO"
-                            className="flex-1 px-4 py-3 bg-white/5 border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
-                          />
-                          <button onClick={addExpenseTag} className="px-4 py-3 bg-purple-600 rounded-2xl text-white">
-                            <Plus className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {(movementValues.tags || []).map(tag => (
-                            <button
-                              key={tag}
-                              onClick={() => removeExpenseTag(tag)}
-                              className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-slate-300 text-[10px] font-black uppercase tracking-widest hover:border-rose-500/40 hover:text-rose-300 transition-colors"
-                            >
-                              {tag} x
-                            </button>
-                          ))}
-                        </div>
-                      </div>
                     </div>
                   )}
                   {formError && (
@@ -5587,7 +5519,6 @@ Notas: ${closure.notes || 'N/A'}`;
                     setNewCategoryName('');
                     setIsAddingNewSubcategory(false);
                     setNewSubcategoryName('');
-                    setNewExpenseTag('');
                   }} className="flex-1 py-4 text-slate-400 font-black">Cancelar</button><button onClick={handleSaveMovement} className="flex-[2] bg-purple-600 text-white py-4 rounded-2xl font-black">Registrar</button></div>
                 </div>
               </motion.div>

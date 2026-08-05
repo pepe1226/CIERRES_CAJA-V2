@@ -76,7 +76,6 @@ const canonicalCategory = (movement: Movement) => {
   const source = [
     movement.category,
     movement.subcategory,
-    ...(movement.tags || []),
     movement.description,
   ].map(normalizeLabel).join(' ');
   const matched = categoryAliases.find(group => group.match.some(term => source.includes(normalizeLabel(term))));
@@ -196,15 +195,13 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
       .sort((a, b) => b.value - a.value);
   }, [filteredMovements]);
 
-  const expensesByTag = useMemo(() => {
+  const expensesBySubcategory = useMemo(() => {
     const data: Record<string, number> = {};
     filteredMovements
       .filter(m => m.type === 'outflow')
       .forEach(m => {
-        const tags = m.tags?.length ? m.tags : ['SIN ETIQUETA'];
-        tags.forEach(tag => {
-          data[tag] = (data[tag] || 0) + m.amount;
-        });
+        const key = (m.subcategory || '').trim().toUpperCase() || 'SIN SUBCATEGORIA';
+        data[key] = (data[key] || 0) + m.amount;
       });
 
     return Object.entries(data)
@@ -591,7 +588,7 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
               </div>
             </motion.div>
 
-            {/* Gastos por Etiqueta */}
+            {/* Gastos por Subcategoria */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -602,10 +599,10 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                 <div className="p-2 bg-blue-500/10 rounded-xl">
                   <Tag className="w-5 h-5 text-blue-400" />
                 </div>
-                <h3 className="text-xl font-black">Gastos por Etiqueta</h3>
+                <h3 className="text-xl font-black">Gastos por Subcategoria</h3>
               </div>
               <div className="space-y-3">
-                {expensesByTag.map((entry, index) => (
+                {expensesBySubcategory.map((entry, index) => (
                   <div key={entry.name} className="flex items-center justify-between gap-4 rounded-2xl bg-white/5 border border-white/5 px-4 py-3">
                     <div className="flex items-center gap-3 min-w-0">
                       <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
@@ -916,11 +913,6 @@ export function Dashboard({ closures, movements, onBack }: DashboardProps) {
                                         {m.subcategory}
                                       </span>
                                     )}
-                                    {m.tags?.map(tag => (
-                                      <span key={tag} className="text-[9px] bg-blue-500/10 text-blue-300 px-2 py-0.5 rounded-lg font-black tracking-widest uppercase">
-                                        {tag}
-                                      </span>
-                                    ))}
                                   </div>
                                   <h4 className="text-white font-black text-sm uppercase leading-tight">{m.description}</h4>
                                 </div>

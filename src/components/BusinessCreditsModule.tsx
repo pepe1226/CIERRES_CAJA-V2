@@ -431,7 +431,6 @@ export function BusinessCreditsModule({ user, onBack, balances }: BusinessCredit
         type: 'outflow',
         category: 'Financiero',
         subcategory: 'Pago credito',
-        tags: ['CREDITO', selectedCredit.lender].filter(Boolean).slice(0, 8),
         amount,
         description: (paymentDraft.description.trim().toUpperCase() || `PAGO CREDITO ${selectedCredit.name}`).slice(0, 500),
         createdBy: user.uid,

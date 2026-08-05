@@ -368,7 +368,6 @@ export function PayrollModule({ user, onBack, balances }: PayrollModuleProps) {
         createdBy: user.uid,
         category: 'Sueldos',
         subcategory: kindSubcategory[paymentDraft.kind],
-        tags: ['PERSONAL', 'EMPLEADO', employee.name, kindLabels[paymentDraft.kind].toUpperCase()],
         from: paymentDraft.from,
         employeeId: employee.id,
         employeeName: employee.name,
