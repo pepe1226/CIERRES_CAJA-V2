@@ -48,7 +48,8 @@ for (const [nombre, fields] of casos) {
   const r = await fetch(`${BASE}/movements`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fields })
+    body: JSON.stringify({ fields }),
+    signal: AbortSignal.timeout(8000)
   });
   console.log(`   ${nombre.padEnd(20)} ${r.status === 200 ? 'GUARDADO ' : 'RECHAZADO'}`);
 }

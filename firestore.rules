@@ -106,7 +106,7 @@ service cloud.firestore {
 
     function isValidMovement(data) {
       return hasRequiredFields(['date', 'type', 'amount', 'description', 'createdBy']) &&
-             hasOnlyAllowedFields(['id', 'date', 'type', 'category', 'subcategory', 'amount', 'description', 'createdBy', 'createdAt', 'from', 'to', 'source', 'closureId', 'telegramProvider', 'telegramRequiresReview', 'telegramConfidence', 'telegramReviewReasons', 'telegramRawExtraction', 'telegramChatId', 'telegramMessageId', 'telegramUserId', 'telegramUserName', 'telegramFirstName', 'telegramFileId', 'telegramFileUniqueId', 'telegramFilePath']) &&
+             hasOnlyAllowedFields(['id', 'date', 'type', 'category', 'subcategory', 'amount', 'description', 'createdBy', 'createdAt', 'from', 'to', 'source', 'closureId', 'creditId', 'creditName', 'creditInstallmentNumber', 'employeeId', 'employeeName', 'payrollKind', 'payrollPeriod', 'telegramProvider', 'telegramRequiresReview', 'telegramConfidence', 'telegramReviewReasons', 'telegramRawExtraction', 'telegramChatId', 'telegramMessageId', 'telegramUserId', 'telegramUserName', 'telegramFirstName', 'telegramFileId', 'telegramFileUniqueId', 'telegramFilePath']) &&
              (data.date is timestamp || data.date is string) &&
              data.type in ['inflow', 'outflow', 'transfer', 'internal_transfer'] &&
              data.amount is number && data.amount >= 0 &&
@@ -117,6 +117,15 @@ service cloud.firestore {
              (!('from' in data) || (data.from is string)) &&
              (!('to' in data) || (data.to is string)) &&
              (!('source' in data) || data.source is string) &&
+             // Pagos de credito: enlazan el movimiento con su credito y su cuota.
+             (!('creditId' in data) || data.creditId is string) &&
+             (!('creditName' in data) || (data.creditName is string && data.creditName.size() <= 200)) &&
+             (!('creditInstallmentNumber' in data) || data.creditInstallmentNumber is int) &&
+             // Pagos de nomina: enlazan el movimiento con el empleado y el periodo.
+             (!('employeeId' in data) || data.employeeId is string) &&
+             (!('employeeName' in data) || (data.employeeName is string && data.employeeName.size() <= 200)) &&
+             (!('payrollKind' in data) || (data.payrollKind is string && data.payrollKind.size() <= 50)) &&
+             (!('payrollPeriod' in data) || (data.payrollPeriod is string && data.payrollPeriod.size() <= 20)) &&
              (!('telegramProvider' in data) || data.telegramProvider is string) &&
              (!('telegramRequiresReview' in data) || data.telegramRequiresReview is bool) &&
              (!('telegramConfidence' in data) || data.telegramConfidence is number) &&
