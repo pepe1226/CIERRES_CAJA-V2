@@ -1,8 +1,8 @@
 import { getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { FieldValue } from "firebase-admin/firestore";
-import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
-import { computeTripSpend, planTripCompletion } from "../_lib/tripCompletion.js";
+import { getFirebaseAdminDb } from "./firebaseAdmin.js";
+import { computeTripSpend, planTripCompletion } from "./tripCompletion.js";
 
 /**
  * Cierra un viaje de recoleccion en una sola transaccion.
@@ -42,7 +42,7 @@ const toIso = (value: any) => {
   return String(value);
 };
 
-export default async function handler(req: any, res: any) {
+export async function handleTripCompletion(req: any, res: any) {
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }

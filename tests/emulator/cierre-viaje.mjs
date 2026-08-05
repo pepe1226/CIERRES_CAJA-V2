@@ -102,7 +102,7 @@ let d = await leer();
 mostrar('Antes de cerrar:', d.closures, d.movements);
 
 // ------------------------------------------- handler real, con auth simulada
-const { default: handler } = await import('../../api/trips/complete.ts');
+const { handleTripCompletion: handler } = await import('../../api/_lib/tripCompletionHandler.ts');
 
 let respuesta = null;
 const res = {

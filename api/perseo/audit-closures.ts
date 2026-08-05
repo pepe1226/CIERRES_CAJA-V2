@@ -5,6 +5,7 @@ import {
   savePerseoReport,
 } from "../_lib/perseoAudit.js";
 import { handleClosureStatus } from "../_lib/closureStatus.js";
+import { handleTripCompletion } from "../_lib/tripCompletionHandler.js";
 import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import { getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
@@ -89,6 +90,9 @@ export default async function handler(req: any, res: any) {
   const body = getBody(req);
   if (body?.action === "closure_status") {
     return handleClosureStatus(req, res);
+  }
+  if (body?.action === "complete_trip") {
+    return handleTripCompletion(req, res);
   }
   if (body?.action === "list_reports") {
     return handleReportList(req, res, body?.limit);

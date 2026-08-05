@@ -2122,13 +2122,15 @@ function AppContent() {
       if (!firebaseUser) throw new Error('La sesion de Firebase no esta disponible.');
       const token = await firebaseUser.getIdToken();
 
-      const response = await fetch('/api/trips/complete', {
+      // Va como accion del endpoint de auditoria y no como ruta propia: el plan
+      // Hobby de Vercel admite 12 funciones y ya estaban las 12.
+      const response = await fetch('/api/perseo/audit-closures', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ tripId })
+        body: JSON.stringify({ action: 'complete_trip', tripId })
       });
 
       const result = await response.json().catch(() => ({}));
