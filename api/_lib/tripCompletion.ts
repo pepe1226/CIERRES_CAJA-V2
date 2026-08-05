@@ -45,6 +45,63 @@ const primaryBox = (balances: ClosureBalances): CashBox => {
     balances[box] > balances[best] + EPSILON ? box : best, 'safe' as CashBox);
 };
 
+export type MovementInput = {
+  type: string;
+  from?: string | null;
+  amount: number;
+  /** Fecha ISO. */
+  date: string;
+  tripId?: string | null;
+};
+
+/** Misma normalizacion de cajas que usa la app (acepta acentos y sinonimos). */
+export const normalizeBox = (value?: string | null): CashBox | 'personal' => {
+  const s = String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .trim();
+
+  if (['bank', 'banco', 'en banco'].includes(s)) return 'bank';
+  if (['transit', 'transito', 'en transito', 'camino', 'viaje'].includes(s)) return 'transit';
+  if (['banquitos', 'banquitos tmch', 'en banquitos'].includes(s)) return 'banquitos';
+  if (['personal', 'caja personal', 'mi caja', 'gasto personal', 'gastos personales'].includes(s)) return 'personal';
+  return 'safe';
+};
+
+/**
+ * Gasto hecho con el dinero que se llevaba encima.
+ *
+ * Se atribuye por ventana de fechas porque los movimientos no guardan a que viaje
+ * pertenecen: las reglas de Firestore no admiten ese campo. Los viajes son
+ * secuenciales (solo uno en transito a la vez), asi que la ventana alcanza. Si el
+ * movimiento trae tripId, ese manda.
+ */
+export function computeTripSpend(
+  trip: { id: string; startDate: string; completionDate?: string },
+  movements: MovementInput[],
+  now: number = Date.now()
+): number {
+  const start = new Date(trip.startDate).getTime();
+  if (Number.isNaN(start)) return 0;
+
+  const end = trip.completionDate ? new Date(trip.completionDate).getTime() : now;
+  if (Number.isNaN(end)) return 0;
+
+  return roundMoney(movements.reduce((total, movement) => {
+    if (movement.type !== 'outflow') return total;
+    if (normalizeBox(movement.from) !== 'transit') return total;
+
+    if (movement.tripId) {
+      return movement.tripId === trip.id ? total + (Number(movement.amount) || 0) : total;
+    }
+
+    const when = new Date(movement.date).getTime();
+    if (Number.isNaN(when) || when < start || when > end) return total;
+    return total + (Number(movement.amount) || 0);
+  }, 0));
+}
+
 export type TripCompletionPlan = {
   /** Lo que llevaba el viaje encima. */
   carried: number;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { planTripCompletion, type ClosureInput } from '../api/_lib/tripCompletion.ts';
+import { computeTripSpend, normalizeBox, planTripCompletion, type ClosureInput, type MovementInput } from '../api/_lib/tripCompletion.ts';
 
 const cierre = (id: string, dia: string, transit: number): ClosureInput => ({
   id,
@@ -125,6 +125,74 @@ test('saldos ausentes o corruptos se tratan como cero', () => {
 
   assert.equal(plan.carried, 0);
   assert.equal(plan.deposited, 0);
+});
+
+// ------------------------------------------------ atribucion del gasto al viaje
+
+const viaje = {
+  id: 'viaje-1',
+  startDate: '2026-07-10T12:00:00.000Z',
+  completionDate: '2026-07-24T12:00:00.000Z'
+};
+
+const gasto = (over: Partial<MovementInput>): MovementInput => ({
+  type: 'outflow',
+  from: 'transit',
+  amount: 100,
+  date: '2026-07-15T12:00:00.000Z',
+  ...over
+});
+
+test('el gasto solo cuenta si salio de transito y dentro de la ventana', () => {
+  const movimientos = [
+    gasto({ amount: 500 }),
+    gasto({ amount: 250, date: '2026-07-20T09:00:00.000Z' }),
+    gasto({ amount: 999, date: '2026-07-01T09:00:00.000Z' }),  // antes del viaje
+    gasto({ amount: 999, date: '2026-08-01T09:00:00.000Z' }),  // despues del cierre
+    gasto({ amount: 999, from: 'safe' }),                       // salio de tienda
+    { type: 'internal_transfer', from: 'transit', amount: 999, date: '2026-07-15T12:00:00.000Z' }
+  ];
+
+  assert.equal(computeTripSpend(viaje, movimientos), 750);
+});
+
+test('acepta variantes de escritura de la caja transito', () => {
+  assert.equal(normalizeBox('transito'), 'transit');
+  assert.equal(normalizeBox('En Transito'), 'transit');
+  assert.equal(normalizeBox('camino'), 'transit');
+  assert.equal(computeTripSpend(viaje, [gasto({ from: 'En Transito', amount: 40 })]), 40);
+});
+
+test('un viaje sin cerrar cuenta hasta ahora', () => {
+  const enCurso = { id: 'viaje-2', startDate: '2026-07-10T12:00:00.000Z' };
+  const ahora = new Date('2026-07-30T12:00:00.000Z').getTime();
+
+  assert.equal(computeTripSpend(enCurso, [
+    gasto({ amount: 100, date: '2026-07-29T12:00:00.000Z' }),
+    gasto({ amount: 400, date: '2026-07-31T12:00:00.000Z' })
+  ], ahora), 100);
+});
+
+test('el tripId explicito manda sobre la fecha', () => {
+  assert.equal(computeTripSpend(viaje, [
+    gasto({ amount: 500, tripId: 'otro-viaje' }),
+    gasto({ amount: 70, tripId: 'viaje-1', date: '2026-09-01T12:00:00.000Z' })
+  ]), 70);
+});
+
+test('fechas invalidas no inventan gasto', () => {
+  assert.equal(computeTripSpend(viaje, [gasto({ date: 'no-es-fecha' })]), 0);
+  assert.equal(computeTripSpend({ ...viaje, startDate: 'x' }, [gasto({})]), 0);
+});
+
+test('el gasto atribuido alimenta el reparto de extremo a extremo', () => {
+  const spent = computeTripSpend(viaje, [gasto({ amount: 750 })]);
+  const plan = planTripCompletion(tresDeMil, spent);
+
+  assert.equal(plan.spent, 750);
+  assert.equal(plan.deposited, 2250);
+  assert.equal(suma(plan.writes, 'bank'), 2250);
+  assert.equal(suma(plan.writes, 'transit'), 750);
 });
 
 test('reparte dinero que ya estaba en varias cajas', () => {

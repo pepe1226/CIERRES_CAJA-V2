@@ -8,6 +8,7 @@
     "dev:vercel": "vercel dev",
     "build": "vite build",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:emulator": "node --experimental-strip-types --import ./tests/emulator/resolver.mjs tests/emulator/cierre-viaje.mjs",
     "preview": "vite preview --host 0.0.0.0",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",

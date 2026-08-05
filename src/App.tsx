@@ -2112,16 +2112,32 @@ function AppContent() {
   };
 
   const handleCompleteTrip = async (tripId: string) => {
+    // El cierre corre entero en el servidor, dentro de una transaccion: marcar el
+    // viaje y repartir los cierres pasa todo junto o no pasa nada. Antes eran dos
+    // escrituras sueltas y, si la segunda fallaba, el viaje quedaba cerrado con el
+    // dinero aun en transito. El servidor tambien decide cuanto llega al banco:
+    // solo lo depositado, no lo que se gasto por el camino.
     try {
-      await updateDoc(doc(db, 'trips', tripId), {
-        status: 'completed',
-        completionDate: serverTimestamp()
+      const firebaseUser = auth.currentUser;
+      if (!firebaseUser) throw new Error('La sesion de Firebase no esta disponible.');
+      const token = await firebaseUser.getIdToken();
+
+      const response = await fetch('/api/trips/complete', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ tripId })
       });
 
-      const tripClosures = closures.filter(c => c.tripId === tripId);
-      await persistClosureStatusChanges(tripClosures, 'bank', tripId);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || 'No se pudo cerrar el viaje.');
+      }
     } catch (err) {
-       handleFirestoreError(err, OperationType.UPDATE, `trips/${tripId}`);
+      console.error('Error al cerrar el viaje:', err);
+      setStatusUpdateError(err instanceof Error ? err.message : 'No se pudo cerrar el viaje.');
     }
   };
 
