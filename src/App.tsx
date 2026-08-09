@@ -641,6 +641,8 @@ const getClosureColumnSearchValue = (
 function AppContent() {
   const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [authenticating, setAuthenticating] = useState(false);
+  const [authError, setAuthError] = useState('');
   const [closures, setClosures] = useState<ShiftClosure[]>([]);
   const [closuresLoaded, setClosuresLoaded] = useState(false);
   const [perseoReports, setPerseoReports] = useState<PerseoReport[]>([]);
@@ -3631,6 +3633,34 @@ Notas: ${closure.notes || 'N/A'}`;
     );
   };
 
+  const handleGoogleSignIn = async () => {
+    if (authenticating) return;
+
+    setAuthError('');
+    setAuthenticating(true);
+
+    try {
+      await signInWithGoogle();
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : '';
+
+      if (code === 'auth/popup-closed-by-user') {
+        setAuthError('La ventana de Google se cerró. Pulsa de nuevo y termina el acceso.');
+      } else if (code === 'auth/cancelled-popup-request') {
+        setAuthError('Ya había un acceso en curso. Pulsa una sola vez y espera la ventana de Google.');
+      } else if (code === 'auth/popup-blocked') {
+        setAuthError('El navegador bloqueó la ventana de Google. Permite ventanas emergentes y vuelve a intentar.');
+      } else {
+        console.error('No se pudo iniciar sesión con Google:', error);
+        setAuthError('No se pudo abrir el acceso de Google. Vuelve a intentarlo.');
+      }
+    } finally {
+      setAuthenticating(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0F172A]">
@@ -3654,11 +3684,28 @@ Notas: ${closure.notes || 'N/A'}`;
           </div>
           <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.1</h1>
           <p className="text-slate-400 mb-10 leading-relaxed text-lg">Gestiona tus cierres de caja en la nube.</p>
-          <button onClick={signInWithGoogle} className="w-full py-5 bg-white text-[#0F172A] rounded-2xl font-black text-lg hover:bg-slate-100 transition-all shadow-xl flex items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={handleGoogleSignIn}
+            disabled={authenticating}
+            aria-busy={authenticating}
+            className="w-full py-5 bg-white text-[#0F172A] rounded-2xl font-black text-lg hover:bg-slate-100 transition-all shadow-xl flex items-center justify-center gap-3 disabled:cursor-wait disabled:opacity-70"
+          >
             <UserIcon className="w-6 h-6" />
-            Ingresar con Google
-            <ArrowRight className="w-5 h-5" />
+            {authenticating ? 'Abriendo Google…' : 'Ingresar con Google'}
+            {authenticating ? (
+              <span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-400 border-t-[#0F172A]" aria-hidden="true" />
+            ) : (
+              <ArrowRight className="w-5 h-5" />
+            )}
           </button>
+          <div aria-live="polite" className="min-h-12 pt-4">
+            {authError && (
+              <p className="rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm font-bold leading-relaxed text-amber-200">
+                {authError}
+              </p>
+            )}
+          </div>
         </motion.div>
       </div>
     );
