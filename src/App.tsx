@@ -716,6 +716,7 @@ function AppContent() {
   const [hideCollected, setHideCollected] = useState(false);
   const [showOnlyStoreClosures, setShowOnlyStoreClosures] = useState(false);
   const [showMobileHistoryFilters, setShowMobileHistoryFilters] = useState(false);
+  const [showLatestClosureDetails, setShowLatestClosureDetails] = useState(false);
 
   const [movementValues, setMovementValues] = useState<Partial<Movement>>({
     type: 'outflow',
@@ -4083,62 +4084,51 @@ Notas: ${closure.notes || 'N/A'}`;
               </div>
 
               <p className="mt-4 text-xs font-bold text-slate-300">{todayAuditSummary.detail}</p>
-              <p className="mt-1 text-[10px] font-bold text-slate-500">Comparacion: foto enviada por Telegram contra reporte diario de Perseo.</p>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mt-6">
-                {[
-                  { label: 'Venta registrada', value: todayAuditSummary.systemAmount, color: 'text-white' },
-                  { label: 'Enviado a compras', value: todayAuditSummary.transferAmount, color: 'text-blue-300' },
-                  { label: 'Efectivo esperado', value: todayAuditSummary.systemBalance, color: 'text-white' },
-                  { label: 'Efectivo en foto', value: todayAuditSummary.physicalAmount, color: 'text-white' },
-                  { label: 'Diferencia', value: todayAuditSummary.difference, color: Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300', unknown: !todayAuditSummary.hasExpected },
-                ].map(metric => (
-                  <div key={metric.label} className="rounded-2xl border border-white/5 bg-slate-950/20 px-4 py-3">
-                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">{metric.label}</p>
-                    {metric.unknown ? (
-                      <p className="mt-2 text-lg font-black text-slate-500" title="Sin saldo esperado: falta el reporte de Perseo.">
-                        Sin dato
-                      </p>
-                    ) : (
-                      <p className={`mt-2 text-lg font-black font-sans ${metric.color}`}>
-                        {metric.label === 'Diferencia' && metric.value >= 0 ? '+' : ''}${metric.value.toLocaleString('es-CL')}
-                      </p>
-                    )}
+              <div className="mt-5 rounded-3xl border border-white/5 bg-slate-950/25 p-4 sm:p-5">
+                <p className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-500">Comprobacion de efectivo</p>
+                <div className="mt-4 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-3 sm:gap-5">
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Contado</p>
+                    <p className="mt-1 truncate text-xl sm:text-3xl font-black font-sans text-white">${todayAuditSummary.physicalAmount.toLocaleString('es-CL')}</p>
+                    <p className="mt-1 text-[10px] font-bold text-slate-500">Foto recibida</p>
                   </div>
-                ))}
+                  <div className="pb-5 text-slate-600" aria-hidden="true">−</div>
+                  <div className="min-w-0 text-right">
+                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Esperado</p>
+                    {todayAuditSummary.hasExpected ? (
+                      <p className="mt-1 truncate text-xl sm:text-3xl font-black font-sans text-white">${todayAuditSummary.systemBalance.toLocaleString('es-CL')}</p>
+                    ) : (
+                      <p className="mt-1 text-xl sm:text-3xl font-black text-slate-500">Sin dato</p>
+                    )}
+                    <p className="mt-1 text-[10px] font-bold text-slate-500">Reporte Perseo</p>
+                  </div>
+                </div>
+                <div className={`mt-4 flex items-center justify-between gap-4 rounded-2xl border px-4 py-3 ${!todayAuditSummary.hasExpected ? 'border-slate-500/20 bg-slate-500/[0.07]' : Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'border-emerald-500/20 bg-emerald-500/[0.08]' : 'border-rose-500/20 bg-rose-500/[0.08]'}`}>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-300">Diferencia</p>
+                  <p className={`text-xl sm:text-2xl font-black font-sans ${!todayAuditSummary.hasExpected ? 'text-slate-400' : Math.abs(todayAuditSummary.difference) <= closureMatchTolerance ? 'text-emerald-300' : 'text-rose-300'}`}>
+                    {!todayAuditSummary.hasExpected ? 'Pendiente' : `${todayAuditSummary.difference >= 0 ? '+' : ''}$${todayAuditSummary.difference.toLocaleString('es-CL')}`}
+                  </p>
+                </div>
               </div>
 
-              {todayAuditSummary.purchaseDetails.length > 0 ? (
-                <div className="mt-5 rounded-2xl border border-blue-500/20 bg-slate-950/25 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                    <div>
-                      <p className="text-[9px] font-black uppercase tracking-[0.2em] text-blue-300">Detalle COMPRA PDV</p>
-                      <p className="mt-1 text-[11px] font-bold text-slate-500">Conceptos que componen el valor transferido</p>
-                    </div>
-                    <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-blue-300">
-                      {todayAuditSummary.purchaseDetails.length} movimiento{todayAuditSummary.purchaseDetails.length === 1 ? '' : 's'}
-                    </span>
+              <button type="button" onClick={() => setShowLatestClosureDetails(value => !value)} aria-expanded={showLatestClosureDetails} className="mt-4 inline-flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.035] px-4 py-3 text-left text-[10px] font-black uppercase tracking-widest text-slate-300 transition-colors hover:bg-white/[0.07] hover:text-white">
+                <span className="flex items-center gap-2"><FileText className="h-4 w-4 text-blue-300" />Detalle Perseo y compras</span>
+                <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${showLatestClosureDetails ? 'rotate-180' : ''}`} />
+              </button>
+
+              {showLatestClosureDetails && (
+                <div className="mt-3 rounded-2xl border border-blue-500/15 bg-slate-950/20 p-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-white/5 bg-white/[0.035] px-3 py-3"><p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Venta registrada</p><p className="mt-1 text-base font-black font-sans text-white">${todayAuditSummary.systemAmount.toLocaleString('es-CL')}</p></div>
+                    <div className="rounded-xl border border-blue-500/15 bg-blue-500/[0.06] px-3 py-3"><p className="text-[9px] font-black uppercase tracking-widest text-blue-300">Enviado a compras</p><p className="mt-1 text-base font-black font-sans text-blue-200">${todayAuditSummary.transferAmount.toLocaleString('es-CL')}</p></div>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
-                    {todayAuditSummary.purchaseDetails.map((detail, index) => (
-                      <div key={`${detail.document || 'detalle'}-${detail.amount}-${index}`} className="rounded-xl border border-white/5 bg-white/[0.035] px-3 py-3 flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-xs font-black text-white uppercase leading-snug break-words">{detail.description}</p>
-                          <p className="mt-1 text-[9px] font-bold text-slate-500 uppercase truncate">
-                            {detail.beneficiary || detail.responsible || 'COMPRA PDV'}
-                          </p>
-                          {detail.document && <p className="mt-1 text-[8px] font-black text-slate-600 uppercase">Ref. {detail.document}</p>}
-                        </div>
-                        <p className="shrink-0 text-sm font-black font-sans text-blue-200">${detail.amount.toLocaleString('es-CL')}</p>
-                      </div>
-                    ))}
-                  </div>
+                  {todayAuditSummary.purchaseDetails.length > 0 ? (
+                    <div className="mt-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><p className="text-[9px] font-black uppercase tracking-[0.2em] text-blue-300">Detalle COMPRA PDV</p><span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-blue-300">{todayAuditSummary.purchaseDetails.length} movimiento{todayAuditSummary.purchaseDetails.length === 1 ? '' : 's'}</span></div><div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">{todayAuditSummary.purchaseDetails.map((detail, index) => (<div key={`${detail.document || 'detalle'}-${detail.amount}-${index}`} className="rounded-xl border border-white/5 bg-white/[0.035] px-3 py-3 flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-xs font-black text-white uppercase leading-snug break-words">{detail.description}</p><p className="mt-1 text-[9px] font-bold text-slate-500 uppercase truncate">{detail.beneficiary || detail.responsible || 'COMPRA PDV'}</p>{detail.document && <p className="mt-1 text-[8px] font-black text-slate-600 uppercase">Ref. {detail.document}</p>}</div><p className="shrink-0 text-sm font-black font-sans text-blue-200">${detail.amount.toLocaleString('es-CL')}</p></div>))}</div></div>
+                  ) : todayAuditSummary.transferAmount > 0 ? (
+                    <p className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-3 py-3 text-[10px] font-bold text-amber-200">El total COMPRA PDV ya esta conciliado; el detalle se incorporara en la siguiente sincronizacion de Perseo.</p>
+                  ) : null}
                 </div>
-              ) : todayAuditSummary.transferAmount > 0 ? (
-                <div className="mt-5 rounded-2xl border border-amber-500/20 bg-amber-500/[0.05] px-4 py-3 text-[10px] font-bold text-amber-200">
-                  El total COMPRA PDV ya esta conciliado; el detalle se incorporara en la siguiente sincronizacion de Perseo.
-                </div>
-              ) : null}
+              )}
             </div>
 
             <div className="rounded-3xl sm:rounded-[2rem] border border-blue-500/25 bg-gradient-to-br from-blue-500/[0.09] to-[#1E293B] p-5 sm:p-6 shadow-2xl flex flex-col justify-between">
