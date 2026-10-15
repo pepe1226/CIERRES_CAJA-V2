@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -243,7 +243,7 @@ const getClosureAuditInfo = (closure: ShiftClosure) => {
 
   return {
     status: 'not_audited',
-    label: 'Sin auditoría',
+    label: 'Sin auditor├¡a',
     detail: 'Cierre manual o sin venta de sistema asociada',
     className: 'bg-slate-500/10 text-slate-500 border-slate-500/20'
   } as const;
@@ -624,7 +624,7 @@ function AppContent() {
   const handleExportCSV = async () => {
     setIsExporting(true);
     try {
-      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'Físico', 'Diferencia', 'Estado', 'Auditoría', 'Notas'].join(';');
+      const headers = ['Fecha', 'Responsable', 'Venta Sistema', 'Cuadre Sistema', 'F├¡sico', 'Diferencia', 'Estado', 'Auditor├¡a', 'Notas'].join(';');
       const rows = closures.map(c => [
         format(parseISO(c.date), 'dd/MM/yyyy HH:mm'),
         c.responsible,
@@ -700,7 +700,7 @@ function AppContent() {
 
           return closureTime <= movementTime;
         })
-        // Al mover dinero físicamente, normalmente se toma primero lo más reciente disponible.
+        // Al mover dinero f├¡sicamente, normalmente se toma primero lo m├ís reciente disponible.
         .sort((a, b) => b.date.localeCompare(a.date));
 
       for (const closure of candidateClosures) {
@@ -1016,16 +1016,26 @@ function AppContent() {
 
 
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
+    const oct1 = new Date('2026-10-01T00:00:00');
+    const isFromOct2026 = (dateStr: string) => {
+      try {
+        const d = parseISO(dateStr);
+        return !isNaN(d.getTime()) && d >= oct1;
+      } catch {
+        return false;
+      }
+    };
+
     const closuresInBox = status === 'personal'
       ? 0
       : closures
-        .filter(c => closureStatusMatches(c.status, status))
+        .filter(c => isFromOct2026(c.date) && closureStatusMatches(c.status, status))
         .reduce((acc, curr) => acc + curr.physicalAmount, 0);
     const movementsIn = movements
-      .filter(m => cashBoxValueMatches(m.to, status))
+      .filter(m => isFromOct2026(m.date) && cashBoxValueMatches(m.to, status))
       .reduce((acc, curr) => acc + curr.amount, 0);
     const movementsOut = movements
-      .filter(m => cashBoxValueMatches(m.from, status))
+      .filter(m => isFromOct2026(m.date) && cashBoxValueMatches(m.from, status))
       .reduce((acc, curr) => acc + curr.amount, 0);
 
     return closuresInBox + movementsIn - movementsOut;
@@ -1284,7 +1294,7 @@ function AppContent() {
       alert('No se puede eliminar un viaje ya depositado. El dinero ya fue marcado como banco.');
       return;
     }
-    if (!window.confirm('¿Eliminar este viaje? Los cierres marcados volverán a estar disponibles.')) return;
+    if (!window.confirm('┬┐Eliminar este viaje? Los cierres marcados volver├ín a estar disponibles.')) return;
     try {
       const tripClosures = closures.filter(c => c.tripId === tripId);
       for (const c of tripClosures) {
@@ -1488,7 +1498,7 @@ function AppContent() {
   };
 
   const handleDelete = async (id: string) => {
-    if (window.confirm('¿Estás seguro de eliminar este registro?')) {
+    if (window.confirm('┬┐Est├ís seguro de eliminar este registro?')) {
       try {
         await deleteDoc(doc(db, 'closures', id));
         setDeleteConfirmId(null);
@@ -1551,7 +1561,7 @@ function AppContent() {
     }
 
     if (!movementValues.description.trim()) {
-      setFormError('INGRESE UNA DESCRIPCIÓN');
+      setFormError('INGRESE UNA DESCRIPCI├ôN');
       return;
     }
 
@@ -1561,7 +1571,7 @@ function AppContent() {
         return;
       }
       if (normalizedFrom === 'bank') {
-        setFormError('PARA ENVIAR A BANCO, EL ORIGEN DEBE SER TIENDA O TRÁNSITO');
+        setFormError('PARA ENVIAR A BANCO, EL ORIGEN DEBE SER TIENDA O TR├üNSITO');
         return;
       }
     }
@@ -1640,7 +1650,7 @@ function AppContent() {
   };
 
   const handleDeleteMovement = async (id: string) => {
-    if (window.confirm('¿Eliminar este movimiento?')) {
+    if (window.confirm('┬┐Eliminar este movimiento?')) {
       try {
         await deleteDoc(doc(db, 'movements', id));
       } catch (err) {
@@ -1705,7 +1715,7 @@ function AppContent() {
     const items = closures.filter(c => format(parseISO(c.date), 'yyyy-MM-dd') === dayString);
     const currentStatus = getDayStatusFromItems(items);
     if (currentStatus === 'mixed') {
-      alert('Este día tiene cierres en estado mixto. Ajusta cada movimiento parcial antes de cambiar todo el día.');
+      alert('Este d├¡a tiene cierres en estado mixto. Ajusta cada movimiento parcial antes de cambiar todo el d├¡a.');
       return;
     }
     const nextStatus = getNextStatus(currentStatus);
@@ -1747,7 +1757,7 @@ function AppContent() {
 
     if (status === 'transit') {
       return {
-        label: 'En Tránsito',
+        label: 'En Tr├ínsito',
         Icon: Truck,
         className: 'bg-amber-500/10 border-amber-500/20 text-amber-400'
       };
@@ -1771,7 +1781,7 @@ function AppContent() {
   const copyToClipboard = (closure: ShiftClosure) => {
     const text = `Cierre ${format(parseISO(closure.date), 'dd/MM/yyyy HH:mm')}
 Responsable: ${closure.responsible}
-Físico: $${closure.physicalAmount.toLocaleString('es-CL')}
+F├¡sico: $${closure.physicalAmount.toLocaleString('es-CL')}
 Diferencia: $${closure.difference.toLocaleString('es-CL')}
 Notas: ${closure.notes || 'N/A'}`;
     navigator.clipboard.writeText(text);
@@ -1922,7 +1932,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="px-5 py-5 bg-white border-b border-slate-200">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-bold text-slate-500 uppercase">Saldo actual <span className="text-amber-400">★</span></p>
+                <p className="text-xs font-bold text-slate-500 uppercase">Saldo actual <span className="text-amber-400">Ôÿà</span></p>
                 <div className="flex items-center gap-2 mt-1">
                   <p className="text-4xl font-black tracking-tight">${boxInfo.balance.toLocaleString('es-CL')}</p>
                   <Eye className={`w-5 h-5 ${boxInfo.color}`} />
@@ -2071,13 +2081,7 @@ Notas: ${closure.notes || 'N/A'}`;
     );
   }
 
-  if (currentView === 'personal') {
-    return (
-      <Suspense fallback={<div className="min-h-screen bg-[#0F172A]" />}>
-        <PersonalFinance user={user} onBack={() => setCurrentView('main')} />
-      </Suspense>
-    );
-  }
+
 
   return (
     <>
@@ -2107,7 +2111,7 @@ Notas: ${closure.notes || 'N/A'}`;
                   <Banknote className="w-6 h-6" />
                 </div>
                 <div>
-                  <p className="font-black text-sm uppercase tracking-widest">¡Registro Guardado!</p>
+                  <p className="font-black text-sm uppercase tracking-widest">┬íRegistro Guardado!</p>
                   <p className="text-[10px] font-bold opacity-80 uppercase">El cierre se ha guardado correctamente</p>
                 </div>
               </div>
@@ -2184,7 +2188,7 @@ Notas: ${closure.notes || 'N/A'}`;
                         {viewingCajaMovements === 'safe' && <ShieldCheck className="w-8 h-8 text-blue-400" />}
                         {viewingCajaMovements === 'transit' && <Truck className="w-8 h-8 text-amber-400" />}
                         {viewingCajaMovements === 'bank' && <Building2 className="w-8 h-8 text-emerald-400" />}
-                        Movimientos: {viewingCajaMovements === 'safe' ? 'En Tienda' : viewingCajaMovements === 'transit' ? 'En Tránsito' : 'Banco'}
+                        Movimientos: {viewingCajaMovements === 'safe' ? 'En Tienda' : viewingCajaMovements === 'transit' ? 'En Tr├ínsito' : 'Banco'}
                       </h3>
                       <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-1">Historial detallado de transacciones</p>
                     </div>
@@ -2337,7 +2341,7 @@ Notas: ${closure.notes || 'N/A'}`;
               </div>
               <p className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
                 <Truck className="w-3 h-3 text-amber-400" />
-                En Tránsito
+                En Tr├ínsito
               </p>
               <p className="text-4xl font-black text-white font-sans tracking-tight">${accumulatedTransitTotal.toLocaleString('es-CL')}</p>
             </div>
@@ -2479,7 +2483,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             </h3>
                             <div className="h-px bg-white/5 flex-1" />
                             <span className="text-[10px] font-black text-rose-500/50 bg-rose-500/5 px-3 py-1 rounded-full">
-                              TOTAL DÍA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
+                              TOTAL D├ìA: ${dailyMovements.reduce((sum, m) => sum + m.amount, 0).toLocaleString('es-CL')}
                             </span>
                           </div>
 
@@ -2495,7 +2499,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                     <div>
                                       <div className="flex items-center gap-2 mb-1">
                                         <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                                          {format(parseISO(m.date), 'HH:mm')} • {m.category || 'GENERAL'}
+                                          {format(parseISO(m.date), 'HH:mm')} ÔÇó {m.category || 'GENERAL'}
                                         </span>
                                         {m.from && (
                                           <span className="text-[9px] bg-white/10 text-slate-400 px-2 py-0.5 rounded-lg font-black tracking-widest uppercase">
@@ -2613,7 +2617,7 @@ Notas: ${closure.notes || 'N/A'}`;
               >
                 <option value="all">Todos los Estados</option>
                 <option value="safe">En Tienda</option>
-                <option value="transit">En Tránsito</option>
+                <option value="transit">En Tr├ínsito</option>
                 <option value="bank">En Banco</option>
               </select>
               <select
@@ -2621,12 +2625,12 @@ Notas: ${closure.notes || 'N/A'}`;
                 onChange={e => setFilterAudit(e.target.value as ClosureAuditStatus)}
                 className="bg-[#1E293B] border border-white/5 rounded-2xl px-4 py-3 text-xs font-black text-white outline-none appearance-none cursor-pointer"
               >
-                <option value="all">Toda Auditoría</option>
+                <option value="all">Toda Auditor├¡a</option>
                 <option value="difference">Con Diferencia</option>
                 <option value="pending_report">Falta Venta Sistema</option>
                 <option value="missing_photo">Falta Foto / Corte</option>
                 <option value="matched">Auditado OK</option>
-                <option value="not_audited">Sin Auditoría</option>
+                <option value="not_audited">Sin Auditor├¡a</option>
               </select>
               <button
                 onClick={() => setHideCollected(!hideCollected)}
@@ -2740,7 +2744,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       {renderColumnHeader('responsible', 'Responsable', <UserIcon className="w-3 h-3" />)}
                     </th>
                     <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[170px]">
-                      {renderColumnHeader('physicalAmount', '$ Físico', <Banknote className="w-3 h-3" />, 'center')}
+                      {renderColumnHeader('physicalAmount', '$ F├¡sico', <Banknote className="w-3 h-3" />, 'center')}
                     </th>
                     <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-center border-r border-white/5 min-w-[190px]">
                       {renderColumnHeader('systemAmount', 'Venta Sistema', <Calculator className="w-3 h-3" />, 'center')}
@@ -2809,7 +2813,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             onChange={e => setInlineAddValues({...inlineAddValues, physicalAmount: toNonNegativeNumber(e.target.value)})}
                             onKeyDown={(e) => handleKeyDown(e, handleSaveInlineAdd, systemAmountRef, responsibleInputRef)}
                             className="w-full bg-transparent outline-none text-white text-center font-black font-sans text-xs"
-                            placeholder="FÍSICO"
+                            placeholder="F├ìSICO"
                           />
                         </div>
                       </td>
@@ -2910,7 +2914,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            <td className="px-6 py-4">
                              <div className="flex items-center gap-2">
                                 <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.8)]" />
-                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Resumen del día</span>
+                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Resumen del d├¡a</span>
                              </div>
                            </td>
                            <td className="px-6 py-4 text-center font-black text-white font-sans text-sm">${group.totals.physicalAmount.toLocaleString('es-CL')}</td>
@@ -2933,7 +2937,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                       key={status}
                                       type="button"
                                       onClick={() => setDayStatus(group.date, status)}
-                                      title={`Enviar todos los cierres del día a ${statusInfo.label}`}
+                                      title={`Enviar todos los cierres del d├¡a a ${statusInfo.label}`}
                                       className={`px-2 py-2 rounded-xl border text-[9px] font-black uppercase inline-flex items-center gap-1 transition-all ${active ? statusInfo.className : 'bg-white/5 border-white/5 text-slate-500 hover:text-white hover:bg-white/10'}`}
                                     >
                                       <StatusIcon className="w-3 h-3" />
@@ -3209,7 +3213,7 @@ Notas: ${closure.notes || 'N/A'}`;
                   </div>
 
                   <div>
-                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Nombre / Descripción del Viaje</label>
+                    <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Nombre / Descripci├│n del Viaje</label>
                     <input
                       type="text"
                       value={tripFormValues.description}
@@ -3225,7 +3229,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       value={tripFormValues.notes}
                       onChange={e => setTripFormValues({...tripFormValues, notes: e.target.value})}
                       className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white outline-none focus:ring-2 focus:ring-blue-500 min-h-[120px] resize-none"
-                      placeholder="Agrega aquí cualquier observación relevante sobre este retiro de fondos..."
+                      placeholder="Agrega aqu├¡ cualquier observaci├│n relevante sobre este retiro de fondos..."
                     />
                   </div>
 
@@ -3321,7 +3325,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            <div className="text-right">
                              <p className="text-xl font-black text-white font-sans tracking-tight">${trip.totalAmount.toLocaleString('es-CL')}</p>
                              <span className={`text-[8px] font-black uppercase tracking-widest px-3 py-1 rounded-full mt-2 inline-block ${trip.status === 'completed' ? 'bg-emerald-500/20 text-emerald-500' : 'bg-amber-500/20 text-amber-500 animate-pulse'}`}>
-                               {trip.status === 'completed' ? 'Depositado' : 'En Tránsito'}
+                               {trip.status === 'completed' ? 'Depositado' : 'En Tr├ínsito'}
                              </span>
                            </div>
                          </div>
@@ -3346,7 +3350,7 @@ Notas: ${closure.notes || 'N/A'}`;
                            {trip.status === 'in_transit' && (
                              <button onClick={() => handleCompleteTrip(trip.id!)} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-500/20 flex items-center gap-2">
                                <CheckCircle2 className="w-4 h-4" />
-                               Confirmar Depósito
+                               Confirmar Dep├│sito
                              </button>
                            )}
                            <button onClick={() => setViewingTripId(null)} className="p-3 bg-white/5 hover:bg-rose-500/20 text-slate-500 hover:text-rose-500 rounded-2xl transition-all"><X className="w-6 h-6" /></button>
@@ -3410,7 +3414,7 @@ Notas: ${closure.notes || 'N/A'}`;
                                   value={editedTripNotes}
                                   onChange={e => setEditedTripNotes(e.target.value)}
                                   className="w-full bg-transparent outline-none text-white text-sm leading-relaxed min-h-[100px] resize-none"
-                                  placeholder="Escribe tus observaciones aquí..."
+                                  placeholder="Escribe tus observaciones aqu├¡..."
                                   autoFocus
                                 />
                               ) : (
@@ -3506,7 +3510,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       className="w-full px-6 py-4 bg-white/5 border border-white/5 rounded-2xl text-white font-sans text-sm outline-none focus:ring-2 focus:ring-purple-500"
                     />
                     <p className="mt-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest">
-                      Esta fecha será usada para ordenar el movimiento y afectar el estado del dinero.
+                      Esta fecha ser├í usada para ordenar el movimiento y afectar el estado del dinero.
                     </p>
                   </div>
 
@@ -3575,7 +3579,7 @@ Notas: ${closure.notes || 'N/A'}`;
                           className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                         >
                           <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                          <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
+                          <option value="transit" className="bg-[#0F172A] text-white">En Tr├ínsito</option>
                           {movementValues.type === 'internal_transfer' && (
                             <>
                               <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
@@ -3597,7 +3601,7 @@ Notas: ${closure.notes || 'N/A'}`;
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                            <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
+                            <option value="transit" className="bg-[#0F172A] text-white">En Tr├ínsito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
                             <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
@@ -3617,14 +3621,14 @@ Notas: ${closure.notes || 'N/A'}`;
                             className="w-full px-4 py-3 bg-[#0F172A] border border-white/5 rounded-2xl text-white text-xs font-black uppercase outline-none focus:ring-2 focus:ring-purple-500"
                           >
                             <option value="safe" className="bg-[#0F172A] text-white">En Tienda</option>
-                            <option value="transit" className="bg-[#0F172A] text-white">En Tránsito</option>
+                            <option value="transit" className="bg-[#0F172A] text-white">En Tr├ínsito</option>
                             <option value="bank" className="bg-[#0F172A] text-white">Banco</option>
                             <option value="personal" className="bg-[#0F172A] text-white">Caja Personal</option>
                           </select>
                         </div>
                         <div>
                           <div className="flex justify-between mb-2">
-                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Categoría</label>
+                            <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Categor├¡a</label>
                             <button
                               onClick={() => setIsAddingNewCategory(!isAddingNewCategory)}
                               className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
@@ -3661,7 +3665,7 @@ Notas: ${closure.notes || 'N/A'}`;
                       </div>
                       <div>
                         <div className="flex justify-between mb-2">
-                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Subcategoría</label>
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest block">Subcategor├¡a</label>
                           <button
                             onClick={() => setIsAddingNewSubcategory(!isAddingNewSubcategory)}
                             className="text-[10px] font-black text-purple-400 uppercase tracking-widest flex items-center gap-1 hover:text-purple-300 transition-colors"
