@@ -1,6 +1,6 @@
-import { LayoutDashboard, Home, Truck, Wallet, X } from 'lucide-react';
+﻿import { LayoutDashboard, Home, Truck, Wallet, X } from 'lucide-react';
 
-export type AppView = 'main' | 'dashboard' | 'personal';
+export type AppView = 'main' | 'dashboard';
 
 type ModuleSidebarProps = {
   open: boolean;
@@ -25,13 +25,7 @@ const navigationItems = [
     Icon: LayoutDashboard,
     color: 'text-violet-300'
   },
-  {
-    id: 'personal' as const,
-    title: 'Finanzas personales',
-    subtitle: 'Cajas y movimientos',
-    Icon: Wallet,
-    color: 'text-emerald-300'
-  }
+
 ];
 
 export function ModuleSidebar({
