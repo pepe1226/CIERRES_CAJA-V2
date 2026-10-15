@@ -1,4 +1,4 @@
-import { FieldValue, Timestamp } from "firebase-admin/firestore";
+﻿import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { GoogleGenAI, Type } from "@google/genai";
 
 type GeminiTipo = "ingreso" | "egreso" | "transferencia" | "desconocido";
@@ -401,7 +401,7 @@ export function buildMovementFromExtraction(
         if (lower.includes("fecha ambigua")) return false;
         if (lower.includes("año de dos dígitos")) return false;
         if (lower.includes("ano de dos digitos")) return false;
-        if (lower.includes("tipo de transacción inferido")) return false;
+        if (lower.includes("tipo de transacci├│n inferido")) return false;
         if (lower.includes("tipo de transaccion inferido")) return false;
         if (lower.includes("recuento")) return false;
         if (lower.includes("transferencia interna")) return false;
@@ -520,7 +520,7 @@ export function isTemporaryGeminiError(error: any) {
 
 export function getFriendlyGeminiErrorMessage(error: any) {
   if (isTemporaryGeminiError(error)) {
-    return "La IA está ocupada temporalmente. Guardé la foto como pendiente y el sistema intentará procesarla nuevamente.";
+    return "La IA est├í ocupada temporalmente. Guard├® la foto como pendiente y el sistema intentar├í procesarla nuevamente.";
   }
 
   const message = getErrorMessage(error);
@@ -529,7 +529,7 @@ export function getFriendlyGeminiErrorMessage(error: any) {
     return "No pude procesar la foto porque falta configurar la clave de Gemini en Vercel.";
   }
 
-  return "No pude procesar la foto automáticamente. La foto quedó pendiente para revisión o reintento.";
+  return "No pude procesar la foto autom├íticamente. La foto qued├│ pendiente para revisi├│n o reintento.";
 }
 
 function sleep(ms: number) {
@@ -555,7 +555,7 @@ export async function extractFinancialDataFromImage(params: {
       const temporary = isTemporaryGeminiError(error);
 
       console.error(
-        `Gemini falló en intento ${attempt}/${maxAttempts}:`,
+        `Gemini fall├│ en intento ${attempt}/${maxAttempts}:`,
         getErrorMessage(error)
       );
 
@@ -584,39 +584,37 @@ async function extractFinancialDataFromImageOnce(params: {
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
   const prompt = `
-Eres un asistente para registrar cierres de caja desde fotos enviadas por Telegram.
+Eres un asistente experto para auditar y registrar cierres de caja en tiendas desde fotos de fundas plásticas y comprobantes de cuadre.
 
-Regla principal:
-La mayoría de imágenes tendrán solamente:
-- fecha escrita a mano
-- valor o monto fisico de la funda
-- venta sistema, venta total o total vendido si aparece
-- cuadre sistema, saldo sistema o sistema si aparece
-- responsable o nombre de persona
+INSTRUCCIONES CLAVE PARA EVITAR CONFUSIONES:
+1. MONTO FÍSICO (monto):
+- Es el total en EFECTIVO contenido en la funda o sobre.
+- Suele estar escrito a mano junto al símbolo '$' o indicado como 'Físico', 'Total Físico', 'Efectivo'.
+- NUNCA confundas el monto físico con números de caja (ej: 'Caja 1', 'Caja 2'), códigos de funda o números de turno.
+- Si hay valores tachados o con enmiendas, toma siempre el valor final corregido, NO el número tachado.
+- Ignora desgloses de billetes individuales (como 2x$20, etc.) y busca el TOTAL final en dólares.
 
-Ejemplo:
-03-05-26
-$45.15
-ESQ Yulexi
+2. VENTA Y CUADRE DEL SISTEMA (venta_sistema, cuadre_sistema, sistema):
+- Si en la funda o ticket aparece 'Venta:', 'Sistema:', 'Venta Sistema' o 'Total Sistema', extrae ese valor como venta_sistema.
+- Si aparece 'Cuadre:', 'Saldo Sistema:' o 'Cuadre Sistema', extráelo en cuadre_sistema.
+- Si no aparece venta del sistema en la foto, deja null o 0.
 
-En estos casos:
-- El anio operativo del sistema es 2026.
-- Interpretar la fecha como DD-MM-YY.
-- 03-05-26 significa 2026-05-03.
-- Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes del mensaje de Telegram y anio 2026.
-- Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio 2026.
-- Nunca uses 26 como anio 0026 ni intercambies dia y anio.
-- El monto es el valor escrito junto al símbolo $.
-- El responsable/cajero es el nombre escrito en la etiqueta, normalmente despues de ESQ, Responsable, Sr. o Sra.
-- Coloca el responsable/cajero en proveedor_cliente, no solo en descripcion.
+3. RESPONSABLE / CAJERO (proveedor_cliente):
+- Es el nombre de la persona que atendió la caja (cajero/a), generalmente precedido por 'ESQ', 'Cajero:', 'Resp:', 'Sr.' o 'Sra.'.
+- NUNCA pongas el nombre del comercio ni nombres de sucursales como responsable.
+- Si el nombre manuscrito no es legible o no aparece, devuelve null (no inventes un nombre).
+
+4. FECHA (fecha):
+- Formato de fecha escrita a mano suele ser DD-MM-AA o DD/MM/AAAA.
+- El año operativo es 2026. Si dice '14/10/26' o '14-10-26', la fecha es 2026-10-14.
+- NUNCA tomes números de caja o montos como fecha.
+- Devuelve la fecha en formato YYYY-MM-DD.
+
+5. CLASIFICACIÓN:
 - El tipo debe ser "ingreso".
 - La caja debe ser "Principal".
 - La categoría debe ser "Cierre de caja".
 - Si fecha, monto y responsable están presentes, requiere_revision debe ser false.
-- No marcar como pendiente solo porque falte subcategoría.
-- No marcar como pendiente solo porque la fecha tenga año de dos dígitos.
-- No marcar como pendiente solo porque la caja se infiere como Principal.
-- No marcar como pendiente solo porque la categoría se infiere como Cierre de caja.
 
 Devuelve solo JSON válido.
 
