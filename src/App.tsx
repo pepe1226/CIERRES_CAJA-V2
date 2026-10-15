@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { ShiftClosure, Movement, UserProfile, CollectionTrip } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { PerseoCashboxes } from './components/PerseoCashboxes';
 import { auth, db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from './firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import {
@@ -4358,6 +4359,8 @@ Notas: ${closure.notes || 'N/A'}`;
               )}
             </div>
           </div>
+
+          {user?.role === 'admin' && <PerseoCashboxes />}
 
           <AnimatePresence>
             {historyView && (
