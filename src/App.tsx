@@ -179,6 +179,18 @@ type MissingPerseoClosure = PerseoReportRow & {
 };
 
 const cashBoxStatuses: CashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos', 'personal'];
+
+const OCT_1_2026 = new Date('2026-10-01T00:00:00');
+const isFromOct2026 = (dateStr?: string | null) => {
+  if (!dateStr) return false;
+  try {
+    if (typeof dateStr === 'string' && dateStr.slice(0, 10) >= '2026-10-01') return true;
+    const d = parseISO(dateStr);
+    return !isNaN(d.getTime()) && d.getTime() >= OCT_1_2026.getTime();
+  } catch {
+    return false;
+  }
+};
 const closureCashBoxStatuses: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 const cashBoxStatusPriority: ClosureCashBoxStatus[] = ['safe', 'transit', 'bank', 'banquitos'];
 const PERSEO_REPORTS_LIVE_LIMIT = 180;
@@ -854,16 +866,7 @@ function AppContent() {
       iconColor: 'text-cyan-300',
       action: () => setCurrentView('inventory'),
     },
-    {
-      id: 'personal',
-      title: 'Finanzas Personales',
-      subtitle: 'Cajas y movimientos propios',
-      Icon: Wallet,
-      group: 'Personal',
-      accent: 'from-sky-500/20 to-blue-500/10',
-      iconColor: 'text-sky-300',
-      action: () => setCurrentView('personal'),
-    },
+    
     {
       id: 'payroll',
       title: 'Sueldos',
@@ -1234,6 +1237,7 @@ function AppContent() {
   [getClosureDisplayStatus, closureLedgerById]);
 
   const banquitosStoreSnapshot = useMemo(() => closures
+    .filter(closure => isFromOct2026(closure.date))
     .map((closure): BanquitosStoreClosureSnapshotItem | null => {
       if (!closure.id || !isClosureAvailableForTrip(closure)) return null;
 
@@ -1301,6 +1305,7 @@ function AppContent() {
   }, [trips, tripCoverageById]);
 
   const storePendingClosures = useMemo(() => closures
+    .filter(closure => isFromOct2026(closure.date))
     .map(closure => {
       if (!closure.id || !isClosureAvailableForTrip(closure)) return null;
       const safeAmount = roundMoney(closureLedgerById[closure.id]?.balances.safe);
@@ -1834,9 +1839,13 @@ function AppContent() {
   const getAccumulatedBoxTotal = useCallback((status: CashBoxStatus) => {
     const closureMoney = status === 'personal'
       ? 0
-      : Object.values(closureLedgerById).reduce((acc, ledger) => acc + (Number(ledger.balances[status]) || 0), 0);
+      : closures.filter(c => isFromOct2026(c.date)).reduce((acc, closure) => {
+          if (!closure.id) return acc;
+          const ledger = closureLedgerById[closure.id];
+          return acc + (Number(ledger?.balances[status]) || 0);
+        }, 0);
 
-    const movementAdjustments = movements.reduce((acc, movement) => {
+    const movementAdjustments = movements.filter(m => isFromOct2026(m.date)).reduce((acc, movement) => {
       const movementType = movement.type;
       const from = movement.from ? normalizeCashBoxStatus(movement.from) : null;
       const to = movement.to ? normalizeCashBoxStatus(movement.to) : null;
@@ -1856,7 +1865,7 @@ function AppContent() {
     }, 0);
 
     return Number((closureMoney + movementAdjustments).toFixed(2));
-  }, [closureLedgerById, movements]);
+  }, [closures, closureLedgerById, movements]);
 
   const accumulatedSafeTotal = useMemo(() => getAccumulatedBoxTotal('safe'), [getAccumulatedBoxTotal]);
   const accumulatedTransitTotal = useMemo(() => getAccumulatedBoxTotal('transit'), [getAccumulatedBoxTotal]);
@@ -1948,11 +1957,11 @@ function AppContent() {
   }, [editingMovementId, getBoxBalance, movements]);
 
   const combinedMovements = useMemo(() => {
-    const boxMovements = movements.map(m => ({
+    const boxMovements = movements.filter(m => isFromOct2026(m.date)).map(m => ({
       ...m,
       source: 'movement' as const
     }));
-    const boxClosures = closures.map(c => {
+    const boxClosures = closures.filter(c => isFromOct2026(c.date)).map(c => {
       const displayStatus = getClosureDisplayStatus(c);
       return {
       id: c.id!,
@@ -3720,11 +3729,8 @@ Notas: ${closure.notes || 'N/A'}`;
   }
 
   if (currentView === 'personal') {
-    return (
-      <React.Suspense fallback={<ModuleLoading />}>
-        <PersonalFinance user={user} onBack={() => setCurrentView('main')} />
-      </React.Suspense>
-    );
+    setCurrentView('main');
+    return null;
   }
 
   if (currentView === 'payroll') {
