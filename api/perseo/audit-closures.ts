@@ -9,6 +9,7 @@ import { handleTripCompletion } from "../_lib/tripCompletionHandler.js";
 import { getFirebaseAdminDb } from "../_lib/firebaseAdmin.js";
 import { getApps } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
+import handlePerseoCashboxes from "../_lib/perseoCashboxes.js";
 
 const REPORT_LIST_CACHE_MS = 60_000;
 let reportListCache: { loadedAt: number; reports: any[] } | null = null;
@@ -83,6 +84,9 @@ async function handleReportList(req: any, res: any, requestedLimit: unknown) {
 }
 
 export default async function handler(req: any, res: any) {
+  if (req.query?.resource === "cashboxes") {
+    return handlePerseoCashboxes(req, res);
+  }
   if (req.method !== "POST") {
     return res.status(405).json({ ok: false, error: "Method not allowed" });
   }

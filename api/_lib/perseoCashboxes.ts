@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue } from 'firebase-admin/firestore';
-import { getFirebaseAdminDb } from '../_lib/firebaseAdmin.js';
+import { getFirebaseAdminDb } from './firebaseAdmin.js';
 
 const CASHBOX_IDS = new Set([1, 2, 3, 12]);
 const CURRENT_ID = 'current';

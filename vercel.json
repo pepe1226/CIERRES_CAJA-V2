@@ -19,6 +19,10 @@
   ],
   "rewrites": [
     {
+      "source": "/api/perseo/cashboxes",
+      "destination": "/api/perseo/audit-closures?resource=cashboxes"
+    },
+    {
       "source": "/telegram/webhook",
       "destination": "/api/telegram/webhook"
     },
