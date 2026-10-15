@@ -688,44 +688,45 @@ async function extractFinancialDataFromImageOnce(params: {
   const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
   const prompt = `
-Eres un asistente para registrar cierres de caja desde fotos enviadas por Telegram.
+Eres un asistente experto para auditar y registrar fotos de cierres de caja (sobres de dinero / fundas de efectivo) enviadas por Telegram.
 
-Regla principal:
-La mayoría de imágenes tendrán solamente:
-- fecha escrita a mano
-- valor o monto fisico de la funda
-- venta sistema, venta total o total vendido si aparece
-- cuadre sistema, saldo sistema o sistema si aparece
-- responsable o nombre de persona
+OBJETIVO:
+Analizar la foto del sobre o funda de efectivo y extraer con maxima precision los datos financieros.
 
-Ejemplo:
-03-05-26
-$45.15
-ESQ Yulexi
+REGLAS CRITICAS DE EXTRACCION:
+1. MONTO FISICO (monto):
+   - Es el dinero en efectivo que esta dentro de la funda/sobre.
+   - Suele estar escrito a mano junto al simbolo "$" o como una cifra destacada (ej: $45.15, $120.00, 350).
+   - Siempre debe ser un numero positivo mayor a 0.
 
-En estos casos:
-- El anio operativo del sistema es 2026.
-- Interpretar la fecha como DD-MM-YY.
-- 03-05-26 significa 2026-05-03.
-- Si solo ves un dia, por ejemplo "26", interpretalo como dia del mes del mensaje de Telegram y anio 2026.
-- Si ves dia y mes sin anio, por ejemplo "26/06", usa el anio 2026.
-- Nunca uses 26 como anio 0026 ni intercambies dia y anio.
-- La fecha local del mensaje de Telegram es ${params.referenceDate || "desconocida"}.
-- Una fecha de la foto nunca puede ser posterior a la fecha local del mensaje. Si la escritura es dudosa, usa la fecha del mensaje.
-- El monto es el valor escrito junto al símbolo $.
-- El responsable/cajero es el nombre escrito en la etiqueta, normalmente despues de ESQ, Responsable, Sr. o Sra.
-- Coloca el responsable/cajero en proveedor_cliente, no solo en descripcion.
-- ${knownCashierPrompt()}
-- El tipo debe ser "ingreso".
-- La caja debe ser "Principal".
-- La categoría debe ser "Cierre de caja".
-- Si fecha, monto y responsable están presentes, requiere_revision debe ser false.
-- No marcar como pendiente solo porque falte subcategoría.
-- No marcar como pendiente solo porque la fecha tenga año de dos dígitos.
-- No marcar como pendiente solo porque la caja se infiere como Principal.
-- No marcar como pendiente solo porque la categoría se infiere como Cierre de caja.
+2. VALORES DE SISTEMA (venta_sistema, cuadre_sistema, sistema):
+   - Si en el sobre o papel se indica un valor de venta o sistema (ej: "Venta:", "Vta: $45.00", "Sistema: $50.00", "Cuadre: $48.00"), extrae ese valor numerico en venta_sistema y cuadre_sistema.
+   - Si no hay ningun valor de sistema mencionado, dejalos como null.
 
-Devuelve solo JSON válido.
+3. RESPONSABLE / CAJERO (proveedor_cliente):
+   - Extrae UNICAMENTE el nombre de la persona o cajero(a) responsable escrito en la funda (ej: "Yulexi", "ESQ Yulexi", "Johanna", "Dayeli", "Erick").
+   ${knownCashierPrompt()}
+   - ATENCION: Si ves "Caja 1", "Caja 2", "Caja 26", etc., eso es el NUMERO DE TERMINAL O CAJA, NO el nombre de la persona.
+   - NO uses el nombre de quien envia el mensaje en Telegram si no esta escrito a mano en la foto.
+   - Si no hay ningun nombre de persona legible, devuelve null en proveedor_cliente.
+
+4. FECHA (fecha):
+   - Formato requerido: YYYY-MM-DD.
+   - El anio operativo del negocio es 2026.
+   - Las fechas escritas como DD-MM-YY (ej: 03-05-26) corresponden al anio 2026 (2026-05-03).
+   - Si la fecha solo muestra dia y mes (ej: 14/10), usa el anio 2026 -> 2026-10-14.
+   - Si el dia es dudoso, toma como referencia la fecha del mensaje de Telegram: ${params.referenceDate || "desconocida"}.
+   - Una fecha nunca puede ser futura respecto al mensaje.
+   - NUNCA confundas el numero de caja (ej: "Caja 26") con la fecha.
+
+5. CLASIFICACION:
+   - tipo: "ingreso"
+   - caja: "safe"
+   - categoria: "Cierre de caja"
+   - descripcion: "CIERRE: " seguido del nombre del responsable o "CIERRE DE CAJA"
+   - Si el monto y fecha son claros, no marques requiere_revision como true a menos que falte el responsable.
+
+Devuelve exclusivamente el JSON estructurado segun el esquema.
 
 Texto adicional escrito junto con la foto:
 ${params.caption || "Sin texto adicional"}
