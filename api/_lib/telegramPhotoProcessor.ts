@@ -1,4 +1,4 @@
-import { FieldValue } from "firebase-admin/firestore";
+﻿import { FieldValue } from "firebase-admin/firestore";
 import { auditSavedPerseoReportsForDate, getEcuadorBusinessDateKeyFromValue } from "./perseoAudit.js";
 import { getFirebaseAdminDb } from "./firebaseAdmin.js";
 import {
@@ -374,14 +374,9 @@ export async function processTelegramPhotoMessage(params: {
 
   const raw = firestoreMovement.telegramRawExtraction || {};
 
-  const responsible = cleanResponsible(
-    raw.proveedor_cliente ||
-      raw.responsable ||
-      raw.descripcion ||
-      params.message.from?.first_name ||
-      firestoreMovement.telegramFirstName ||
-      "SIN RESPONSABLE"
-  );
+  const rawResponsible = raw.proveedor_cliente || raw.responsable || raw.descripcion || null;
+  const isFallbackSender = !rawResponsible;
+  const responsible = cleanResponsible(rawResponsible || "SIN RESPONSABLE");
 
   const amount =
     typeof firestoreMovement.amount === "number" &&
@@ -391,7 +386,7 @@ export async function processTelegramPhotoMessage(params: {
 
   if (amount <= 0) {
     throw new Error(
-      "La IA no encontró un monto válido en la foto. No se creó ningún registro incompleto."
+      "La IA no encontr├│ un monto v├ílido en la foto. No se cre├│ ning├║n registro incompleto."
     );
   }
 
@@ -442,15 +437,19 @@ export async function processTelegramPhotoMessage(params: {
       };
     }
 
+    const { systemAmount, systemBalance } = getExtractedSystemValues(raw);
+    const effectiveSystem = systemBalance || systemAmount || 0;
+    const difference = effectiveSystem > 0 ? (amount - effectiveSystem) : 0;
+
     const closureData = removeUndefinedDeep({
       createdAt: FieldValue.serverTimestamp(),
       createdBy,
       date: firestoreMovement.date,
       responsible,
       physicalAmount: amount,
-      systemAmount: 0,
-      systemBalance: 0,
-      difference: amount,
+      systemAmount,
+      systemBalance,
+      difference,
       status: "safe",
       duplicateKey,
       source: "telegram",
@@ -464,7 +463,7 @@ export async function processTelegramPhotoMessage(params: {
       telegramFileUniqueId,
       telegramFilePath: downloaded.telegramFilePath,
       telegramConfidence: firestoreMovement.telegramConfidence || null,
-      telegramRequiresReview: firestoreMovement.telegramRequiresReview || false,
+      telegramRequiresReview: firestoreMovement.telegramRequiresReview || isFallbackSender || (responsible === "SIN RESPONSABLE"),
       telegramRawExtraction: raw,
     });
 
@@ -519,13 +518,14 @@ export async function processTelegramPhotoMessage(params: {
     : "CONFIRMADO";
 
   if (params.sendSuccessMessage !== false) {
+    const diffText = difference !== 0 ? `\nDiferencia: USD ${difference > 0 ? '+' : ''}${formatMoney(difference)}` : '';
+    const systemText = systemAmount > 0 ? `\nVenta Sistema: USD ${formatMoney(systemAmount)}` : '';
     await sendTelegramMessage(
       params.chatId,
       [
-        "Registro creado desde foto.",
-        `Tipo: ${tipoTexto}`,
+        "✅ Cierre registrado desde foto.",
         `Responsable: ${responsible}`,
-        `Monto: USD ${formatMoney(amount)}`,
+        `Físico: USD ${formatMoney(amount)}${systemText}${diffText}`,
         `Estado: ${estadoTexto}`,
       ].join("\n")
     );
