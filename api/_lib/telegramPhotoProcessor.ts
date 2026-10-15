@@ -547,14 +547,24 @@ export async function processTelegramPhotoMessage(params: {
 
   const raw = firestoreMovement.telegramRawExtraction || {};
 
-  const responsible = cleanResponsible(
+  const candidateResponsible = (
     raw.proveedor_cliente ||
-      raw.responsable ||
-      raw.descripcion ||
-      params.message.from?.first_name ||
-      firestoreMovement.telegramFirstName ||
-      "SIN RESPONSABLE"
-  );
+    raw.responsable ||
+    raw.cajero ||
+    raw.cajero_nombre ||
+    ""
+  ).toString().trim();
+
+  const canonicalCashier = canonicalizeCashierName(candidateResponsible);
+  let responsible = cleanResponsible(candidateResponsible || "SIN RESPONSABLE");
+
+  // Si la IA capturo solo numeros, "CAJA", o esta vacio, no es un cajero valido
+  if (/^\d+$/.test(responsible) || responsible === "CAJA" || responsible === "") {
+    responsible = "SIN RESPONSABLE";
+  }
+
+  const cashierUnknown = responsible === "SIN RESPONSABLE" || !canonicalCashier.matched;
+  const requiresReview = cashierUnknown || firestoreMovement.telegramRequiresReview || false;
 
   const amount =
     typeof firestoreMovement.amount === "number" &&
@@ -713,15 +723,21 @@ export async function processTelegramPhotoMessage(params: {
       };
     }
 
+    const extractedSystem = getExtractedSystemValues(raw);
+    const systemAmount = extractedSystem.systemAmount ?? extractedSystem.systemBalance ?? 0;
+    const systemBalance = extractedSystem.systemBalance ?? extractedSystem.systemAmount ?? 0;
+    const effectiveSystem = systemBalance || systemAmount;
+    const difference = effectiveSystem > 0 ? Number((amount - effectiveSystem).toFixed(2)) : 0;
+
     const closureData = removeUndefinedDeep({
       createdAt: FieldValue.serverTimestamp(),
       createdBy,
       date: firestoreMovement.date,
       responsible,
       physicalAmount: amount,
-      systemAmount: 0,
-      systemBalance: 0,
-      difference: amount,
+      systemAmount,
+      systemBalance,
+      difference,
       status: "safe",
       duplicateKey,
       duplicateIdentityKey,
@@ -736,7 +752,7 @@ export async function processTelegramPhotoMessage(params: {
       telegramFileUniqueId,
       telegramFilePath: downloaded.telegramFilePath,
       telegramConfidence: firestoreMovement.telegramConfidence || null,
-      telegramRequiresReview: firestoreMovement.telegramRequiresReview || false,
+      telegramRequiresReview: requiresReview,
       telegramRawExtraction: raw,
     });
 
