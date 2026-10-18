@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue } from 'firebase-admin/firestore';
 import { getFirebaseAdminDb } from './firebaseAdmin.js';
+import { buildCashboxLedger, isCashboxDate } from '../../src/lib/perseoCashboxLedger.js';
 
 const CASHBOX_IDS = new Set([1, 2, 3, 12]);
 const CURRENT_ID = 'current';
@@ -141,6 +142,25 @@ export default async function handler(req: any, res: any) {
       const snapshot = current.data()!;
       const boxId = req.query?.boxId == null ? null : Number(req.query.boxId);
       const month = req.query?.month == null ? null : String(req.query.month);
+      const from = req.query?.from == null ? null : String(req.query.from);
+      const to = req.query?.to == null ? null : String(req.query.to);
+      if (from !== null || to !== null) {
+        if (!CASHBOX_IDS.has(boxId!) || !from || !to || !isCashboxDate(from) || !isCashboxDate(to) || from > to) {
+          return res.status(400).json({ ok: false, error: 'Selecciona una caja y un rango de fechas válido.' });
+        }
+        const box = (snapshot.boxes || []).find((item: CashboxSummary) => item.id === boxId);
+        if (!box) return res.status(404).json({ ok: false, error: 'Caja no disponible.' });
+        const months = box.months.filter((item: MonthSummary) => item.month >= from.slice(0, 7) && item.month <= to.slice(0, 7));
+        const refs = months.map((item: MonthSummary) => db.collection('perseo_cashbox_history').doc(`${boxId}_${item.month}`));
+        const docs = refs.length ? await db.getAll(...refs) : [];
+        if (months.some((item: MonthSummary, index: number) => !docs[index].exists || docs[index].data()?.hash !== item.hash ||
+          docs[index].data()?.totalCents !== item.totalCents || docs[index].data()?.movements?.length !== item.count)) {
+          return res.status(503).json({ ok: false, error: 'Historial pendiente de sincronización. Actualiza la vista en unos instantes.' });
+        }
+        const histories = new Map<string, Movement[]>(months.map((item: MonthSummary, index: number) => [item.month, docs[index].data()?.movements || []]));
+        const ledger = buildCashboxLedger(box, histories, from, to);
+        return res.status(200).json({ ok: true, collectedAt: snapshot.collectedAt, currentBalanceCents: box.balanceCents, ...ledger });
+      }
       if (boxId === null && month === null) {
         return res.status(200).json({ ok: true, collectedAt: snapshot.collectedAt, boxes: snapshot.boxes || [] });
       }

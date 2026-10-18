@@ -1,118 +1,241 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ChevronRight, RefreshCw, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
+import { ArrowDown, ArrowDownLeft, ArrowUp, ArrowUpRight, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Filter, RefreshCw, Search, SlidersHorizontal, Wallet, X } from 'lucide-react';
 import { auth } from '../firebase';
+import { cashboxCell, cashboxCsv, cashboxText, cashboxType, filterCashboxRows, isCashboxDate, isCashboxNumericColumn } from '../lib/perseoCashboxLedger';
+import type { CashboxColumn, CashboxFilter, CashboxFilters, CashboxLedger, CashboxRow, CashboxSort, PerseoCashbox } from '../lib/perseoCashboxLedger';
 
-type Month = { month: string; count: number };
-type Box = { id: number; name: string; balanceCents: number; lastMovementDate: string | null; months: Month[] };
-type Movement = { id: number; date: string; recordedAt: string; amountCents: number; type: string; description: string; reference: string };
-type Summary = { collectedAt: string | null; boxes: Box[] };
-
-const BOX_LABELS: Record<number, string> = {
-  1: 'Esperado',
-  2: 'Ganancias',
-  3: 'Ganancias CNB',
-  12: 'Compra PDV',
-};
-const money = (cents: number) => new Intl.NumberFormat('es-EC', { style: 'currency', currency: 'USD' }).format(cents / 100);
+type Summary = { collectedAt: string | null; boxes: PerseoCashbox[] };
+type LedgerResponse = CashboxLedger & { collectedAt: string; currentBalanceCents: number };
+type DateRange = { from: string; to: string };
+const BOX_LABELS: Record<number, string> = { 1: 'Esperado', 2: 'Ganancias', 3: 'Ganancias CNB', 12: 'Compra PDV' };
+const COLUMNS: { key: CashboxColumn; label: string; numeric?: boolean }[] = [
+  { key: 'date', label: 'Fecha' }, { key: 'reference', label: 'Comprobante' }, { key: 'description', label: 'Concepto' },
+  { key: 'type', label: 'Tipo' }, { key: 'incomeCents', label: 'Ingresos', numeric: true },
+  { key: 'expenseCents', label: 'Egresos', numeric: true }, { key: 'balanceCents', label: 'Saldo', numeric: true },
+];
+const money = (cents: number) => new Intl.NumberFormat('es-EC', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(cents / 100);
 const dateTime = (value: string) => new Intl.DateTimeFormat('es-EC', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Guayaquil' }).format(new Date(value));
+const dayLabel = (value: string) => value ? value.split('-').reverse().join('/') : 'Sin movimientos';
+const todayInEcuador = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const inputClass = 'min-h-11 w-full rounded-xl border border-slate-600/60 bg-slate-950/60 px-3 text-sm text-slate-100 outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-400/15 [color-scheme:dark]';
+const buttonClass = 'inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 text-xs font-semibold text-slate-200 transition hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400 disabled:cursor-not-allowed disabled:opacity-40';
+const hasFilter = (filter?: CashboxFilter) => filter && (filter.values !== undefined || !!filter.min?.trim() || !!filter.max?.trim());
+function keepDialogFocus(event: KeyboardEvent<HTMLDivElement>) {
+  if (event.key !== 'Tab') return;
+  const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled)')];
+  const first = controls[0]; const last = controls[controls.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+}
 
-async function privateGet<T>(url: string): Promise<T> {
+async function privateGet<T>(url: string, signal?: AbortSignal): Promise<T> {
   const token = await auth.currentUser?.getIdToken();
   if (!token) throw new Error('Vuelve a iniciar sesión para consultar Perseo.');
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store', signal });
   const data = await response.json();
   if (!response.ok || !data.ok) throw new Error(data.error || 'No se pudo consultar Perseo.');
   return data as T;
 }
 
+function ColumnMenu({ column, rows, initial, position, onApply, onSort, onClose }: {
+  column: CashboxColumn; rows: CashboxRow[]; initial?: CashboxFilter; position: { left: number; top: number };
+  onApply: (value: CashboxFilter) => void; onSort: (direction: 'asc' | 'desc') => void; onClose: () => void;
+}) {
+  const title = COLUMNS.find(item => item.key === column)!.label;
+  const [query, setQuery] = useState('');
+  const [values, setValues] = useState<string[] | undefined>(initial?.values);
+  const [min, setMin] = useState(initial?.min || '');
+  const [max, setMax] = useState(initial?.max || '');
+  const options = useMemo(() => [...new Set(rows.map(row => String(cashboxCell(row, column))))].sort((a, b) =>
+    isCashboxNumericColumn(column) ? Number(a) - Number(b) : a.localeCompare(b, 'es', { numeric: true })), [rows, column]);
+  const label = (value: string) => isCashboxNumericColumn(column) ? money(Number(value)) : column === 'date' ? dayLabel(value) : value || '(Vacío)';
+  const matching = options.filter(value => cashboxText(label(value)).includes(cashboxText(query)));
+  const selected = values ?? options;
+  return createPortal(<div className="fixed inset-0 z-[190]" onKeyDown={event => { keepDialogFocus(event); if (event.key === 'Escape') { event.stopPropagation(); onClose(); } }}>
+    <div className="absolute inset-0 bg-slate-950/35 sm:bg-transparent" onClick={onClose} />
+    <div role="dialog" aria-modal="true" aria-label={`Filtrar ${title}`} style={position} className="absolute flex max-h-[calc(100dvh-24px)] w-[min(320px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-slate-600 bg-slate-900 text-left shadow-2xl">
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2"><h4 className="text-sm font-bold text-white">{title}</h4><button type="button" className="h-9 w-9 rounded-lg text-slate-400 hover:bg-white/10" onClick={onClose} aria-label="Cerrar filtro"><X className="mx-auto h-4 w-4" /></button></div>
+      <div className="grid grid-cols-2 gap-2 border-b border-white/10 p-3">
+        <button type="button" className={buttonClass} onClick={() => { onSort('asc'); onClose(); }}><ArrowUp className="h-4 w-4" /> Ascendente</button>
+        <button type="button" className={buttonClass} onClick={() => { onSort('desc'); onClose(); }}><ArrowDown className="h-4 w-4" /> Descendente</button>
+      </div>
+      {isCashboxNumericColumn(column) && <div className="grid grid-cols-2 gap-2 px-3 pt-3">
+        <label className="text-xs text-slate-400">Mínimo ($)<input className={`${inputClass} mt-1`} inputMode="decimal" value={min} onChange={event => setMin(event.target.value)} /></label>
+        <label className="text-xs text-slate-400">Máximo ($)<input className={`${inputClass} mt-1`} inputMode="decimal" value={max} onChange={event => setMax(event.target.value)} /></label>
+      </div>}
+      <div className="p-3"><input autoFocus className={inputClass} placeholder="Buscar valores…" aria-label={`Buscar valores de ${title}`} value={query} onChange={event => setQuery(event.target.value)} /></div>
+      <div className="flex gap-3 px-3 pb-2 text-xs"><button type="button" className="min-h-8 text-cyan-300" onClick={() => setValues(query ? [...new Set([...selected, ...matching])] : undefined)}>Seleccionar {query ? 'visibles' : 'todo'}</button><button type="button" className="min-h-8 text-slate-400" onClick={() => setValues([])}>Desmarcar todo</button><span className="ml-auto self-center text-slate-500">{selected.length}/{options.length}</span></div>
+      <div className="min-h-20 max-h-52 overflow-y-auto border-y border-white/5 px-2 py-1">
+        {matching.slice(0, 200).map(value => <label key={value} className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg px-2 text-sm text-slate-200 hover:bg-white/5">
+          <input type="checkbox" className="h-4 w-4 shrink-0 accent-cyan-400" checked={selected.includes(value)} onChange={event => setValues(event.target.checked ? [...selected, value] : selected.filter(item => item !== value))} />
+          <span className="truncate" title={label(value)}>{label(value)}</span>
+        </label>)}
+        {!matching.length && <p className="p-3 text-xs text-slate-400">Sin valores coincidentes.</p>}
+        {matching.length > 200 && <p className="p-3 text-xs text-amber-200">Hay {matching.length} valores. Escribe para encontrar uno específico.</p>}
+      </div>
+      <div className="flex justify-between gap-2 p-3"><button type="button" className={buttonClass} onClick={() => { onApply({}); onClose(); }}>Quitar filtro</button><button type="button" className="min-h-11 rounded-xl bg-cyan-400 px-5 text-sm font-bold text-slate-950 hover:bg-cyan-300" onClick={() => { onApply({ values: values?.length === options.length ? undefined : values, min, max }); onClose(); }}>Aplicar</button></div>
+    </div>
+  </div>, document.body);
+}
+
 export function PerseoCashboxes() {
+  const today = todayInEcuador();
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<Box | null>(null);
-  const [month, setMonth] = useState('');
-  const [movements, setMovements] = useState<Movement[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [selectedId, setSelectedId] = useState(1);
+  const [draftRange, setDraftRange] = useState<DateRange>({ from: `${today.slice(0, 7)}-01`, to: today });
+  const [range, setRange] = useState(draftRange);
+  const [dateError, setDateError] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [ledger, setLedger] = useState<LedgerResponse | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState('');
+  const [search, setSearch] = useState('');
+  const [filters, setFilters] = useState<CashboxFilters>({});
+  const [sort, setSort] = useState<CashboxSort>({ column: 'date', direction: 'desc' });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [menu, setMenu] = useState<{ column: CashboxColumn; left: number; top: number } | null>(null);
+  const menuTrigger = useRef<HTMLButtonElement | null>(null);
+  const [detail, setDetail] = useState<CashboxRow | null>(null);
+  const selected = summary?.boxes.find(box => box.id === selectedId);
+  const selectedName = BOX_LABELS[selectedId] || selected?.name || 'Caja';
 
   const refresh = useCallback(async () => {
+    setLoading(true);
     try {
       const data = await privateGet<Summary>('/api/perseo/cashboxes');
-      setSummary(data);
-      setError('');
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'No se pudo consultar Perseo.');
-    } finally {
-      setLoading(false);
-    }
+      setSummary(data); setError(''); setRevision(value => value + 1);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'No se pudo consultar Perseo.'); }
+    finally { setLoading(false); }
   }, []);
-
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 5 * 60_000);
     return () => window.clearInterval(timer);
   }, [refresh]);
-
   useEffect(() => {
-    if (!selected || !month) return;
-    let active = true;
-    setHistoryLoading(true);
-    setHistoryError('');
-    setMovements([]);
-    void privateGet<{ movements: Movement[] }>(`/api/perseo/cashboxes?boxId=${selected.id}&month=${encodeURIComponent(month)}`)
-      .then(data => { if (active) setMovements(data.movements); })
+    if (!summary?.collectedAt) { setHistoryLoading(false); return; }
+    const controller = new AbortController(); let active = true;
+    setHistoryLoading(true); setHistoryError(''); setLedger(null);
+    const params = new URLSearchParams({ boxId: String(selectedId), from: range.from, to: range.to });
+    void privateGet<LedgerResponse>(`/api/perseo/cashboxes?${params}`, controller.signal)
+      .then(data => { if (active) setLedger(data); })
       .catch(cause => { if (active) setHistoryError(cause instanceof Error ? cause.message : 'No se pudo cargar el historial.'); })
       .finally(() => { if (active) setHistoryLoading(false); });
-    return () => { active = false; };
-  }, [selected, month]);
+    return () => { active = false; controller.abort(); };
+  }, [selectedId, range.from, range.to, revision, !!summary?.collectedAt]);
+  useEffect(() => { setPage(1); }, [search, filters, sort, pageSize, selectedId, range]);
+  useEffect(() => { setFilters({}); setSearch(''); setMenu(null); setDetail(null); }, [selectedId, range]);
 
-  const stale = summary?.collectedAt ? Date.now() - Date.parse(summary.collectedAt) > 24 * 60 * 60_000 : false;
-  const openBox = (box: Box) => {
-    setSelected(box);
-    setMonth(box.months[box.months.length - 1]?.month || '');
+  const rows = useMemo(() => filterCashboxRows(ledger?.movements || [], search, filters, sort), [ledger, search, filters, sort]);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const pageRows = rows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const activeFilters = Object.values(filters).filter(hasFilter).length;
+  const filteredIncome = rows.reduce((sum, row) => sum + row.incomeCents, 0);
+  const filteredExpense = rows.reduce((sum, row) => sum + row.expenseCents, 0);
+  const stale = summary?.collectedAt ? Date.now() - Date.parse(summary.collectedAt) > 45 * 60_000 : false;
+  const applyRange = (next: DateRange) => {
+    if (!isCashboxDate(next.from) || !isCashboxDate(next.to) || next.from > next.to || next.to > today) {
+      setDateError('Revisa las fechas: Desde debe ser anterior o igual a Hasta, sin superar hoy.'); return;
+    }
+    setDraftRange(next); setRange({ ...next }); setDateError('');
+  };
+  const preset = (kind: 'today' | 'month' | 'previous' | 'all') => {
+    if (kind === 'today') applyRange({ from: today, to: today });
+    if (kind === 'month') applyRange({ from: `${today.slice(0, 7)}-01`, to: today });
+    if (kind === 'all') applyRange({ from: `${selected?.months.map(item => item.month).sort()[0] || today.slice(0, 7)}-01`, to: today });
+    if (kind === 'previous') {
+      const first = new Date(`${today.slice(0, 7)}-01T12:00:00Z`);
+      const last = new Date(first.getTime() - 24 * 60 * 60_000);
+      applyRange({ from: `${last.toISOString().slice(0, 7)}-01`, to: last.toISOString().slice(0, 10) });
+    }
+  };
+  const closeMenu = () => { setMenu(null); menuTrigger.current?.focus(); };
+  const exportRows = () => {
+    const url = URL.createObjectURL(new Blob([cashboxCsv(rows)], { type: 'text/csv;charset=utf-8;' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = `perseo-caja-${selectedId}-${range.from}-${range.to}.csv`; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  return (
-    <section className="mb-8 sm:mb-12 text-left" aria-labelledby="perseo-cashboxes-title">
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 id="perseo-cashboxes-title" className="text-lg sm:text-xl font-black text-white">Cajas de Perseo</h2>
-          <p className="mt-1 text-xs text-slate-400">Consulta de solo lectura · Saldo e historial de las cajas seleccionadas</p>
-          {summary?.collectedAt && <p className={`mt-1 text-xs font-semibold ${stale ? 'text-amber-300' : 'text-slate-400'}`}>Actualizado: {dateTime(summary.collectedAt)}{stale ? ' · Datos atrasados' : ''}</p>}
-        </div>
-        <button type="button" onClick={() => void refresh()} disabled={loading} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 text-xs font-bold text-slate-200 hover:bg-white/10 disabled:opacity-50" aria-label="Actualizar cajas de Perseo">
-          <RefreshCw className="h-4 w-4" /> Actualizar vista
-        </button>
+  return <section className="mb-8 text-left sm:mb-12" aria-labelledby="perseo-cashboxes-title">
+    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <div><div className="flex items-center gap-2"><Wallet className="h-5 w-5 text-cyan-300" /><h2 id="perseo-cashboxes-title" className="text-lg font-black text-white sm:text-xl">Cajas de Perseo</h2><span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-cyan-200">Consulta</span></div><p className="mt-1 text-xs text-slate-400">Saldos, movimientos y estado de caja por fecha</p></div>
+      <button type="button" onClick={() => void refresh()} disabled={loading} className={buttonClass} aria-label="Actualizar cajas de Perseo"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Actualizar vista</button>
+    </div>
+    {error && <p role="alert" className="mb-3 rounded-xl border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</p>}
+    {loading && !summary && <p role="status" className="rounded-2xl border border-white/10 bg-slate-800 p-5 text-sm text-slate-300">Cargando cajas de Perseo…</p>}
+    {!loading && !summary?.collectedAt && !error && <p className="rounded-2xl border border-white/10 bg-slate-800 p-5 text-sm text-slate-300">Aún no hay datos sincronizados desde Perseo.</p>}
+    {!!summary?.boxes.length && <>
+      <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">{summary.boxes.map(box => <button key={box.id} type="button" aria-pressed={selectedId === box.id} onClick={() => setSelectedId(box.id)} className={`rounded-2xl border p-3 text-left transition sm:p-4 ${selectedId === box.id ? 'border-cyan-400/70 bg-cyan-400/10 ring-1 ring-cyan-400/20' : 'border-white/10 bg-slate-800/70 hover:border-slate-500'} focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400`}>
+        <span className="flex items-center justify-between gap-1 text-[11px] font-bold uppercase tracking-wide text-slate-300"><span>{BOX_LABELS[box.id] || box.name}</span>{selectedId === box.id && <Check className="h-4 w-4 shrink-0 text-cyan-300" />}</span>
+        <span className="mt-2 block whitespace-nowrap text-xl font-black tabular-nums text-white sm:text-2xl">{money(box.balanceCents)}</span><span className="mt-1 block text-[10px] text-slate-400 sm:text-xs">Últ. movimiento: {dayLabel(box.lastMovementDate || '')}</span>
+      </button>)}</div>
+      <div className="overflow-hidden rounded-2xl border border-slate-600/60 bg-slate-900 shadow-xl shadow-slate-950/20">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-slate-800/60 px-4 py-3 sm:px-5"><div><h3 className="font-bold text-white">Movimientos · {selectedName}</h3><p className="mt-1 text-[11px] text-slate-400">{selected?.name}</p></div><p className={`text-[11px] ${stale ? 'text-amber-300' : 'text-slate-400'}`}><span className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${stale ? 'bg-amber-400' : 'bg-emerald-400'}`} />{stale ? 'Sincronización atrasada · ' : 'Corte sincronizado · '}{summary.collectedAt && dateTime(summary.collectedAt)}</p></div>
+        {stale && <p role="status" className="border-b border-amber-400/20 bg-amber-400/10 px-4 py-2 text-xs text-amber-200">Los saldos corresponden al último corte recibido. La sincronización local con Perseo se realiza cada 15 minutos.</p>}
+        <form className="border-b border-white/10 p-4 sm:px-5" onSubmit={event => { event.preventDefault(); applyRange(draftRange); }}>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="min-w-0 flex-1 text-xs font-semibold text-slate-400 sm:max-w-48">Desde<input type="date" max={today} value={draftRange.from} onChange={event => setDraftRange(value => ({ ...value, from: event.target.value }))} className={`${inputClass} mt-1.5`} /></label>
+            <label className="min-w-0 flex-1 text-xs font-semibold text-slate-400 sm:max-w-48">Hasta<input type="date" max={today} value={draftRange.to} onChange={event => setDraftRange(value => ({ ...value, to: event.target.value }))} className={`${inputClass} mt-1.5`} /></label>
+            <button type="submit" className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-5 text-sm font-bold text-slate-950 hover:bg-cyan-300 sm:w-auto"><CalendarDays className="h-4 w-4" />Consultar</button>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">{([['today', 'Hoy'], ['month', 'Este mes'], ['previous', 'Mes anterior'], ['all', 'Todo el historial']] as const).map(([key, label]) => <button key={key} type="button" onClick={() => preset(key)} className="min-h-9 rounded-lg border border-white/10 px-3 text-xs text-slate-300 hover:border-cyan-400/40 hover:text-cyan-200">{label}</button>)}</div>
+          {dateError && <p role="alert" className="mt-2 text-xs text-rose-300">{dateError}</p>}
+        </form>
+        {historyLoading && <div role="status" className="flex items-center gap-2 px-5 py-12 text-sm text-slate-400"><RefreshCw className="h-4 w-4 animate-spin" /> Consultando movimientos y saldos…</div>}
+        {historyError && <div role="alert" className="px-5 py-8 text-sm text-rose-200">{historyError}<button type="button" onClick={() => setRevision(value => value + 1)} className={`${buttonClass} ml-3`}>Reintentar</button></div>}
+        {!historyLoading && !historyError && ledger && <>
+          <div className="grid grid-cols-2 gap-px border-b border-white/10 bg-slate-700/30 lg:grid-cols-4" aria-label="Resumen del período">{[
+            { label: 'Saldo inicial', value: ledger.openingBalanceCents, note: `Antes del ${dayLabel(range.from)}`, color: 'text-white', icon: <Wallet className="h-4 w-4 text-slate-400" /> },
+            { label: 'Ingresos del período', value: ledger.incomeCents, note: 'Entradas de caja', color: 'text-emerald-300', icon: <ArrowDownLeft className="h-4 w-4 text-emerald-400" /> },
+            { label: 'Egresos del período', value: ledger.expenseCents, note: 'Salidas de caja', color: 'text-rose-300', icon: <ArrowUpRight className="h-4 w-4 text-rose-400" /> },
+            { label: 'Saldo al cierre del rango', value: ledger.closingBalanceCents, note: `Al ${dayLabel(range.to)}`, color: 'text-cyan-200', icon: <CalendarDays className="h-4 w-4 text-cyan-300" /> },
+          ].map(item => <div key={item.label} className="bg-slate-900 px-4 py-4 sm:px-5"><span className="flex items-center gap-2 text-[11px] font-semibold text-slate-400">{item.icon}{item.label}</span><p className={`mt-2 whitespace-nowrap text-lg font-bold tabular-nums sm:text-xl ${item.color}`}>{money(item.value)}</p><p className="mt-1 text-[10px] text-slate-500">{item.note}</p></div>)}</div>
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3 sm:px-5"><label className="relative min-w-0 flex-1"><Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-slate-500" /><input className={`${inputClass} pl-9`} placeholder="Buscar en los movimientos…" aria-label="Buscar en los movimientos de Perseo" value={search} onChange={event => setSearch(event.target.value)} /></label>
+            {(activeFilters > 0 || search) && <button type="button" onClick={() => { setFilters({}); setSearch(''); }} className={buttonClass}><X className="h-4 w-4" />Limpiar{activeFilters > 0 ? ` (${activeFilters})` : ''}</button>}
+            <button type="button" className={buttonClass} onClick={exportRows} disabled={!rows.length} title="Exportar todos los movimientos filtrados, de todas las páginas"><Download className="h-4 w-4" /><span className="hidden sm:inline">Exportar</span> Excel CSV</button>
+          </div>
+          {!!activeFilters && <div className="flex flex-wrap gap-2 px-4 pb-3 sm:px-5">{COLUMNS.filter(column => hasFilter(filters[column.key])).map(column => <button key={column.key} type="button" onClick={() => setFilters(value => { const next = { ...value }; delete next[column.key]; return next; })} className="inline-flex min-h-8 items-center gap-2 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-2 text-xs text-cyan-200"><Filter className="h-3 w-3" />{column.label}<X className="h-3 w-3" /></button>)}</div>}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-y border-white/5 bg-slate-800/30 px-4 py-2 text-[11px] text-slate-400 sm:px-5"><span><span className="font-bold text-slate-200">{rows.length}</span> de {ledger.movements.length} movimientos · {dayLabel(range.from)} — {dayLabel(range.to)}</span><span className="inline-flex items-center gap-1"><SlidersHorizontal className="h-3 w-3" />Filtros en cada columna</span></div>
+          <p className="px-4 pt-2 text-[10px] text-slate-500 sm:hidden">Desliza la tabla hacia los lados para ver todas las columnas.</p>
+          <div className="max-h-[520px] overflow-auto" tabIndex={0} aria-label="Tabla desplazable de movimientos"><table className="w-full min-w-[1060px] border-collapse text-sm" aria-label={`Movimientos de ${selectedName}`}>
+            <thead className="sticky top-0 z-10 bg-slate-800 shadow-sm"><tr>{COLUMNS.map(column => <th key={column.key} scope="col" aria-sort={sort.column === column.key ? sort.direction === 'asc' ? 'ascending' : 'descending' : 'none'} className={`border-b border-r border-slate-600/50 px-3 py-1.5 text-xs font-semibold text-slate-300 ${column.numeric ? 'text-right' : 'text-left'}`}>
+              <div className={`flex items-center gap-1 ${column.numeric ? 'justify-end' : ''}`}><button type="button" className="inline-flex min-h-10 items-center gap-1 whitespace-nowrap hover:text-white" onClick={() => setSort(value => ({ column: column.key, direction: value.column === column.key && value.direction === 'asc' ? 'desc' : 'asc' }))}>{column.label}{sort.column === column.key && (sort.direction === 'asc' ? <ArrowUp className="h-3 w-3 text-cyan-300" /> : <ArrowDown className="h-3 w-3 text-cyan-300" />)}</button><button type="button" aria-label={`Filtrar ${column.label}`} aria-expanded={menu?.column === column.key} className={`flex h-9 w-8 shrink-0 items-center justify-center rounded-lg hover:bg-white/10 ${hasFilter(filters[column.key]) ? 'bg-cyan-400/15 text-cyan-300' : 'text-slate-500'}`} onClick={event => {
+                const rect = event.currentTarget.getBoundingClientRect(); menuTrigger.current = event.currentTarget;
+                setMenu({ column: column.key, left: Math.max(12, Math.min(rect.left, window.innerWidth - 332)), top: Math.max(12, Math.min(rect.bottom + 6, window.innerHeight - 530)) });
+              }}>{hasFilter(filters[column.key]) ? <Filter className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}</button></div>
+            </th>)}</tr></thead>
+            <tbody className="divide-y divide-slate-700/50">
+              {!pageRows.length && <tr><td colSpan={7} className="px-5 py-12 text-center text-sm text-slate-400">{ledger.movements.length ? 'No hay movimientos que coincidan con los filtros.' : 'No hay movimientos en este período. El saldo anterior se conserva en el resumen.'}</td></tr>}
+              {pageRows.map((row, index) => <tr key={row.id} className={`${index % 2 ? 'bg-slate-800/25' : 'bg-slate-900'} hover:bg-cyan-400/5`} onDoubleClick={() => setDetail(row)}>
+                <td className="whitespace-nowrap border-r border-slate-700/30 px-3 py-3 font-mono text-xs text-slate-300">{dayLabel(row.date)}</td>
+                <td className="max-w-44 truncate border-r border-slate-700/30 px-3 py-3 font-mono text-xs text-slate-400" title={row.reference}>{row.reference || '—'}</td>
+                <td className="w-full min-w-64 border-r border-slate-700/30 px-3 py-2"><button type="button" onClick={() => setDetail(row)} className="min-h-9 w-full text-left text-xs font-medium text-slate-200 hover:text-cyan-200" title="Ver detalle del movimiento"><span className="line-clamp-2">{row.description || 'Sin concepto'}</span></button></td>
+                <td className="border-r border-slate-700/30 px-3 py-3"><span className={`rounded-md border px-2 py-1 text-[10px] font-semibold ${row.amountCents < 0 ? 'border-rose-400/20 bg-rose-400/10 text-rose-300' : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300'}`}>{cashboxType(row.type)}</span></td>
+                <td className="whitespace-nowrap border-r border-slate-700/30 px-3 py-3 text-right font-mono text-xs tabular-nums text-emerald-300">{row.incomeCents ? money(row.incomeCents) : '—'}</td>
+                <td className="whitespace-nowrap border-r border-slate-700/30 px-3 py-3 text-right font-mono text-xs tabular-nums text-rose-300">{row.expenseCents ? money(row.expenseCents) : '—'}</td>
+                <td className={`whitespace-nowrap px-3 py-3 text-right font-mono text-xs font-semibold tabular-nums ${row.balanceCents < 0 ? 'text-rose-300' : 'text-slate-100'}`}>{money(row.balanceCents)}</td>
+              </tr>)}
+            </tbody>
+            {!!rows.length && <tfoot className="sticky bottom-0 bg-slate-800 text-xs shadow-sm"><tr><th scope="row" colSpan={4} className="border-t border-slate-600 px-3 py-3 text-left font-semibold text-slate-300">Totales filtrados · {rows.length} movimientos</th><td className="whitespace-nowrap border-t border-slate-600 px-3 py-3 text-right font-mono font-bold text-emerald-300">{money(filteredIncome)}</td><td className="whitespace-nowrap border-t border-slate-600 px-3 py-3 text-right font-mono font-bold text-rose-300">{money(filteredExpense)}</td><td className="border-t border-slate-600 px-3 py-3 text-right text-slate-500">—</td></tr></tfoot>}
+          </table></div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 px-4 py-3 sm:px-5"><label className="flex items-center gap-2 text-xs text-slate-400">Filas<select className="min-h-10 rounded-lg border border-slate-600 bg-slate-800 px-2 text-slate-200" value={pageSize} onChange={event => setPageSize(Number(event.target.value))}>{[25, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}</select></label>
+            <div className="flex items-center gap-2 text-xs text-slate-400"><button type="button" className={buttonClass} disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)} aria-label="Página anterior de movimientos"><ChevronLeft className="h-4 w-4" /></button><span aria-live="polite">{currentPage} / {pageCount}</span><button type="button" className={buttonClass} disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)} aria-label="Página siguiente de movimientos"><ChevronRight className="h-4 w-4" /></button></div>
+          </div><p className="border-t border-white/5 px-4 py-3 text-[11px] leading-relaxed text-slate-500 sm:px-5">Saldo inicial + ingresos − egresos = saldo al cierre del rango. Los filtros y el orden de la tabla no alteran el saldo contable de cada movimiento. Toca el concepto para ver su detalle.</p>
+        </>}
       </div>
-      {error && <p role="alert" className="mb-4 rounded-xl border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</p>}
-      {!loading && !summary?.collectedAt && !error && <p className="rounded-2xl border border-white/10 bg-[#1E293B] p-5 text-sm text-slate-300">Aún no hay datos sincronizados desde Perseo. Los saldos aparecerán tras la primera sincronización local.</p>}
-      {loading && !summary && <p className="rounded-2xl border border-white/10 bg-[#1E293B] p-5 text-sm text-slate-300">Cargando cajas de Perseo…</p>}
-      {!!summary?.boxes.length && <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {summary.boxes.map(box => <button key={box.id} type="button" onClick={() => openBox(box)} className="min-h-32 rounded-2xl border border-cyan-500/20 bg-[#1E293B] p-5 text-left transition-colors hover:border-cyan-400/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400">
-          <span className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-wide text-cyan-300"><span>{BOX_LABELS[box.id] || box.name}</span><ChevronRight className="h-4 w-4 shrink-0" /></span>
-          <span className="mt-3 block text-2xl font-black text-white">{money(box.balanceCents)}</span>
-          <span className="mt-2 block text-xs text-slate-400">Último movimiento: {box.lastMovementDate || 'Sin movimientos'}</span>
-        </button>)}
-      </div>}
-
-      {selected && <div className="fixed inset-0 z-[180] flex items-end justify-center bg-slate-950/80 p-0 backdrop-blur-sm sm:items-center sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) setSelected(null); }}>
-        <div role="dialog" aria-modal="true" aria-label={`Historial de ${BOX_LABELS[selected.id]}`} className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-t-3xl border border-white/10 bg-[#0F172A] shadow-2xl sm:rounded-3xl">
-          <div className="flex items-start justify-between gap-4 border-b border-white/10 p-5">
-            <div><h3 className="text-lg font-black text-white">{BOX_LABELS[selected.id]}</h3><p className="text-sm text-slate-400">Saldo Perseo: <span className="font-bold text-white">{money(selected.balanceCents)}</span></p></div>
-            <button type="button" onClick={() => setSelected(null)} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/5 text-white" aria-label="Cerrar historial"><X className="h-5 w-5" /></button>
-          </div>
-          <div className="border-b border-white/10 px-5 py-3"><label htmlFor="perseo-history-month" className="mr-3 text-xs font-bold text-slate-300">Mes</label><select id="perseo-history-month" value={month} onChange={event => setMonth(event.target.value)} className="min-h-11 rounded-xl border border-white/10 bg-slate-800 px-3 text-sm text-white">{selected.months.slice().reverse().map(item => <option key={item.month} value={item.month}>{item.month} · {item.count} movimientos</option>)}</select></div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-            {historyLoading && <p className="text-sm text-slate-400">Cargando movimientos…</p>}
-            {historyError && <p role="alert" className="text-sm text-rose-300">{historyError}</p>}
-            {!historyLoading && !historyError && movements.length === 0 && <p className="text-sm text-slate-400">No hay movimientos este mes.</p>}
-            <div className="space-y-2">{movements.slice().reverse().map(item => <div key={item.id} className="flex items-start justify-between gap-3 rounded-xl border border-white/5 bg-slate-800/60 p-3">
-              <div className="min-w-0"><p className="break-words text-sm font-semibold text-white">{item.description || item.type}</p><p className="mt-1 text-xs text-slate-400">{item.date} · {item.type}{item.reference ? ` · ${item.reference}` : ''}</p></div>
-              <span className={`shrink-0 text-sm font-black ${item.amountCents < 0 ? 'text-rose-300' : 'text-emerald-300'}`}>{money(item.amountCents)}</span>
-            </div>)}</div>
-          </div>
-        </div>
-      </div>}
-    </section>
-  );
+    </>}
+    {menu && ledger && <ColumnMenu key={`${menu.column}-${selectedId}`} column={menu.column} rows={ledger.movements} initial={filters[menu.column]} position={{ left: menu.left, top: menu.top }} onApply={value => setFilters(previous => ({ ...previous, [menu.column]: value }))} onSort={direction => setSort({ column: menu.column, direction })} onClose={closeMenu} />}
+    {detail && <div className="fixed inset-0 z-[180] flex items-end justify-center bg-slate-950/80 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={event => { if (event.target === event.currentTarget) setDetail(null); }} onKeyDown={event => { keepDialogFocus(event); if (event.key === 'Escape') setDetail(null); }}>
+      <div role="dialog" aria-modal="true" aria-label="Detalle del movimiento de Perseo" className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-white/10 bg-slate-900 p-5 sm:rounded-2xl"><div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-widest text-cyan-300">{selectedName}</p><h4 className="mt-1 text-lg font-bold text-white">Movimiento #{detail.id}</h4></div><button autoFocus type="button" className={buttonClass} onClick={() => setDetail(null)} aria-label="Cerrar detalle del movimiento"><X className="h-4 w-4" /></button></div>
+        <p className="mb-5 break-words text-sm font-medium text-slate-200">{detail.description || 'Sin concepto'}</p><dl className="grid grid-cols-2 gap-4 text-xs">{[['Fecha del movimiento', dayLabel(detail.date)], ['Fecha de registro', detail.recordedAt || 'No disponible'], ['Comprobante', detail.reference || 'Sin comprobante'], ['Tipo', cashboxType(detail.type)], ['Importe', money(detail.amountCents)], ['Saldo tras el movimiento', money(detail.balanceCents)]].map(([label, value]) => <div key={label}><dt className="text-slate-500">{label}</dt><dd className="mt-1 break-words font-semibold text-slate-100">{value}</dd></div>)}</dl>
+      </div>
+    </div>}
+  </section>;
 }
