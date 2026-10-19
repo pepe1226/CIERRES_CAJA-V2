@@ -66,3 +66,14 @@ test('exporta todos los resultados recibidos y neutraliza fórmulas en textos de
   assert.ok(csv.includes('30,00;0,00;130,00'));
   assert.equal(csv.split('\r\n').length, 5);
 });
+
+test('concilia una caja activa de alto volumen sin perder ni duplicar movimientos', () => {
+  const movements = Array.from({ length: 5830 }, (_, index) => entry(index + 1, '2026-10-05', index % 2 ? -99 : 100));
+  const total = movements.reduce((sum, row) => sum + row.amountCents, 0);
+  const large: PerseoCashbox = { id: 19, name: 'Caja activa', balanceCents: total, lastMovementDate: '2026-10-05', months: [{ month: '2026-10', count: 5830, totalCents: total, hash: '' }] };
+  const ledger = buildCashboxLedger(large, new Map([['2026-10', movements.reverse()]]), '2026-10-01', '2026-10-31');
+  assert.equal(ledger.movements.length, 5830);
+  assert.equal(ledger.closingBalanceCents, total);
+  assert.equal(ledger.movements[0].id, 1);
+  assert.equal(ledger.movements.at(-1)?.id, 5830);
+});

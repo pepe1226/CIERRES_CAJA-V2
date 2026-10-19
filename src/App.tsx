@@ -3685,7 +3685,7 @@ Notas: ${closure.notes || 'N/A'}`;
           <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-700 rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl shadow-blue-500/20">
             <DollarSign className="w-12 h-12 text-white" />
           </div>
-          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.3.1</h1>
+          <h1 className="text-4xl font-black text-white mb-4 tracking-tight">CIERRES 1.4.0</h1>
           <p className="text-slate-400 mb-10 leading-relaxed text-lg">Gestiona tus cierres de caja en la nube.</p>
           <button
             type="button"
@@ -3789,7 +3789,7 @@ Notas: ${closure.notes || 'N/A'}`;
                 <Calculator className="text-white w-5 h-5 sm:w-7 sm:h-7" />
               </div>
               <div className="min-w-0">
-                <h1 className="text-base sm:text-xl font-black text-white leading-tight whitespace-nowrap">CIERRES 1.3.1</h1>
+                <h1 className="text-base sm:text-xl font-black text-white leading-tight whitespace-nowrap">CIERRES 1.4.0</h1>
                 <p className="hidden sm:block text-[10px] font-black text-slate-500 uppercase tracking-[0.24em]">Plataforma administrativa</p>
               </div>
             </div>

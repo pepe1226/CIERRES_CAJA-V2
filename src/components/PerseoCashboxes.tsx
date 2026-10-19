@@ -6,10 +6,11 @@ import { auth } from '../firebase';
 import { cashboxCell, cashboxCsv, cashboxText, cashboxType, filterCashboxRows, isCashboxDate, isCashboxNumericColumn } from '../lib/perseoCashboxLedger';
 import type { CashboxColumn, CashboxFilter, CashboxFilters, CashboxLedger, CashboxRow, CashboxSort, PerseoCashbox } from '../lib/perseoCashboxLedger';
 
-type Summary = { collectedAt: string | null; boxes: PerseoCashbox[] };
+type Summary = { collectedAt: string | null; boxes: PerseoCashbox[]; visibleBoxIds: number[] };
 type LedgerResponse = CashboxLedger & { collectedAt: string; currentBalanceCents: number };
 type DateRange = { from: string; to: string };
 const BOX_LABELS: Record<number, string> = { 1: 'Esperado', 2: 'Ganancias', 3: 'Ganancias CNB', 12: 'Compra PDV' };
+const boxLabel = (box: PerseoCashbox) => BOX_LABELS[box.id] || box.name.replace(/^CAJA\s+/i, '').trim();
 const COLUMNS: { key: CashboxColumn; label: string; numeric?: boolean }[] = [
   { key: 'date', label: 'Fecha' }, { key: 'reference', label: 'Comprobante' }, { key: 'description', label: 'Concepto' },
   { key: 'type', label: 'Tipo' }, { key: 'incomeCents', label: 'Ingresos', numeric: true },
@@ -30,10 +31,13 @@ function keepDialogFocus(event: KeyboardEvent<HTMLDivElement>) {
   if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
 }
 
-async function privateGet<T>(url: string, signal?: AbortSignal): Promise<T> {
+async function privateRequest<T>(url: string, options: { signal?: AbortSignal; visibleBoxIds?: number[] } = {}): Promise<T> {
   const token = await auth.currentUser?.getIdToken();
   if (!token) throw new Error('Vuelve a iniciar sesión para consultar Perseo.');
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store', signal });
+  const response = await fetch(url, { method: options.visibleBoxIds !== undefined ? 'PATCH' : 'GET',
+    headers: { Authorization: `Bearer ${token}`, ...(options.visibleBoxIds !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+    body: options.visibleBoxIds !== undefined ? JSON.stringify({ visibleBoxIds: options.visibleBoxIds }) : undefined,
+    cache: 'no-store', signal: options.signal });
   const data = await response.json();
   if (!response.ok || !data.ok) throw new Error(data.error || 'No se pudo consultar Perseo.');
   return data as T;
@@ -101,14 +105,22 @@ export function PerseoCashboxes() {
   const [menu, setMenu] = useState<{ column: CashboxColumn; left: number; top: number } | null>(null);
   const menuTrigger = useRef<HTMLButtonElement | null>(null);
   const [detail, setDetail] = useState<CashboxRow | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogDraft, setCatalogDraft] = useState<number[]>([]);
+  const [savingVisibility, setSavingVisibility] = useState(false);
   const selected = summary?.boxes.find(box => box.id === selectedId);
-  const selectedName = BOX_LABELS[selectedId] || selected?.name || 'Caja';
+  const selectedName = selected ? boxLabel(selected) : 'Caja';
+  const visibleIds = summary?.visibleBoxIds ?? [1, 2, 3, 12];
+  const visibleBoxes = summary?.boxes.filter(box => visibleIds.includes(box.id)) || [];
+  const catalogBoxes = summary?.boxes.filter(box => cashboxText(`${box.id} ${box.name}`).includes(cashboxText(catalogSearch))) || [];
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await privateGet<Summary>('/api/perseo/cashboxes');
+      const data = await privateRequest<Summary>('/api/perseo/cashboxes');
       setSummary(data); setError(''); setRevision(value => value + 1);
+      setSelectedId(value => data.boxes.some(box => box.id === value) ? value : data.visibleBoxIds?.[0] || data.boxes[0]?.id || 1);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'No se pudo consultar Perseo.'); }
     finally { setLoading(false); }
   }, []);
@@ -122,7 +134,7 @@ export function PerseoCashboxes() {
     const controller = new AbortController(); let active = true;
     setHistoryLoading(true); setHistoryError(''); setLedger(null);
     const params = new URLSearchParams({ boxId: String(selectedId), from: range.from, to: range.to });
-    void privateGet<LedgerResponse>(`/api/perseo/cashboxes?${params}`, controller.signal)
+    void privateRequest<LedgerResponse>(`/api/perseo/cashboxes?${params}`, { signal: controller.signal })
       .then(data => { if (active) setLedger(data); })
       .catch(cause => { if (active) setHistoryError(cause instanceof Error ? cause.message : 'No se pudo cargar el historial.'); })
       .finally(() => { if (active) setHistoryLoading(false); });
@@ -148,7 +160,10 @@ export function PerseoCashboxes() {
   const preset = (kind: 'today' | 'month' | 'previous' | 'all') => {
     if (kind === 'today') applyRange({ from: today, to: today });
     if (kind === 'month') applyRange({ from: `${today.slice(0, 7)}-01`, to: today });
-    if (kind === 'all') applyRange({ from: `${selected?.months.map(item => item.month).sort()[0] || today.slice(0, 7)}-01`, to: today });
+    if (kind === 'all') {
+      if ((selected?.months.reduce((sum, item) => sum + item.count, 0) || 0) > 10_000) { setDateError('Esta caja tiene un historial extenso. Elige un mes o un rango de fechas para consultar todos sus movimientos con detalle.'); return; }
+      applyRange({ from: `${selected?.months.map(item => item.month).sort()[0] || today.slice(0, 7)}-01`, to: today });
+    }
     if (kind === 'previous') {
       const first = new Date(`${today.slice(0, 7)}-01T12:00:00Z`);
       const last = new Date(first.getTime() - 24 * 60 * 60_000);
@@ -156,6 +171,21 @@ export function PerseoCashboxes() {
     }
   };
   const closeMenu = () => { setMenu(null); menuTrigger.current?.focus(); };
+  const openCatalog = () => { setCatalogDraft([...visibleIds]); setCatalogSearch(''); setCatalogOpen(true); };
+  const selectBox = (box: PerseoCashbox) => {
+    const count = box.months.filter(item => item.month >= range.from.slice(0, 7) && item.month <= range.to.slice(0, 7)).reduce((sum, item) => sum + item.count, 0);
+    if (count > 10_000) applyRange({ from: `${today.slice(0, 7)}-01`, to: today });
+    setSelectedId(box.id); setCatalogOpen(false);
+  };
+  const saveVisibility = async () => {
+    setSavingVisibility(true);
+    try {
+      const result = await privateRequest<{ visibleBoxIds: number[] }>('/api/perseo/cashboxes', { visibleBoxIds: catalogDraft });
+      setSummary(previous => previous ? { ...previous, visibleBoxIds: result.visibleBoxIds } : previous);
+      setCatalogOpen(false); setError('');
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'No se pudo guardar la visibilidad de las cajas.'); }
+    finally { setSavingVisibility(false); }
+  };
   const exportRows = () => {
     const url = URL.createObjectURL(new Blob([cashboxCsv(rows)], { type: 'text/csv;charset=utf-8;' }));
     const link = document.createElement('a');
@@ -166,18 +196,20 @@ export function PerseoCashboxes() {
   return <section className="mb-8 text-left sm:mb-12" aria-labelledby="perseo-cashboxes-title">
     <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
       <div><div className="flex items-center gap-2"><Wallet className="h-5 w-5 text-cyan-300" /><h2 id="perseo-cashboxes-title" className="text-lg font-black text-white sm:text-xl">Cajas de Perseo</h2><span className="rounded-md border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-cyan-200">Consulta</span></div><p className="mt-1 text-xs text-slate-400">Saldos, movimientos y estado de caja por fecha</p></div>
-      <button type="button" onClick={() => void refresh()} disabled={loading} className={buttonClass} aria-label="Actualizar cajas de Perseo"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Actualizar vista</button>
+      <div className="flex flex-wrap gap-2"><button type="button" onClick={openCatalog} disabled={!summary?.boxes.length} className={buttonClass}><SlidersHorizontal className="h-4 w-4" />Todas las cajas ({summary?.boxes.length || 0})</button><button type="button" onClick={() => void refresh()} disabled={loading} className={buttonClass} aria-label="Actualizar cajas de Perseo"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /> Actualizar vista</button></div>
     </div>
     {error && <p role="alert" className="mb-3 rounded-xl border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</p>}
     {loading && !summary && <p role="status" className="rounded-2xl border border-white/10 bg-slate-800 p-5 text-sm text-slate-300">Cargando cajas de Perseo…</p>}
     {!loading && !summary?.collectedAt && !error && <p className="rounded-2xl border border-white/10 bg-slate-800 p-5 text-sm text-slate-300">Aún no hay datos sincronizados desde Perseo.</p>}
     {!!summary?.boxes.length && <>
-      <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">{summary.boxes.map(box => <button key={box.id} type="button" aria-pressed={selectedId === box.id} onClick={() => setSelectedId(box.id)} className={`rounded-2xl border p-3 text-left transition sm:p-4 ${selectedId === box.id ? 'border-cyan-400/70 bg-cyan-400/10 ring-1 ring-cyan-400/20' : 'border-white/10 bg-slate-800/70 hover:border-slate-500'} focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400`}>
-        <span className="flex items-center justify-between gap-1 text-[11px] font-bold uppercase tracking-wide text-slate-300"><span>{BOX_LABELS[box.id] || box.name}</span>{selectedId === box.id && <Check className="h-4 w-4 shrink-0 text-cyan-300" />}</span>
+      <p className="mb-3 text-[11px] text-slate-500">{visibleBoxes.length} visibles · {summary.boxes.length - visibleBoxes.length} ocultas · Puedes consultar cualquiera desde «Todas las cajas».</p>
+      {!visibleBoxes.length && <button type="button" className={`${buttonClass} mb-4 w-full`} onClick={openCatalog}>Todas las cajas están ocultas. Abrir catálogo</button>}
+      <div className="mb-4 grid grid-cols-2 gap-2 lg:grid-cols-4">{visibleBoxes.map(box => <button key={box.id} type="button" aria-pressed={selectedId === box.id} onClick={() => selectBox(box)} className={`rounded-2xl border p-3 text-left transition sm:p-4 ${selectedId === box.id ? 'border-cyan-400/70 bg-cyan-400/10 ring-1 ring-cyan-400/20' : 'border-white/10 bg-slate-800/70 hover:border-slate-500'} focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-400`}>
+        <span className="flex items-center justify-between gap-1 text-[11px] font-bold uppercase tracking-wide text-slate-300"><span>{boxLabel(box)}</span>{selectedId === box.id && <Check className="h-4 w-4 shrink-0 text-cyan-300" />}</span>
         <span className="mt-2 block whitespace-nowrap text-xl font-black tabular-nums text-white sm:text-2xl">{money(box.balanceCents)}</span><span className="mt-1 block text-[10px] text-slate-400 sm:text-xs">Últ. movimiento: {dayLabel(box.lastMovementDate || '')}</span>
       </button>)}</div>
       <div className="overflow-hidden rounded-2xl border border-slate-600/60 bg-slate-900 shadow-xl shadow-slate-950/20">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-slate-800/60 px-4 py-3 sm:px-5"><div><h3 className="font-bold text-white">Movimientos · {selectedName}</h3><p className="mt-1 text-[11px] text-slate-400">{selected?.name}</p></div><p className={`text-[11px] ${stale ? 'text-amber-300' : 'text-slate-400'}`}><span className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${stale ? 'bg-amber-400' : 'bg-emerald-400'}`} />{stale ? 'Sincronización atrasada · ' : 'Corte sincronizado · '}{summary.collectedAt && dateTime(summary.collectedAt)}</p></div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 bg-slate-800/60 px-4 py-3 sm:px-5"><div><h3 className="font-bold text-white">Movimientos · {selectedName}</h3><p className="mt-1 text-[11px] text-slate-400">{selected?.name}{!visibleIds.includes(selectedId) ? ' · Consulta de caja oculta' : ''}</p></div><p className={`text-[11px] ${stale ? 'text-amber-300' : 'text-slate-400'}`}><span className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${stale ? 'bg-amber-400' : 'bg-emerald-400'}`} />{stale ? 'Sincronización atrasada · ' : 'Corte sincronizado · '}{summary.collectedAt && dateTime(summary.collectedAt)}</p></div>
         {stale && <p role="status" className="border-b border-amber-400/20 bg-amber-400/10 px-4 py-2 text-xs text-amber-200">Los saldos corresponden al último corte recibido. La sincronización local con Perseo se realiza cada 15 minutos.</p>}
         <form className="border-b border-white/10 p-4 sm:px-5" onSubmit={event => { event.preventDefault(); applyRange(draftRange); }}>
           <div className="flex flex-wrap items-end gap-3">
@@ -232,6 +264,18 @@ export function PerseoCashboxes() {
       </div>
     </>}
     {menu && ledger && <ColumnMenu key={`${menu.column}-${selectedId}`} column={menu.column} rows={ledger.movements} initial={filters[menu.column]} position={{ left: menu.left, top: menu.top }} onApply={value => setFilters(previous => ({ ...previous, [menu.column]: value }))} onSort={direction => setSort({ column: menu.column, direction })} onClose={closeMenu} />}
+    {catalogOpen && <div className="fixed inset-0 z-[185] flex items-end justify-center bg-slate-950/80 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={event => { if (event.target === event.currentTarget) setCatalogOpen(false); }} onKeyDown={event => { keepDialogFocus(event); if (event.key === 'Escape') setCatalogOpen(false); }}>
+      <div role="dialog" aria-modal="true" aria-label="Todas las cajas activas de Perseo" className="flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-t-2xl border border-white/10 bg-slate-900 sm:rounded-2xl">
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 p-4"><div><h3 className="font-bold text-white">Todas las cajas activas ({summary?.boxes.length || 0})</h3><p className="mt-1 text-xs text-slate-400">Marca las que quieres mostrar. «Consultar» abre el historial de cualquier caja.</p></div><button type="button" className={buttonClass} onClick={() => setCatalogOpen(false)} aria-label="Cerrar catálogo de cajas"><X className="h-4 w-4" /></button></div>
+        <div className="shrink-0 p-4"><input autoFocus className={inputClass} placeholder="Buscar caja por nombre o número…" aria-label="Buscar caja activa" value={catalogSearch} onChange={event => setCatalogSearch(event.target.value)} /></div>
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 pb-4">{catalogBoxes.map(box => <div key={box.id} className="flex items-center gap-3 rounded-xl border border-white/10 bg-slate-800/60 p-3">
+          <input type="checkbox" aria-label={`Mostrar ${boxLabel(box)}`} checked={catalogDraft.includes(box.id)} onChange={event => setCatalogDraft(previous => event.target.checked ? [...previous, box.id] : previous.filter(id => id !== box.id))} className="h-5 w-5 shrink-0 accent-cyan-400" />
+          <div className="min-w-0 flex-1"><p className="text-xs font-semibold text-slate-100">{box.id} · {boxLabel(box)}</p><p className="mt-1 text-sm font-bold tabular-nums text-cyan-200">{money(box.balanceCents)}</p><p className="mt-1 text-[10px] text-slate-500">{catalogDraft.includes(box.id) ? 'Visible en el panel' : 'Oculta del panel'} · Últ. mov. {dayLabel(box.lastMovementDate || '')}</p></div>
+          <button type="button" className={buttonClass} aria-label={`Consultar ${boxLabel(box)}`} onClick={() => selectBox(box)}>Consultar<ChevronRight className="h-3 w-3" /></button>
+        </div>)}{!catalogBoxes.length && <p className="py-6 text-center text-sm text-slate-400">No hay cajas que coincidan.</p>}</div>
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-white/10 p-4"><button type="button" className={buttonClass} onClick={() => setCatalogDraft([1, 2, 3, 12].filter(id => summary?.boxes.some(box => box.id === id)))}>Solo principales</button><button type="button" disabled={savingVisibility} onClick={() => void saveVisibility()} className="min-h-11 rounded-xl bg-cyan-400 px-4 text-xs font-bold text-slate-950 disabled:opacity-50">{savingVisibility ? 'Guardando…' : `Guardar visibilidad (${catalogDraft.length})`}</button></div>
+      </div>
+    </div>}
     {detail && <div className="fixed inset-0 z-[180] flex items-end justify-center bg-slate-950/80 p-0 backdrop-blur-sm sm:items-center sm:p-4" onClick={event => { if (event.target === event.currentTarget) setDetail(null); }} onKeyDown={event => { keepDialogFocus(event); if (event.key === 'Escape') setDetail(null); }}>
       <div role="dialog" aria-modal="true" aria-label="Detalle del movimiento de Perseo" className="max-h-[90dvh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-white/10 bg-slate-900 p-5 sm:rounded-2xl"><div className="mb-5 flex items-start justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-widest text-cyan-300">{selectedName}</p><h4 className="mt-1 text-lg font-bold text-white">Movimiento #{detail.id}</h4></div><button autoFocus type="button" className={buttonClass} onClick={() => setDetail(null)} aria-label="Cerrar detalle del movimiento"><X className="h-4 w-4" /></button></div>
         <p className="mb-5 break-words text-sm font-medium text-slate-200">{detail.description || 'Sin concepto'}</p><dl className="grid grid-cols-2 gap-4 text-xs">{[['Fecha del movimiento', dayLabel(detail.date)], ['Fecha de registro', detail.recordedAt || 'No disponible'], ['Comprobante', detail.reference || 'Sin comprobante'], ['Tipo', cashboxType(detail.type)], ['Importe', money(detail.amountCents)], ['Saldo tras el movimiento', money(detail.balanceCents)]].map(([label, value]) => <div key={label}><dt className="text-slate-500">{label}</dt><dd className="mt-1 break-words font-semibold text-slate-100">{value}</dd></div>)}</dl>
