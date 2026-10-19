@@ -55,19 +55,19 @@ function ColumnMenu({ column, rows, initial, position, onApply, onSort, onClose 
   const selected = values ?? options;
   return createPortal(<div className="fixed inset-0 z-[190]" onKeyDown={event => { keepDialogFocus(event); if (event.key === 'Escape') { event.stopPropagation(); onClose(); } }}>
     <div className="absolute inset-0 bg-slate-950/35 sm:bg-transparent" onClick={onClose} />
-    <div role="dialog" aria-modal="true" aria-label={`Filtrar ${title}`} style={position} className="absolute flex max-h-[calc(100dvh-24px)] w-[min(320px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-slate-600 bg-slate-900 text-left shadow-2xl">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2"><h4 className="text-sm font-bold text-white">{title}</h4><button type="button" className="h-9 w-9 rounded-lg text-slate-400 hover:bg-white/10" onClick={onClose} aria-label="Cerrar filtro"><X className="mx-auto h-4 w-4" /></button></div>
-      <div className="grid grid-cols-2 gap-2 border-b border-white/10 p-3">
+    <div role="dialog" aria-modal="true" aria-label={`Filtrar ${title}`} style={{ ...position, maxHeight: `calc(100dvh - ${position.top + 12}px)` }} className="absolute flex w-[min(320px,calc(100vw-24px))] flex-col overflow-hidden rounded-2xl border border-slate-600 bg-slate-900 text-left shadow-2xl">
+      <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-2"><h4 className="text-sm font-bold text-white">{title}</h4><button type="button" className="h-9 w-9 rounded-lg text-slate-400 hover:bg-white/10" onClick={onClose} aria-label="Cerrar filtro"><X className="mx-auto h-4 w-4" /></button></div>
+      <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-white/10 p-3">
         <button type="button" className={buttonClass} onClick={() => { onSort('asc'); onClose(); }}><ArrowUp className="h-4 w-4" /> Ascendente</button>
         <button type="button" className={buttonClass} onClick={() => { onSort('desc'); onClose(); }}><ArrowDown className="h-4 w-4" /> Descendente</button>
       </div>
-      {isCashboxNumericColumn(column) && <div className="grid grid-cols-2 gap-2 px-3 pt-3">
+      {isCashboxNumericColumn(column) && <div className="grid shrink-0 grid-cols-2 gap-2 px-3 pt-3">
         <label className="text-xs text-slate-400">Mínimo ($)<input className={`${inputClass} mt-1`} inputMode="decimal" value={min} onChange={event => setMin(event.target.value)} /></label>
         <label className="text-xs text-slate-400">Máximo ($)<input className={`${inputClass} mt-1`} inputMode="decimal" value={max} onChange={event => setMax(event.target.value)} /></label>
       </div>}
-      <div className="p-3"><input autoFocus className={inputClass} placeholder="Buscar valores…" aria-label={`Buscar valores de ${title}`} value={query} onChange={event => setQuery(event.target.value)} /></div>
-      <div className="flex gap-3 px-3 pb-2 text-xs"><button type="button" className="min-h-8 text-cyan-300" onClick={() => setValues(query ? [...new Set([...selected, ...matching])] : undefined)}>Seleccionar {query ? 'visibles' : 'todo'}</button><button type="button" className="min-h-8 text-slate-400" onClick={() => setValues([])}>Desmarcar todo</button><span className="ml-auto self-center text-slate-500">{selected.length}/{options.length}</span></div>
-      <div className="min-h-20 max-h-52 overflow-y-auto border-y border-white/5 px-2 py-1">
+      <div className="shrink-0 p-3"><input autoFocus className={inputClass} placeholder="Buscar valores…" aria-label={`Buscar valores de ${title}`} value={query} onChange={event => setQuery(event.target.value)} /></div>
+      <div className="flex shrink-0 gap-3 px-3 pb-2 text-xs"><button type="button" className="min-h-8 text-cyan-300" onClick={() => setValues(query ? [...new Set([...selected, ...matching])] : undefined)}>Seleccionar {query ? 'visibles' : 'todo'}</button><button type="button" className="min-h-8 text-slate-400" onClick={() => setValues([])}>Desmarcar todo</button><span className="ml-auto self-center text-slate-500">{selected.length}/{options.length}</span></div>
+      <div className="min-h-0 max-h-52 flex-1 overflow-y-auto border-y border-white/5 px-2 py-1">
         {matching.slice(0, 200).map(value => <label key={value} className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg px-2 text-sm text-slate-200 hover:bg-white/5">
           <input type="checkbox" className="h-4 w-4 shrink-0 accent-cyan-400" checked={selected.includes(value)} onChange={event => setValues(event.target.checked ? [...selected, value] : selected.filter(item => item !== value))} />
           <span className="truncate" title={label(value)}>{label(value)}</span>
@@ -75,7 +75,7 @@ function ColumnMenu({ column, rows, initial, position, onApply, onSort, onClose 
         {!matching.length && <p className="p-3 text-xs text-slate-400">Sin valores coincidentes.</p>}
         {matching.length > 200 && <p className="p-3 text-xs text-amber-200">Hay {matching.length} valores. Escribe para encontrar uno específico.</p>}
       </div>
-      <div className="flex justify-between gap-2 p-3"><button type="button" className={buttonClass} onClick={() => { onApply({}); onClose(); }}>Quitar filtro</button><button type="button" className="min-h-11 rounded-xl bg-cyan-400 px-5 text-sm font-bold text-slate-950 hover:bg-cyan-300" onClick={() => { onApply({ values: values?.length === options.length ? undefined : values, min, max }); onClose(); }}>Aplicar</button></div>
+      <div className="flex shrink-0 justify-between gap-2 p-3"><button type="button" className={buttonClass} onClick={() => { onApply({}); onClose(); }}>Quitar filtro</button><button type="button" className="min-h-11 rounded-xl bg-cyan-400 px-5 text-sm font-bold text-slate-950 hover:bg-cyan-300" onClick={() => { onApply({ values: values?.length === options.length ? undefined : values, min, max }); onClose(); }}>Aplicar</button></div>
     </div>
   </div>, document.body);
 }
